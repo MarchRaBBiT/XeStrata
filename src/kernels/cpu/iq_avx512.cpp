@@ -11,6 +11,7 @@
 // Formats: IQ2_XXS (16), IQ2_XS (17), IQ3_XXS (18), IQ3_S (21), IQ2_S (22).  IQ1_M stays on ggml-cpu (no shipped
 // model has IQ1_M expert rows: the 'Coder IQ1_M' pack's gate/up are IQ2_S / IQ3_XXS / IQ3_S).
 #include "strata/kernels/cpu/iq_avx512.hpp"
+#include "strata/kernels/swiglu_clamp.hpp"
 
 #define GGML_COMMON_DECL_CPP
 #define GGML_COMMON_IMPL_CPP
@@ -194,10 +195,11 @@ void gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const voi
     for (int t = 0; t < NT; ++t) y[t] = (const block_q8_K*) act[t];
     const int nb = n / QK_K;
     float g[NT], u[NT];
+    const float lim = expert_swiglu_limit();
     for (int r = r0; r < r1; ++r) {
         row_dot<TY, NT>(blob + (size_t) r * gu_row, nb, y, g);
         row_dot<TY, NT>(blob + up_off + (size_t) r * gu_row, nb, y, u);
-        for (int t = 0; t < NT; ++t) ff[t][r] = (g[t] / (1.f + std::exp(-g[t]))) * u[t];
+        for (int t = 0; t < NT; ++t) ff[t][r] = swiglu_host(g[t], u[t], lim);
     }
 }
 

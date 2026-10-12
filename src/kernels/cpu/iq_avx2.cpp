@@ -28,6 +28,7 @@
 // initializer at namespace scope (#391, 016ea2e), the switches are read on first use.
 #include "strata/kernels/cpu/iq_avx2.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
+#include "strata/kernels/swiglu_clamp.hpp"
 
 #define GGML_COMMON_DECL_CPP
 #define GGML_COMMON_IMPL_CPP

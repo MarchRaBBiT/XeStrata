@@ -438,10 +438,11 @@ void gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const voi
     for (int t = 0; t < NT; ++t) y[t] = (const block_q8_K*) act[t];
     const int nb = n / QK_K;
     float g[NT], u[NT];
+    const float lim = expert_swiglu_limit();
     for (int r = r0; r < r1; ++r) {
         row_dot_any<TY, NT>(blob + (size_t) r * gu_row, nb, y, g);
         row_dot_any<TY, NT>(blob + up_off + (size_t) r * gu_row, nb, y, u);
-        for (int t = 0; t < NT; ++t) ff[t][r] = (g[t] / (1.f + std::exp(-g[t]))) * u[t];
+        for (int t = 0; t < NT; ++t) ff[t][r] = swiglu_host(g[t], u[t], lim);
     }
 }
 
@@ -716,10 +717,11 @@ template <int NT> STRATA_ROWS_FN
 void q80_gu(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const block_q8_0* const* y, float* const* ff,
             int r0, int r1) {
     float g[NT], u[NT];
+    const float lim = expert_swiglu_limit();
     for (int r = r0; r < r1; ++r) {
         q80_row<NT>(blob + (size_t) r * gu_row, n / QK8_0, y, g);
         q80_row<NT>(blob + up_off + (size_t) r * gu_row, n / QK8_0, y, u);
-        for (int t = 0; t < NT; ++t) ff[t][r] = (g[t] / (1.f + std::exp(-g[t]))) * u[t];
+        for (int t = 0; t < NT; ++t) ff[t][r] = swiglu_host(g[t], u[t], lim);
     }
 }
 

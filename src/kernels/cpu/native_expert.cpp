@@ -10,6 +10,7 @@
 #include "strata/kernels/cpu/iq_avx512.hpp"
 #include "strata/kernels/cpu/iq_avx2.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
+#include "strata/kernels/swiglu_clamp.hpp"
 
 #include "ggml.h"
 #include "ggml-cpu.h"
@@ -234,8 +235,9 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
         const int mt = native_gu_mt_min(f.gu_type);
         part_rows(f.gu_type, blob, f.gu_row, (int) f.n_embd, act, nt, ff, r0, r1, mt);
         part_rows(f.up_type, blob + f.up_off, f.up_row, (int) f.n_embd, act, nt, up, r0, r1, mt);
+        const float lim = expert_swiglu_limit();
         for (int t = 0; t < nt; ++t)
-            for (int r = r0; r < r1; ++r) ff[t][r] = (ff[t][r] / (1.f + std::exp(-ff[t][r]))) * up[t][r];
+            for (int r = r0; r < r1; ++r) ff[t][r] = swiglu_host(ff[t][r], up[t][r], lim);
         return;
     }
     // the multi-token kernels decode the weights once for all tokens: 2.0-2.4x ggml-cpu at three tokens, no faster
@@ -267,6 +269,7 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
     }
     const ggml_vec_dot_t dot = traits(f.gu_type)->vec_dot;
     const int n = (int) f.n_embd;
+    const float lim = expert_swiglu_limit();
     for (int r = r0; r < r1; ++r) {
         const uint8_t* gr = blob + (size_t) r * f.gu_row;
         const uint8_t* ur = blob + f.up_off + (size_t) r * f.gu_row;
@@ -274,7 +277,7 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
             float g = 0.f, u = 0.f;
             dot(n, &g, 0, gr, 0, act[t], 0, 1);
             dot(n, &u, 0, ur, 0, act[t], 0, 1);
-            ff[t][r] = (g / (1.f + std::exp(-g))) * u;
+            ff[t][r] = swiglu_host(g, u, lim);
         }
     }
 }

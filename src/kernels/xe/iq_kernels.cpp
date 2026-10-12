@@ -33,6 +33,7 @@
 //
 #include "strata/kernels/canon_math.hpp"
 #include "strata/kernels/iq_kernels.hpp"
+#include "strata/kernels/swiglu_clamp.hpp"
 #include "strata/core/per_device.hpp"
 #include "strata/core/runtime.hpp"
 #include "cuda_intrinsics.hpp"
@@ -1080,6 +1081,7 @@ sycl::event launch_native_gu_fused(sycl::queue& q, size_t cap_groups, const unsi
     constexpr int NG = GridOf<TG>::N, RPW = kWarp / LPR, WG = GU_ROWS * kWarp;
     static_assert(kM8Rows % (GU_ROWS * RPW) == 0, "whole passes");
     const int xb = (int) (L.n_embd / 32);
+    const float lim = expert_swiglu_limit();
     return q.submit([&](sycl::handler& h) {
         sycl::local_accessor<GT, 1> sgrid(sycl::range<1>(NG > 0 ? NG : 1), h);
         sycl::local_accessor<float, 1> res(sycl::range<1>((size_t) kEntriesPass * kM8Rows), h);
@@ -1124,8 +1126,11 @@ sycl::event launch_native_gu_fused(sycl::queue& q, size_t cap_groups, const unsi
                 }
                 sycl::group_barrier(it.get_group());
                 if (warp < cn) {   // native_expert_grouped's one-pass SwiGLU + q8_1 on entry c0 + warp's block
-                    // the SwiGLU and the int8 scale of canon_math.hpp, as native_expert_grouped's pass
-                    const float xi = canon::silu_mul(res[warp * kM8Rows + lane], res[warp * kM8Rows + 32 + lane]);
+                    // the SwiGLU (after GLM-5.3-Flash's clamp; none elsewhere) and the int8 scale of canon_math.hpp,
+                    // as native_expert_grouped's pass
+                    float gv = res[warp * kM8Rows + lane], uv = res[warp * kM8Rows + 32 + lane];
+                    swiglu_clamp(gv, uv, lim);
+                    const float xi = canon::silu_mul(gv, uv);
                     const float amax = warp_max(sg, sycl::fabs(xi));
                     const float sum = warp_sum(sg, xi);
                     const float d = canon::q8_scale(amax);
@@ -2046,6 +2051,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
                            int64_t grid_groups) {
     if (cap_groups <= 0 || cap_entries <= 0) return;
     auto& q = queue_for(stream);   // in order: the launches below follow one another
+    const float lim = expert_swiglu_limit();
     // upstream 0bc1594: the gate/up and down grids take grid_groups rows of groups (each striding over the groups) and
     // SwiGLU + q8_1 run as one pass over the call's own entries; STRATA_GROUPED_V1=1: a row per possible group and the
     // two passes over every entry (A/B; the same bits)
@@ -2113,7 +2119,11 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     }
     const long long nh = (long long) cap_entries * L.n_ff;
     if (v1) {
-        q.parallel_for(sycl::range<1>((size_t) nh), [=](sycl::id<1> i) { h[i] = canon::silu_mul(gate[i], up[i]); });
+        q.parallel_for(sycl::range<1>((size_t) nh), [=](sycl::id<1> i) {
+            float g = gate[i], u = up[i];
+            swiglu_clamp(g, u, lim);
+            h[i] = canon::silu_mul(g, u);
+        });
         launch_quantize_q8_1_canon(q, h, hq, nh);
     } else {
         // SwiGLU into q8_1 in one pass over [grp_start[0], grp_start[n]): the product rounded to FP32 on its own, as
@@ -2126,8 +2136,11 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
             const long long e = i / n_ff;
             if (e < grp_start[0] || e >= grp_start[*n_groups]) return;
             const sycl::sub_group sg = it.get_sub_group();
-            // the SwiGLU and the int8 scale of canon_math.hpp: the CPU's rows of the same expert are the same bits
-            const float xi = canon::silu_mul(gate[i], up[i]);
+            // the SwiGLU (after GLM-5.3-Flash's clamp; none elsewhere) and the int8 scale of canon_math.hpp: the CPU's
+            // rows of the same expert are the same bits
+            float g = gate[i], u = up[i];
+            swiglu_clamp(g, u, lim);
+            const float xi = canon::silu_mul(g, u);
             const float amax = warp_max(sg, sycl::fabs(xi));
             const float sum = warp_sum(sg, xi);
             const float d = canon::q8_scale(amax);
@@ -2186,6 +2199,7 @@ void native_expert_grouped_bf16(const NativeExpertLayout& L, const unsigned long
     if (cap_groups <= 0 || cap_entries <= 0) return;
     if (L.gu_type != 30 || L.d_type != 30) throw core::DeviceError("native_expert_grouped_bf16: not a BF16 expert");
     auto& q = queue_for(stream);
+    const float lim = expert_swiglu_limit();
     const size_t f = (size_t) cap_entries * (size_t) L.n_ff * sizeof(float), fa = (f + 255) & ~(size_t) 255;
     float* gate = (float*) scratch;
     float* up = reinterpret_cast<float*>(static_cast<uint8_t*>(scratch) + fa);
@@ -2221,8 +2235,9 @@ void native_expert_grouped_bf16(const NativeExpertLayout& L, const unsigned long
     q.parallel_for(sycl::range<1>((size_t) nh), [=](sycl::id<1> id) {
         const int64_t i = (int64_t) id[0], e = i / FF;
         if (e < grp_start[0] || e >= grp_start[*n_groups]) return;
-        const float g = gate[i];
-        h[i] = (g / (1.0f + sycl::exp(-g))) * up[i];
+        float g = gate[i], u = up[i];
+        swiglu_clamp(g, u, lim);
+        h[i] = (g / (1.0f + sycl::exp(-g))) * u;
     });
     // down: row r of the output for each entry, written to row ent_dst[e]
     const sycl::event e = q.parallel_for(
