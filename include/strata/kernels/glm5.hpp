@@ -25,6 +25,13 @@ namespace strata::kernels {
 void glm5_hc_pre(const float* x, const float* mixes, const float* scale, const float* base, float rms_eps, float hc_eps,
                  int iters, float* y, float* post, float* comb, int64_t n_embd, int64_t n_tokens, void* stream);
 
+/// The streams before the first block: every stream the token's embedding, hs[t][s] = x[t] (llama.cpp's hc_init).
+void glm5_hc_init(const float* x, float* hs, int64_t n_embd, int64_t n_tokens, void* stream);
+
+/// dst[b][a][d] = src[a][b][d] for A x B blocks of D floats: [token][head][dim] to [head][token][dim] and back, so a
+/// head's rows of every token lie together for its own matrix (the MLA's wk_b and wv_b).
+void glm5_transpose_abd(const float* src, float* dst, int64_t a, int64_t b, int64_t d, void* stream);
+
 /// The mHC streams' write after a block (llama.cpp's build_hc_post): out[t][d] = f[t] post[t][d] + sum_s
 /// residual[t][s] comb[t][d + 4 s].  `out` may be `residual` (each element's four streams are read before written).
 void glm5_hc_post(const float* f, const float* residual, const float* post, const float* comb, float* out,

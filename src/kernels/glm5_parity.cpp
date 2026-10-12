@@ -150,6 +150,31 @@ int test_hc() {
     strata::parity::copy_out(out.data(), dr, out.size());
     bad += compare("hc_post in place", out, rout, 1e-5);
 
+    // the streams' start and the axis swap
+    {
+        std::vector<float> e = randn((size_t) (T * N));
+        std::vector<double> rinit((size_t) (T * HC * N));
+        for (int64_t t = 0; t < T; ++t)
+            for (int s2 = 0; s2 < HC; ++s2)
+                for (int64_t n = 0; n < N; ++n) rinit[(size_t) ((t * HC + s2) * N + n)] = e[(size_t) (t * N + n)];
+        float *de = dev.upload(e), *dhs = dev.alloc<float>(rinit.size());
+        strata::kernels::glm5_hc_init(de, dhs, N, T, nullptr);
+        std::vector<float> hs(rinit.size());
+        strata::parity::copy_out(hs.data(), dhs, hs.size());
+        bad += compare("hc_init", hs, rinit, 0.0);
+        const int64_t A = 3, B = 5, D = 7;
+        std::vector<float> src = randn((size_t) (A * B * D));
+        std::vector<double> rt((size_t) (A * B * D));
+        for (int64_t i = 0; i < A; ++i)
+            for (int64_t j = 0; j < B; ++j)
+                for (int64_t k = 0; k < D; ++k) rt[(size_t) ((j * A + i) * D + k)] = src[(size_t) ((i * B + j) * D + k)];
+        float *dsrc = dev.upload(src), *ddst = dev.alloc<float>(src.size());
+        strata::kernels::glm5_transpose_abd(dsrc, ddst, A, B, D, nullptr);
+        std::vector<float> tr(src.size());
+        strata::parity::copy_out(tr.data(), ddst, tr.size());
+        bad += compare("transpose_abd", tr, rt, 0.0);
+    }
+
     std::vector<double> rmean((size_t) (T * N));
     for (int64_t t = 0; t < T; ++t)
         for (int64_t n = 0; n < N; ++n) {

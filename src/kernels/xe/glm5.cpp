@@ -109,6 +109,25 @@ void glm5_hc_pre(const float* x, const float* mixes, const float* scale, const f
     sync_if_needed(stream, event, "glm5_hc_pre");
 }
 
+void glm5_hc_init(const float* x, float* hs, int64_t n_embd, int64_t n_tokens, void* stream) {
+    if (n_tokens <= 0 || n_embd <= 0) return;
+    const int64_t N = n_embd;
+    const auto event = queue_for(stream).parallel_for(sycl::range<1>((size_t) (n_tokens * HC * N)), [=](sycl::id<1> id) {
+        const int64_t i = (int64_t) id[0], t = i / (HC * N), n = i % N;
+        hs[i] = x[t * N + n];
+    });
+    sync_if_needed(stream, event, "glm5_hc_init");
+}
+
+void glm5_transpose_abd(const float* src, float* dst, int64_t a, int64_t b, int64_t d, void* stream) {
+    if (a <= 0 || b <= 0 || d <= 0) return;
+    const auto event = queue_for(stream).parallel_for(sycl::range<1>((size_t) (a * b * d)), [=](sycl::id<1> id) {
+        const int64_t i = (int64_t) id[0], ia = i / (b * d), ib = (i / d) % b, k = i % d;
+        dst[(ib * a + ia) * d + k] = src[i];
+    });
+    sync_if_needed(stream, event, "glm5_transpose_abd");
+}
+
 void glm5_hc_post(const float* f, const float* residual, const float* post, const float* comb, float* out,
                   int64_t n_embd, int64_t n_tokens, void* stream) {
     if (n_tokens <= 0 || n_embd <= 0) return;
