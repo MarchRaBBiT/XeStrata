@@ -52,6 +52,44 @@ void glm5_kda_gate(const float* f, const float* dt_bias, const float* ssm_a, flo
 void glm5_kda_step(float* state, const float* q, const float* k, const float* v, const float* g, const float* beta,
                    float* out, int64_t n_heads, void* stream);
 
+// ---- the DSA layers: the k-pool indexer and the MLA attention over its selection.  Cells are sequence positions
+// from 0 (the step records' kStepPos, qsa.hpp); a pool is the `kpool` cells [kpool m, kpool m + kpool), and a token at
+// position p sees the pools that end at or before it, (p + 1) / kpool of them: the cells of an unfinished pool are not
+// attended (GLM-5.3-Flash writes no indexer.kpool_select_tail).
+
+/// The selection's step records from the window's (qsa.hpp's layout): kStepPos copied, kStepNBid = (pos + 1) / kpool
+/// complete pools, kStepNKv = kpool times that (so the unfinished pool weighs no cell in qsa_block_topk), and
+/// kStepWidth = min(kStepNKv, top_k).  steps_in, steps_out [T][kStepCount].
+void glm5_idx_steps(const int32_t* steps_in, int64_t n_tokens, int kpool, int top_k, int32_t* steps_out, void* stream);
+
+/// The indexer's key and pool gate of each token into the cache rows of its cell: key = LayerNorm(k_raw) w + b (eps
+/// `ln_eps`), gate = g_raw.  k_raw, g_raw [T][D]; cache [cells][2 D] = key | gate, row steps[t][kStepPos].  D = 128.
+void glm5_idx_append(const float* k_raw, const float* g_raw, const float* ln_w, const float* ln_b, float ln_eps,
+                     const int32_t* steps, int64_t n_tokens, float* cache, void* stream);
+
+/// The pooled key of every pool a token of the window completes ((pos + 1) % kpool == 0): pooled[m][c] =
+/// sum_j softmax_j(gate[kpool m + j][c] + ape[j][c]) key[kpool m + j][c].  ape [kpool][D] (GGUF ne0 = D);
+/// pooled [pools][D].  D = 128.
+void glm5_idx_pool(const float* cache, const float* ape, int kpool, const int32_t* steps, int64_t n_tokens,
+                   float* pooled, void* stream);
+
+/// The pools' scores for each token: score[t][b] = sum_h relu(q[t][h] . pooled[b]) w[t][h] for b below the token's
+/// kStepNBid (glm5_idx_steps), 0 at b = kStepNBid.  q [T][H][D] (indexer_attn_q_b applied to the normed q_a), w [T][H]
+/// (indexer_proj applied to the block input and scaled by 1/sqrt(D H)).  scores [T][max_blocks].  D = 128.
+void glm5_idx_scores(const float* pooled, const float* q, const float* w, int n_heads, const int32_t* steps,
+                     int64_t n_tokens, int64_t max_blocks, float* scores, void* stream);
+
+/// The MLA latent of each token into its cell's FP16 row: latent [cells][L] from kv [T][L] (L = kv_lora_rank).
+void glm5_latent_store(const float* kv, const int32_t* steps, int64_t n_tokens, int64_t rank, uint16_t* latent,
+                       void* stream);
+
+/// The absorbed MLA attention over each token's selection: for head h, p_j = softmax_j(q[t][h] . latent[c_j] scale),
+/// out[t][h] = sum_j p_j latent[c_j], over the steps[t][kStepWidth] cells ids[t][0 ..) (qsa_block_topk's output, cap
+/// apart).  A token with no cell selected gets zeros.  q, out [T][H][L] (q already through wk_b); latent [cells][L]
+/// FP16.  L = 512.
+void glm5_mla_attn(const float* q, const uint16_t* latent, const int32_t* ids, int64_t cap, const int32_t* steps,
+                   int n_heads, float scale, int64_t n_tokens, float* out, void* stream);
+
 /// GLM's clamped SwiGLU (ggml_swiglu_clamp): out = silu(min(gate, limit)) clamp(up, -limit, limit), n values.
 /// `out` may be `gate` or `up`.
 void glm5_swiglu_clamp(const float* gate, const float* up, float* out, int64_t n, float limit, void* stream);

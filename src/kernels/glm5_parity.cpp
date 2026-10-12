@@ -6,6 +6,9 @@
 // third_party/main/ggml/LICENSE): the mHC read, write and mean, the sigmoid router, the KDA gate and step, the clamped
 // SwiGLU.  The references are in double where ggml sums in float, so the tolerances are those of float rounding.
 #include "strata/kernels/glm5.hpp"
+#include "strata/kernels/f16_bits.hpp"
+#include "strata/kernels/qsa.hpp"
+#include "strata/kernels/qsa_select.hpp"
 
 #include "parity_device.hpp"
 
@@ -267,6 +270,148 @@ int test_kda() {
     return bad;
 }
 
+// ---- the DSA layer: the k-pool indexer (append, pools, scores), the selection (qsa_block_topk), the MLA attention
+int test_dsa() {
+    using namespace strata::kernels;
+    const int D = 128, KP = 4, IH = 32, P = 53, TOPK = 24;   // 53 cells: 13 pools and one unfinished
+    const int L = 512, H = 4;
+    const float ln_eps = 1e-6f;
+    std::vector<float> kraw = randn((size_t) P * D), graw = randn((size_t) P * D), lw = randn(D, 0.3f), lb = randn(D, 0.1f),
+                       ape = randn((size_t) KP * D, 0.5f);
+    for (auto& x : lw) x += 1.0f;
+    std::vector<int32_t> steps_in((size_t) P * kStepCount, 0);
+    for (int t = 0; t < P; ++t) steps_in[(size_t) t * kStepCount + kStepPos] = t;
+
+    strata::parity::Device dev;
+    int32_t *dsi = dev.upload(steps_in), *dso = dev.alloc<int32_t>(steps_in.size());
+    glm5_idx_steps(dsi, P, KP, TOPK, dso, nullptr);
+    float *dk = dev.upload(kraw), *dg = dev.upload(graw), *dlw = dev.upload(lw), *dlb = dev.upload(lb),
+          *dape = dev.upload(ape), *dcache = dev.alloc<float>((size_t) P * 2 * D), *dpool = dev.alloc<float>((size_t) (P / KP + 1) * D);
+    glm5_idx_append(dk, dg, dlw, dlb, ln_eps, dso, P, dcache, nullptr);
+    glm5_idx_pool(dcache, dape, KP, dso, P, dpool, nullptr);
+
+    // the host: keys, pools
+    std::vector<double> key((size_t) P * D);
+    for (int t = 0; t < P; ++t) {
+        double mean = 0, var = 0;
+        for (int c = 0; c < D; ++c) mean += kraw[(size_t) (t * D + c)];
+        mean /= D;
+        for (int c = 0; c < D; ++c) var += (kraw[(size_t) (t * D + c)] - mean) * (kraw[(size_t) (t * D + c)] - mean);
+        var /= D;
+        for (int c = 0; c < D; ++c)
+            key[(size_t) (t * D + c)] = (kraw[(size_t) (t * D + c)] - mean) / std::sqrt(var + ln_eps) * lw[(size_t) c] + lb[(size_t) c];
+    }
+    const int NP = P / KP;
+    std::vector<double> pooled((size_t) NP * D);
+    for (int m = 0; m < NP; ++m)
+        for (int c = 0; c < D; ++c) {
+            double l[KP], mx = -INFINITY, sum = 0, acc = 0;
+            for (int j = 0; j < KP; ++j) {
+                l[j] = graw[(size_t) ((m * KP + j) * D + c)] + ape[(size_t) (j * D + c)];
+                mx = std::max(mx, l[j]);
+            }
+            for (int j = 0; j < KP; ++j) sum += (l[j] = std::exp(l[j] - mx));
+            for (int j = 0; j < KP; ++j) acc += l[j] / sum * key[(size_t) ((m * KP + j) * D + c)];
+            pooled[(size_t) (m * D + c)] = acc;
+        }
+    std::vector<float> cache((size_t) P * 2 * D), pool((size_t) NP * D);
+    strata::parity::copy_out(cache.data(), dcache, cache.size());
+    strata::parity::copy_out(pool.data(), dpool, pool.size());
+    std::vector<float> keys_got((size_t) P * D);
+    for (int t = 0; t < P; ++t)
+        for (int c = 0; c < D; ++c) keys_got[(size_t) (t * D + c)] = cache[(size_t) (t * 2 * D + c)];
+    int bad = compare("idx_append keys (LayerNorm)", keys_got, key, 1e-5) + compare("idx_pool (softmax pooling)", pool, pooled, 1e-5);
+
+    // scores and the selection for the last T tokens
+    const int T = 6, MB = P / KP + 1;
+    std::vector<float> q = randn((size_t) T * IH * D), w = randn((size_t) T * IH, 0.05f);
+    float *dq = dev.upload(q), *dw = dev.upload(w), *dsc = dev.alloc<float>((size_t) T * MB);
+    const int32_t* dso_tail = dso + (size_t) (P - T) * kStepCount;
+    glm5_idx_scores(dpool, dq, dw, IH, dso_tail, T, MB, dsc, nullptr);
+    std::vector<float> sc((size_t) T * MB);
+    strata::parity::copy_out(sc.data(), dsc, sc.size());
+    std::vector<float> scg;
+    std::vector<double> scw;
+    for (int t = 0; t < T; ++t) {
+        const int pos = P - T + t, nb = (pos + 1) / KP;
+        for (int b = 0; b < nb; ++b) {
+            double s = 0;
+            for (int h = 0; h < IH; ++h) {
+                double d = 0;
+                for (int c = 0; c < D; ++c) d += (double) q[(size_t) ((t * IH + h) * D + c)] * pool[(size_t) (b * D + c)];
+                s += std::max(d, 0.0) * w[(size_t) (t * IH + h)];
+            }
+            scg.push_back(sc[(size_t) (t * MB + b)]);
+            scw.push_back(s);
+        }
+    }
+    bad += compare("idx_scores (32 heads, weighted)", scg, scw, 1e-4);
+
+    QsaShapes qs;
+    qs.idx_block = KP;
+    qs.idx_top_k = 2048;
+    const int64_t cap = qsa_selection_width(kTopkMaxCells, qs);
+    int32_t* dids = dev.alloc<int32_t>((size_t) T * cap);
+    qsa_block_topk(dsc, dso_tail, T, MB, cap, qs, dids, nullptr);
+    std::vector<int32_t> ids((size_t) T * cap);
+    strata::parity::copy_out(ids.data(), dids, ids.size());
+    long long sel_bad = 0;
+    std::vector<std::vector<int>> rsel(T);
+    for (int t = 0; t < T; ++t) {
+        const int pos = P - T + t, nb = (pos + 1) / KP, n_top = std::min(nb, TOPK / KP);
+        std::vector<int> order(nb);
+        std::iota(order.begin(), order.end(), 0);
+        std::stable_sort(order.begin(), order.end(), [&](int a2, int b2) { return sc[(size_t) (t * MB + a2)] > sc[(size_t) (t * MB + b2)]; });
+        for (int i = 0; i < n_top; ++i)
+            for (int j = 0; j < KP; ++j) rsel[(size_t) t].push_back(order[(size_t) i] * KP + j);
+        std::sort(rsel[(size_t) t].begin(), rsel[(size_t) t].end());
+        for (size_t i = 0; i < rsel[(size_t) t].size(); ++i) sel_bad += ids[(size_t) t * cap + i] != rsel[(size_t) t][i];
+    }
+    std::printf("  %-34s %lld wrong  %s\n", "selection (top 6 of 13 pools)", sel_bad, sel_bad ? "*** FAIL ***" : "ok");
+    bad += sel_bad ? 1 : 0;
+
+    // the MLA attention over the selection
+    std::vector<float> kv = randn((size_t) P * L, 0.5f), qa = randn((size_t) T * H * L, 0.1f);
+    float *dkv = dev.upload(kv), *dqa = dev.upload(qa), *dout = dev.alloc<float>((size_t) T * H * L);
+    uint16_t* dlat = dev.alloc<uint16_t>((size_t) P * L);
+    glm5_latent_store(dkv, dso, P, L, dlat, nullptr);
+    const float scale = 1.0f / std::sqrt(256.0f);
+    glm5_mla_attn(dqa, dlat, dids, cap, dso_tail, H, scale, T, dout, nullptr);
+    std::vector<float> out((size_t) T * H * L);
+    strata::parity::copy_out(out.data(), dout, out.size());
+    std::vector<double> rout((size_t) T * H * L, 0);
+    for (int t = 0; t < T; ++t)
+        for (int h = 0; h < H; ++h) {
+            const auto& cs = rsel[(size_t) t];
+            if (cs.empty()) continue;
+            std::vector<double> sj(cs.size());
+            double mx = -INFINITY, sum = 0;
+            for (size_t j = 0; j < cs.size(); ++j) {
+                double d = 0;
+                for (int l = 0; l < L; ++l)
+                    d += (double) qa[(size_t) ((t * H + h) * L + l)] *
+                         f32_from_f16(f16_from_f32(kv[(size_t) (cs[j] * L + l)]));
+                sj[j] = d * scale;
+                mx = std::max(mx, sj[j]);
+            }
+            for (auto& v : sj) sum += (v = std::exp(v - mx));
+            for (int l = 0; l < L; ++l) {
+                double acc = 0;
+                for (size_t j = 0; j < cs.size(); ++j) acc += sj[j] / sum * f32_from_f16(f16_from_f32(kv[(size_t) (cs[j] * L + l)]));
+                rout[(size_t) ((t * H + h) * L + l)] = acc;
+            }
+        }
+    bad += compare("mla_attn over the selection", out, rout, 1e-4);
+
+    // the first tokens: no complete pool, nothing selected, zeros
+    float* dz = dev.alloc<float>((size_t) H * L);
+    glm5_mla_attn(dqa, dlat, dids, cap, dso, H, scale, 1, dz, nullptr);
+    std::vector<float> z((size_t) H * L);
+    strata::parity::copy_out(z.data(), dz, z.size());
+    bad += compare("mla_attn with no pool yet (zeros)", z, std::vector<double>(z.size(), 0.0), 0.0);
+    return bad;
+}
+
 // ---- the clamped SwiGLU
 int test_swiglu_clamp() {
     const size_t n = 4096;
@@ -296,7 +441,7 @@ int main(int argc, char** argv) {
             return 2;
         }
     std::printf("glm5_parity: GLM-5.3-Flash's kernels against host references\n");
-    const int bad = test_hc() + test_router() + test_kda() + test_swiglu_clamp();
+    const int bad = test_hc() + test_router() + test_kda() + test_dsa() + test_swiglu_clamp();
     std::printf("%s\n", bad ? "FAIL" : "PASS");
     return bad ? 1 : 0;
 }

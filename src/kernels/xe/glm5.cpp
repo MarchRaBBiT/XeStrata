@@ -7,6 +7,8 @@
 // gated_delta_net and swiglu_clamp); MIT License, Copyright (c) 2023-2026 The ggml authors, see
 // third_party/main/ggml/LICENSE.  The KDA step keeps the layout and the sub-group shape of native_gdn.cpp.
 #include "strata/kernels/glm5.hpp"
+#include "strata/kernels/f16_bits.hpp"
+#include "strata/kernels/qsa.hpp"
 #include "strata/core/runtime.hpp"
 #define STRATA_DEVICE_ARCH_TAG_TU xe_glm5
 #include "strata/kernels/device_arch_tag.hpp"
@@ -230,6 +232,171 @@ void glm5_kda_step(float* state, const float* q, const float* k, const float* v,
             for (int r = 0; r < 4; ++r) state[((size_t) (r * WARP + lane) * H + head) * S + col] = s[r];
         });
     sync_if_needed(stream, event, "glm5_kda_step");
+}
+
+void glm5_idx_steps(const int32_t* steps_in, int64_t n_tokens, int kpool, int top_k, int32_t* steps_out, void* stream) {
+    if (n_tokens <= 0) return;
+    if (kpool <= 1 || top_k <= 0) throw core::DeviceError("glm5_idx_steps: kpool above 1 and a positive top_k");
+    const auto event = queue_for(stream).parallel_for(sycl::range<1>((size_t) n_tokens), [=](sycl::id<1> id) {
+        const int64_t t = (int64_t) id[0];
+        const int32_t pos = steps_in[t * kStepCount + kStepPos];
+        const int32_t nb = pos >= 0 ? (pos + 1) / kpool : 0;
+        int32_t* o = steps_out + t * kStepCount;
+        o[kStepPos] = pos;
+        o[kStepNBid] = nb;
+        o[kStepNKv] = nb * kpool;
+        o[kStepWidth] = nb * kpool < top_k ? nb * kpool : top_k;
+    });
+    sync_if_needed(stream, event, "glm5_idx_steps");
+}
+
+void glm5_idx_append(const float* k_raw, const float* g_raw, const float* ln_w, const float* ln_b, float ln_eps,
+                     const int32_t* steps, int64_t n_tokens, float* cache, void* stream) {
+    constexpr int D = 128;
+    if (n_tokens <= 0) return;
+    const auto event = queue_for(stream).parallel_for(
+        sycl::nd_range<1>((size_t) n_tokens * D, D), [=](sycl::nd_item<1> it) {
+            const int64_t t = (int64_t) it.get_group(0);
+            const int c = (int) it.get_local_id(0);
+            const int32_t pos = steps[t * kStepCount + kStepPos];
+            const float x = k_raw[t * D + c];
+            // ggml_norm: the mean, then the variance of the centred values
+            const float mean = sycl::reduce_over_group(it.get_group(), x, sycl::plus<float>()) / (float) D;
+            const float xc = x - mean;
+            const float var = sycl::reduce_over_group(it.get_group(), xc * xc, sycl::plus<float>()) / (float) D;
+            if (pos < 0) return;
+            float* row = cache + (int64_t) pos * 2 * D;
+            row[c] = xc * (1.0f / sycl::sqrt(var + ln_eps)) * ln_w[c] + ln_b[c];
+            row[D + c] = g_raw[t * D + c];
+        });
+    sync_if_needed(stream, event, "glm5_idx_append");
+}
+
+void glm5_idx_pool(const float* cache, const float* ape, int kpool, const int32_t* steps, int64_t n_tokens,
+                   float* pooled, void* stream) {
+    constexpr int D = 128, KMAX = 8;
+    if (n_tokens <= 0) return;
+    if (kpool <= 1 || kpool > KMAX) throw core::DeviceError("glm5_idx_pool: kpool " + std::to_string(kpool));
+    const auto event = queue_for(stream).parallel_for(sycl::range<1>((size_t) n_tokens * D), [=](sycl::id<1> id) {
+        const int64_t t = (int64_t) id[0] / D;
+        const int c = (int) ((int64_t) id[0] % D);
+        const int32_t pos = steps[t * kStepCount + kStepPos];
+        if (pos < 0 || (pos + 1) % kpool != 0) return;   // no pool completes at this token
+        const int64_t m = (pos + 1) / kpool - 1;
+        float l[KMAX], mx = -INFINITY;
+        for (int j = 0; j < kpool; ++j) {
+            l[j] = cache[(m * kpool + j) * 2 * D + D + c] + ape[j * D + c];
+            mx = sycl::fmax(mx, l[j]);
+        }
+        float sum = 0.0f;
+        for (int j = 0; j < kpool; ++j) {
+            l[j] = sycl::exp(l[j] - mx);
+            sum += l[j];
+        }
+        const float inv = 1.0f / sum;
+        float acc = 0.0f;
+        for (int j = 0; j < kpool; ++j) acc += l[j] * inv * cache[(m * kpool + j) * 2 * D + c];
+        pooled[m * D + c] = acc;
+    });
+    sync_if_needed(stream, event, "glm5_idx_pool");
+}
+
+void glm5_idx_scores(const float* pooled, const float* q, const float* w, int n_heads, const int32_t* steps,
+                     int64_t n_tokens, int64_t max_blocks, float* scores, void* stream) {
+    constexpr int D = 128, PER = D / WARP, SG = 8;   // sub-groups (blocks) a work-group
+    if (n_tokens <= 0) return;
+    if (n_heads <= 0 || max_blocks <= 0 || n_tokens > 65535)
+        throw core::DeviceError("glm5_idx_scores: " + std::to_string(n_heads) + " heads, " + std::to_string(max_blocks) +
+                                " blocks, " + std::to_string(n_tokens) + " tokens");
+    const size_t gx = (size_t) ((max_blocks + SG - 1) / SG);
+    const int H = n_heads;
+    const auto event = queue_for(stream).parallel_for(
+        sycl::nd_range<2>({(size_t) n_tokens, gx * SG * WARP}, {1, (size_t) SG * WARP}),
+        [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(WARP)]] {
+            const sycl::sub_group sg = it.get_sub_group();
+            const int64_t t = (int64_t) it.get_group(0);
+            const int64_t b = (int64_t) it.get_group(1) * SG + (int64_t) sg.get_group_linear_id();
+            const int64_t n_bid = steps[t * kStepCount + kStepNBid];
+            if (b > n_bid || b >= max_blocks) return;   // uniform over the sub-group
+            const int lane = (int) sg.get_local_linear_id();
+            float score = 0.0f;
+            if (b < n_bid) {
+                float k[PER];
+                for (int i = 0; i < PER; ++i) k[i] = pooled[b * D + lane * PER + i];
+                for (int h = 0; h < H; ++h) {
+                    const float* qh = q + (t * H + h) * D + lane * PER;
+                    float d = 0.0f;
+                    for (int i = 0; i < PER; ++i) d += qh[i] * k[i];
+                    d = sycl::reduce_over_group(sg, d, sycl::plus<float>());
+                    score += (d > 0.0f ? d : 0.0f) * w[t * H + h];
+                }
+            }
+            if (lane == 0) scores[t * max_blocks + b] = score;
+        });
+    sync_if_needed(stream, event, "glm5_idx_scores");
+}
+
+void glm5_latent_store(const float* kv, const int32_t* steps, int64_t n_tokens, int64_t rank, uint16_t* latent,
+                       void* stream) {
+    if (n_tokens <= 0 || rank <= 0) return;
+    const auto event = queue_for(stream).parallel_for(sycl::range<1>((size_t) (n_tokens * rank)), [=](sycl::id<1> id) {
+        const int64_t t = (int64_t) id[0] / rank, l = (int64_t) id[0] % rank;
+        const int32_t pos = steps[t * kStepCount + kStepPos];
+        if (pos >= 0) latent[(int64_t) pos * rank + l] = f16_from_f32(kv[t * rank + l]);
+    });
+    sync_if_needed(stream, event, "glm5_latent_store");
+}
+
+void glm5_mla_attn(const float* q, const uint16_t* latent, const int32_t* ids, int64_t cap, const int32_t* steps,
+                   int n_heads, float scale, int64_t n_tokens, float* out, void* stream) {
+    constexpr int L = 512, WG = 256, NSG = WG / WARP, PER = L / WARP;
+    if (n_tokens <= 0) return;
+    if (n_heads <= 0 || cap <= 0 || n_tokens * n_heads > 0x7fffffff)
+        throw core::DeviceError("glm5_mla_attn: " + std::to_string(n_heads) + " heads, cap " + std::to_string(cap));
+    const int H = n_heads;
+    const auto event = queue_for(stream).submit([&](sycl::handler& hd) {
+        sycl::local_accessor<float, 1> sc(sycl::range<1>((size_t) cap), hd);
+        hd.parallel_for(sycl::nd_range<1>((size_t) (n_tokens * H) * WG, WG),
+                        [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+            const int64_t th = (int64_t) it.get_group(0), t = th / H;
+            const int lid = (int) it.get_local_id(0);
+            const sycl::sub_group sg = it.get_sub_group();
+            const int warp = (int) sg.get_group_linear_id(), lane = (int) sg.get_local_linear_id();
+            const int64_t width = sycl::min<int64_t>(steps[t * kStepCount + kStepWidth], cap);
+            const float* qh = q + th * L;
+            float* oh = out + th * L;
+            if (width <= 0) {   // uniform over the work-group
+                for (int d = lid; d < L; d += WG) oh[d] = 0.0f;
+                return;
+            }
+            float qr[PER];
+            for (int i = 0; i < PER; ++i) qr[i] = qh[lane * PER + i];
+            const int32_t* sel = ids + t * cap;
+            for (int64_t j = warp; j < width; j += NSG) {   // a sub-group a cell
+                const uint16_t* row = latent + (int64_t) sel[j] * L + lane * PER;
+                float d = 0.0f;
+                for (int i = 0; i < PER; ++i) d += qr[i] * f32_from_f16(row[i]);
+                d = sycl::reduce_over_group(sg, d, sycl::plus<float>());
+                if (lane == 0) sc[j] = d * scale;
+            }
+            sycl::group_barrier(it.get_group());
+            float mx = -INFINITY;
+            for (int64_t j = lid; j < width; j += WG) mx = sycl::fmax(mx, sc[j]);
+            mx = sycl::reduce_over_group(it.get_group(), mx, sycl::maximum<float>());
+            float sum = 0.0f;
+            for (int64_t j = lid; j < width; j += WG) sum += sycl::exp(sc[j] - mx);
+            sum = sycl::reduce_over_group(it.get_group(), sum, sycl::plus<float>());
+            const float inv = 1.0f / sum;
+            for (int64_t j = lid; j < width; j += WG) sc[j] = sycl::exp(sc[j] - mx) * inv;   // the probabilities
+            sycl::group_barrier(it.get_group());
+            for (int d = lid; d < L; d += WG) {
+                float acc = 0.0f;
+                for (int64_t j = 0; j < width; ++j) acc += sc[j] * f32_from_f16(latent[(int64_t) sel[j] * L + d]);
+                oh[d] = acc;
+            }
+        });
+    });
+    sync_if_needed(stream, event, "glm5_mla_attn");
 }
 
 void glm5_swiglu_clamp(const float* gate, const float* up, float* out, int64_t n, float limit, void* stream) {
