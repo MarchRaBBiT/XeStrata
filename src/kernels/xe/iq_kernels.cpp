@@ -2018,7 +2018,7 @@ bool native_expert_supported(int gu_type, int d_type, int64_t n_embd, int64_t n_
                                           gu_type == 6 || gu_type == 2 || gu_type == 3 || gu_type == 10 || gu_type == 11;
     const bool d = d_type == 20 || d_type == 23 || d_type == 42 || d_type == 6 || d_type == 7 || d_type == 8 ||
                    d_type == 2 || d_type == 3 || d_type == 14 || d_type == 10 || d_type == 11 || d_type == 12 ||
-                   d_type == 13;
+                   d_type == 13 || d_type == 16 || d_type == 17 || d_type == 18 || d_type == 21 || d_type == 22;
     const auto qk = [](int t) { return t == 20 || t == 6 || t == 7 || t == 8 || t == 2 || t == 3 ? 32 : t == 42 ? 64 : 256; };
     return gu && d && n_embd > 0 && n_ff > 0 && n_embd % qk(gu_type) == 0 && n_ff % qk(d_type) == 0 &&
            n_embd % 256 == 0;   // the dequantizers write whole 256-value pieces of a gate/up row
@@ -2171,6 +2171,12 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
         case 11: e = launch_native_down<11, down_lpr<11>()>(q, cg, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
         case 12: e = launch_native_down<12, down_lpr<12>()>(q, cg, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
         case 13: e = launch_native_down<13, down_lpr<13>()>(q, cg, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
+        // the grid formats as down rows (GLM-5.3-Flash's unsloth files: IQ3_S, IQ3_XXS), seg_dot_multi as gate/up's
+        case 16: e = launch_native_down<16, down_lpr<16>()>(q, cg, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
+        case 17: e = launch_native_down<17, down_lpr<17>()>(q, cg, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
+        case 18: e = launch_native_down<18, down_lpr<18>()>(q, cg, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
+        case 21: e = launch_native_down<21, down_lpr<21>()>(q, cg, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
+        case 22: e = launch_native_down<22, down_lpr<22>()>(q, cg, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
         default: throw core::DeviceError("native_expert_grouped: down type " + std::to_string(L.d_type));
     }
     sync_if_needed(stream, e, "native_expert_grouped");

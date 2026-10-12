@@ -24,10 +24,10 @@ struct alignas(64) NativeAct {
     uint8_t bytes[kNativeActBytes];
 };
 /// Bytes of the largest quantized down activation (640 values as Q8_0: 20 x 34, or Q8_K 3 x 292; llm-jp-4.1's 960
-/// as Q8_0: 30 x 34, as BF16 1920).
-inline constexpr size_t kNativeHBytes = 2048;
-/// The widest expert intermediate a native layer may have (llm-jp-4.1: 960); the pool's row buffers are this wide.
-inline constexpr int64_t kNativeMaxFF = 1024;
+/// as Q8_0: 30 x 34, as BF16 1920; GLM-5.3-Flash's 2048 as Q8_0: 64 x 34, as Q8_K 8 x 292).
+inline constexpr size_t kNativeHBytes = 4096;
+/// The widest expert intermediate a native layer may have (GLM-5.3-Flash: 2048); the pool's row buffers are this wide.
+inline constexpr int64_t kNativeMaxFF = 2048;
 
 /// One layer's native expert geometry.
 struct NativeFmt {
