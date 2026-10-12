@@ -42,6 +42,7 @@ struct ModelSpec {
     int64_t n_embd = 0;
     int64_t context_length = 0;
     double rms_eps = 0;
+    double norm_eps = 0;                  ///< attention.layer_norm_epsilon: the LayerNorms' (GLM-5.3-Flash's indexer keys)
 
     // attention.  head_count_kv may be per layer (GLM-5.3-Flash writes 0 on its recurrent layers).
     int64_t n_head = 0;
@@ -156,6 +157,7 @@ inline bool read_model_spec(const GgufFile& g, ModelSpec& s, std::string& err) {
     s.n_embd = spec_int(g, A, "embedding_length");
     s.context_length = spec_int(g, A, "context_length");
     s.rms_eps = spec_num(g, A, "attention.layer_norm_rms_epsilon");
+    s.norm_eps = spec_num(g, A, "attention.layer_norm_epsilon");
 
     s.n_head = spec_int(g, A, "attention.head_count");
     std::vector<double> kv;
