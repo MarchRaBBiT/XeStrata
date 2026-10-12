@@ -377,7 +377,7 @@ if(STRATA_ENABLE_XE)
                                     src/kernels/xe/s2_expert_grouped.cpp src/kernels/xe/qsa_prompt_attn.cpp
                                     src/kernels/xe/xmx_gemm.cpp src/kernels/xe/dp4a_gemm.cpp
                                     src/kernels/xe/mma_gemm.cpp src/kernels/xe/iq_mmq.cpp src/kernels/xe/prompt_attn.cpp
-                                    src/kernels/xe/matrix_report.cpp)
+                                    src/kernels/xe/matrix_report.cpp src/kernels/xe/glm5.cpp)
   target_link_libraries(strata_kernels PUBLIC strata_core strata_ngram)
   # plan v0.3 P6: llama.cpp's block layouts and codebook grids for the i-quant formats (MIT, third_party/main/ggml)
   target_include_directories(strata_kernels PRIVATE third_party/main/ggml)
@@ -645,6 +645,9 @@ if(STRATA_ENABLE_XE)
     add_executable(router_top10_parity src/kernels/router_top10_parity.cpp)
     target_link_libraries(router_top10_parity PRIVATE strata_kernels)
     add_test(NAME router_top10_parity COMMAND router_top10_parity --selftest)
+    add_executable(glm5_parity src/kernels/glm5_parity.cpp)
+    target_link_libraries(glm5_parity PRIVATE strata_kernels)
+    add_test(NAME glm5_parity COMMAND glm5_parity --selftest)
     add_executable(bf16_gemv_parity src/kernels/bf16_gemv_parity.cpp)
     target_link_libraries(bf16_gemv_parity PRIVATE strata_kernels)
     add_test(NAME bf16_gemv_parity COMMAND bf16_gemv_parity --selftest)
