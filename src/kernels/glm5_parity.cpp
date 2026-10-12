@@ -224,6 +224,50 @@ int test_kda() {
     strata::parity::copy_out(g.data(), dg, g.size());
     int bad = compare("kda_gate", g, rg, 1e-5);
 
+    // the short convolution over 3 tokens, the state carried
+    {
+        const int64_t C = 300;
+        std::vector<float> x = randn((size_t) (T * C)), st = randn((size_t) C * 3), w = randn((size_t) C * 4, 0.5f);
+        std::vector<double> ry((size_t) (T * C)), rst((size_t) C * 3);
+        for (int64_t c = 0; c < C; ++c) {
+            std::vector<double> seq = {st[(size_t) (c * 3)], st[(size_t) (c * 3 + 1)], st[(size_t) (c * 3 + 2)]};
+            for (int t = 0; t < T; ++t) seq.push_back(x[(size_t) (t * C + c)]);
+            for (int t = 0; t < T; ++t) {
+                double s = 0;
+                for (int j = 0; j < 4; ++j) s += seq[(size_t) (t + j)] * w[(size_t) (c * 4 + j)];
+                ry[(size_t) (t * C + c)] = s / (1.0 + std::exp(-s));
+            }
+            for (int j = 0; j < 3; ++j) rst[(size_t) (c * 3 + j)] = seq[(size_t) (T + j)];
+        }
+        float *dx = dev.upload(x), *dst = dev.upload(st), *dw = dev.upload(w), *dy = dev.alloc<float>(x.size());
+        strata::kernels::glm5_kda_conv(dx, dst, dw, dy, C, T, true, nullptr);
+        std::vector<float> y(x.size()), st2(st.size());
+        strata::parity::copy_out(y.data(), dy, y.size());
+        strata::parity::copy_out(st2.data(), dst, st2.size());
+        bad += compare("kda_conv (3 tokens, SiLU)", y, ry, 1e-5) + compare("kda_conv state", st2, rst, 0.0);
+
+        // the head L2 norm and the gated output norm
+        std::vector<float> o = randn((size_t) T * H * S), g2 = randn((size_t) T * H * S), wn = randn(S, 0.2f);
+        std::vector<double> rl2((size_t) T * H * S), rout((size_t) T * H * S);
+        for (int th = 0; th < T * H; ++th) {
+            double ss = 0;
+            for (int i = 0; i < S; ++i) ss += (double) o[(size_t) (th * S + i)] * o[(size_t) (th * S + i)];
+            for (int i = 0; i < S; ++i) {
+                rl2[(size_t) (th * S + i)] = o[(size_t) (th * S + i)] / std::max(std::sqrt(ss), 1e-6);
+                rout[(size_t) (th * S + i)] = o[(size_t) (th * S + i)] / std::sqrt(ss / S + 1e-5) * wn[(size_t) i] *
+                                              sigm(g2[(size_t) (th * S + i)]);
+            }
+        }
+        float *dov = dev.upload(o), *dg2 = dev.upload(g2), *dwn = dev.upload(wn), *dyo = dev.alloc<float>(o.size());
+        strata::kernels::glm5_kda_out(dov, dg2, dwn, 1e-5f, dyo, H, T, nullptr);
+        std::vector<float> yo(o.size());
+        strata::parity::copy_out(yo.data(), dyo, yo.size());
+        bad += compare("kda_out (RMSNorm x sigmoid)", yo, rout, 1e-5);
+        strata::kernels::glm5_l2_heads(dov, H, 1e-6f, T, nullptr);
+        strata::parity::copy_out(yo.data(), dov, yo.size());
+        bad += compare("l2_heads", yo, rl2, 1e-5);
+    }
+
     // T steps from a random state; q, k L2-normalised per head
     std::vector<float> state = randn((size_t) S * H * S, 0.1f);
     std::vector<double> rs(state.begin(), state.end());

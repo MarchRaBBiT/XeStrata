@@ -44,6 +44,21 @@ void glm5_router_sigmoid(const float* logits, const float* bias, int n_tokens, i
 void glm5_kda_gate(const float* f, const float* dt_bias, const float* ssm_a, float lb, float* g, int64_t n_heads,
                    int64_t head_dim, int64_t n_tokens, void* stream);
 
+/// KDA's short convolution of one projection (q, k or v) with its SiLU (llama.cpp's glm5_conv1d, ggml_ssm_conv):
+/// y[t][c] = silu(sum_j w[c][j] window_t[j]), window_t the 3 inputs before token t then its own, oldest first.  The
+/// inputs before the window are state[c][0..3) (oldest first); `update` leaves the window's last 3 there.
+/// x, y [T][C]; w [C][4] (GGUF [4, 1, C]).  d_conv = 4.
+void glm5_kda_conv(const float* x, float* state, const float* w, float* y, int64_t n_channels, int64_t n_tokens,
+                   bool update, void* stream);
+
+/// x[t][h] /= max(|x[t][h]|, eps) in place (ggml_l2_norm per head; FLA's eps 1e-6).  x [T][H][S], S = 128.
+void glm5_l2_heads(float* x, int64_t n_heads, float eps, int64_t n_tokens, void* stream);
+
+/// KDA's output before attn_output: y = RMSNorm(o[t][h]) w sigmoid(g2[t][h]) per head (eps `eps`).  o, g2, y
+/// [T][H][S], w [S], S = 128.
+void glm5_kda_out(const float* o, const float* g2, const float* w, float eps, float* y, int64_t n_heads,
+                  int64_t n_tokens, void* stream);
+
 /// One KDA step (ggml_gated_delta_net with a gate per key channel), IN PLACE on `state`, for S = 128:
 ///   state (S, H, S) f32 as Strata's GDN state, state[(i H + h) S + j] = S_h[i][j] (i the key channel)
 ///   q, k  (H, S) L2-normalised, q NOT scaled (1/sqrt(S) is applied to the readout)

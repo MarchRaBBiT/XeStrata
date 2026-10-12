@@ -195,6 +195,60 @@ void glm5_kda_gate(const float* f, const float* dt_bias, const float* ssm_a, flo
     sync_if_needed(stream, event, "glm5_kda_gate");
 }
 
+void glm5_kda_conv(const float* x, float* state, const float* w, float* y, int64_t n_channels, int64_t n_tokens,
+                   bool update, void* stream) {
+    constexpr int K = 4;
+    if (n_tokens <= 0 || n_channels <= 0) return;
+    const int64_t C = n_channels, T = n_tokens;
+    // a work-item a channel, the tokens in order (the window is short: one, or the drafts)
+    const auto event = queue_for(stream).parallel_for(sycl::range<1>((size_t) C), [=](sycl::id<1> id) {
+        const int64_t c = (int64_t) id[0];
+        float win[K];
+        for (int j = 0; j < K - 1; ++j) win[j] = state[c * (K - 1) + j];
+        const float* wc = w + c * K;
+        for (int64_t t = 0; t < T; ++t) {
+            win[K - 1] = x[t * C + c];
+            float sum = 0.0f;
+            for (int j = 0; j < K; ++j) sum += win[j] * wc[j];
+            y[t * C + c] = sum / (1.0f + sycl::exp(-sum));
+            for (int j = 0; j < K - 1; ++j) win[j] = win[j + 1];
+        }
+        if (update)
+            for (int j = 0; j < K - 1; ++j) state[c * (K - 1) + j] = win[j];
+    });
+    sync_if_needed(stream, event, "glm5_kda_conv");
+}
+
+void glm5_l2_heads(float* x, int64_t n_heads, float eps, int64_t n_tokens, void* stream) {
+    constexpr int S = 128;
+    if (n_tokens <= 0 || n_heads <= 0) return;
+    const auto event = queue_for(stream).parallel_for(
+        sycl::nd_range<1>((size_t) (n_tokens * n_heads) * S, S), [=](sycl::nd_item<1> it) {
+            float* v = x + (int64_t) it.get_group(0) * S;
+            const int i = (int) it.get_local_id(0);
+            const float xi = v[i];
+            const float sum = sycl::reduce_over_group(it.get_group(), xi * xi, sycl::plus<float>());
+            v[i] = xi * (1.0f / sycl::fmax(sycl::sqrt(sum), eps));
+        });
+    sync_if_needed(stream, event, "glm5_l2_heads");
+}
+
+void glm5_kda_out(const float* o, const float* g2, const float* w, float eps, float* y, int64_t n_heads,
+                  int64_t n_tokens, void* stream) {
+    constexpr int S = 128;
+    if (n_tokens <= 0 || n_heads <= 0) return;
+    const auto event = queue_for(stream).parallel_for(
+        sycl::nd_range<1>((size_t) (n_tokens * n_heads) * S, S), [=](sycl::nd_item<1> it) {
+            const int64_t base = (int64_t) it.get_group(0) * S;
+            const int i = (int) it.get_local_id(0);
+            const float oi = o[base + i];
+            const float ss = sycl::reduce_over_group(it.get_group(), oi * oi, sycl::plus<float>());
+            const float inv = 1.0f / sycl::sqrt(ss / (float) S + eps);
+            y[base + i] = oi * inv * w[i] * sigmoid(g2[base + i]);
+        });
+    sync_if_needed(stream, event, "glm5_kda_out");
+}
+
 void glm5_kda_step(float* state, const float* q, const float* k, const float* v, const float* g, const float* beta,
                    float* out, int64_t n_heads, void* stream) {
     constexpr int S = 128;
