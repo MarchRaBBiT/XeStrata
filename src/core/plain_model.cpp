@@ -103,13 +103,15 @@ PlainModel::~PlainModel() {
 bool PlainModel::upload(const GgufModel& m, const std::string& name, W& w, std::string& err, bool f32) {
     size_t at = 0;
     const TensorInfo* t = m.find(name, &at);
-    if (t == nullptr || t->shape.size() != 2 || !m.in_bounds(*t, at)) {
-        err = "plain model: " + name + " is missing, not 2-D, or truncated";
+    if (t == nullptr || t->shape.size() < 2 || !m.in_bounds(*t, at)) {
+        err = "plain model: " + name + " is missing, not a matrix, or truncated";
         return false;
     }
     w.type = (int) t->type;
     w.n_in = (int) t->shape[0];
-    w.n_out = (int) t->shape[1];
+    uint64_t rows = 1;
+    for (size_t i = 1; i < t->shape.size(); ++i) rows *= t->shape[i];
+    w.n_out = (int) rows;
     if (!k::native_mmvq_supported(w.type) && !((w.type == kBF16 || (f32 && w.type == kF32)) && w.n_in % 2 == 0)) {
         err = "plain model: " + name + " is " + t->type_name() + ", which the native matrix-vector kernels do not take";
         return false;
@@ -242,6 +244,7 @@ bool PlainModel::load(const PlainOptions& opt, std::string& err) {
     }
     if (!read_model_spec(model_->meta(), spec_, err)) return false;
     const ModelSpec& s = spec_;
+    if (s.arch == ModelArch::Glm5Next) return load_glm5(err);
     if (s.arch != ModelArch::Qwen35Moe && s.arch != ModelArch::Qwen3Moe) {
         err = "plain model: " + s.arch_name + " is not run by this engine yet";
         return false;
@@ -355,6 +358,8 @@ bool PlainModel::load(const PlainOptions& opt, std::string& err) {
     }
     // per-sequence state
     const int64_t C = 2 * s.ssm_n_group * s.ssm_d_state + s.ssm_d_inner;
+    state_bytes_ = (size_t) (s.ssm_d_state * s.ssm_dt_rank * s.ssm_d_state) * 4;
+    conv_bytes_ = (size_t) (C * (s.ssm_d_conv - 1)) * 4;
     const k::QsaShapes qs = attn_shapes(s, nkv_);
     for (const Block& b : blocks_) {
         if (b.recurrent) {
@@ -831,12 +836,11 @@ int64_t PlainModel::resident() const {
 }
 
 bool PlainModel::reset(std::string& err) {
+    if (glm_) return reset_glm5(err);
     const ModelSpec& s = spec_;
-    const int64_t C = 2 * s.ssm_n_group * s.ssm_d_state + s.ssm_d_inner;
     bool ok = true;
-    for (float* p : gdn_state_)
-        ok = ok && strata::gpu::memset(p, 0, (size_t) (s.ssm_d_state * s.ssm_dt_rank * s.ssm_d_state) * 4);
-    for (float* p : gdn_conv_) ok = ok && strata::gpu::memset(p, 0, (size_t) (C * (s.ssm_d_conv - 1)) * 4);
+    for (float* p : gdn_state_) ok = ok && strata::gpu::memset(p, 0, state_bytes_);
+    for (float* p : gdn_conv_) ok = ok && strata::gpu::memset(p, 0, conv_bytes_);
     const k::QsaShapes qs = attn_shapes(s, nkv_);
     const size_t pool = (size_t) (n_pages_ * qs.n_head_kv * qs.page_size * qs.head_dim) * 2;
     for (size_t i = 0; i < k_pool_.size(); ++i)
@@ -987,6 +991,7 @@ bool PlainModel::record_block(const Block& b, int64_t ml, int T, uint32_t& ring,
 }
 
 bool PlainModel::record_window(int T, strata::gpu::Stream cs, std::string& err) {
+    if (glm_) return record_window_glm5(T, cs, err);
     const ModelSpec& s = spec_;
     const int64_t N = s.n_embd, NH = s.n_head;
     const float eps = (float) s.rms_eps;
@@ -1227,12 +1232,9 @@ bool PlainModel::spec_step(const std::vector<int32_t>& stop, int64_t limit, int3
     n_emit = n + 1;
     // the recurrent states back to the last accepted row's (the attention's later cells are rewritten in turn)
     if (n < T - 1) {
-        const ModelSpec& s = spec_;
-        const size_t st = (size_t) (s.ssm_d_state * s.ssm_dt_rank * s.ssm_d_state) * 4;
-        const size_t cv = (size_t) ((2 * s.ssm_n_group * s.ssm_d_state + s.ssm_d_inner) * (s.ssm_d_conv - 1)) * 4;
         for (size_t g = 0; g < gdn_state_.size(); ++g)
-            if (!strata::gpu::copy_async(gdn_state_[g], gdn_snap_[g][(size_t) n], st, cs_) ||
-                !strata::gpu::copy_async(gdn_conv_[g], conv_snap_[g][(size_t) n], cv, cs_)) {
+            if (!strata::gpu::copy_async(gdn_state_[g], gdn_snap_[g][(size_t) n], state_bytes_, cs_) ||
+                !strata::gpu::copy_async(gdn_conv_[g], conv_snap_[g][(size_t) n], conv_bytes_, cs_)) {
                 err = std::string("plain model: restoring the recurrent states: ") + strata::gpu::last_error();
                 return false;
             }

@@ -9,7 +9,11 @@
 //     x += moe(rms_norm(x))              routed experts (softmax top-k, renormalized) + the gated shared expert
 //
 // and whose head is rms_norm, then the output projection.  Qwen3.8 (four residual streams, the QSA indexer, PLE) keeps
-// its own engine; GLM-5.3 will have its own.
+// its own engine.
+//
+// glm5-next (GLM-5.3-Flash, plain_glm5.cpp) runs here too, with its own block: four mHC streams read before and written
+// after every mixer and FFN, KDA (per-channel decay) and DSA (a k-pool indexer, the MLA attention over its selection)
+// mixers, leading dense FFN layers, a sigmoid router and the clamped SwiGLU; the expert tiers and the windows as above.
 //
 // The dense weights are uploaded once in their GGUF form and read by the native kernels.  The routed experts go
 // through the engine's expert tiers, as Qwen3.8's do: a VRAM cache of slots (expert_cache) refilled between windows by
@@ -100,6 +104,8 @@ public:
     /// The model carries a recurrent state (GDN layers): a sequence can be extended, not cut back to a prefix.
     bool recurrent() const { return !gdn_state_.empty(); }
     int64_t max_cells() const { return opt_.max_cells; }
+    /// The prompt's chunk (0: the prompt runs in windows; GLM-5.3-Flash's for now, whatever the options asked).
+    int64_t prompt_chunk() const { return opt_.prompt_chunk; }
 
     /// Zeroes the recurrent states and the K/V cache: the next window starts a sequence at position 0.
     bool reset(std::string& err);
@@ -168,7 +174,9 @@ private:
         W sh_gate, sh_up, sh_down;
     };
 
-    /// `f32`: an F32 matrix is taken as it is (Qwen3.6's GDN alpha and beta: llama.cpp's float product)
+    /// A projection's GGUF tensor into VRAM: its first dimension the input, every other the outputs (a 3-D tensor, the
+    /// MLA's per-head wk_b and wv_b, is its heads' matrices one after another).  `f32`: an F32 matrix is taken as it is
+    /// (Qwen3.6's GDN alpha and beta: llama.cpp's float product)
     bool upload(const GgufModel& m, const std::string& name, W& w, std::string& err, bool f32 = false);
     /// Block `l`'s weights (blk.<l>.*): its mixer, norms, router and shared expert.
     bool load_block(const GgufModel& m, int64_t l, Block& b, std::string& err);
@@ -275,6 +283,54 @@ private:
     std::unique_ptr<PromptGemm, void (*)(PromptGemm*)> prompt_gemm_{nullptr, nullptr};
     static void pool_fn(void* user, const float* x_f, const int32_t* ids, int64_t n_tok, int64_t k, float* out,
                         int64_t layer);
+
+    // GLM-5.3-Flash (glm5-next), plain_glm5.cpp
+    struct GBlock {
+        bool kda = false;
+        int64_t idx = -1;                     ///< among the KDA blocks, or among the DSA blocks
+        W hc_attn_fn, hc_ffn_fn;              ///< the mHC mixes (Q8_0 [4 n_embd, 24])
+        const float *hc_attn_base = nullptr, *hc_attn_scale = nullptr, *hc_ffn_base = nullptr, *hc_ffn_scale = nullptr;
+        const float *attn_norm = nullptr, *ffn_norm = nullptr;
+        W q, k, v, f_a, f_b, beta, g_a, g_b;  // KDA
+        const float *conv_q = nullptr, *conv_k = nullptr, *conv_v = nullptr, *dt = nullptr, *a = nullptr,
+                    *o_norm = nullptr;
+        W q_a, q_b, kv_a, k_b, v_b;           // DSA: the MLA (k_b, v_b per head)
+        const float *q_a_norm = nullptr, *kv_a_norm = nullptr;
+        W idx_q_b, idx_k, idx_gate;           // DSA: the indexer
+        const float *idx_k_norm = nullptr, *idx_k_norm_b = nullptr, *idx_proj = nullptr, *idx_ape = nullptr;
+        W o;                                  // either mixer's output projection
+        W ffn_gate, ffn_up, ffn_down;         ///< a leading layer's dense FFN, else the shared expert
+        const float *router = nullptr, *router_b = nullptr;   // F32 [n_embd, n_expert], [n_expert]
+        float clamp = 0.0f;                   ///< the dense FFN's / shared expert's SwiGLU limit
+    };
+    bool glm_ = false;
+    std::vector<GBlock> gblocks_;
+    bool load_glm5(std::string& err);
+    bool load_gblock(const GgufModel& m, int64_t l, GBlock& b, std::string& err);
+    bool reset_glm5(std::string& err);
+    bool record_window_glm5(int T, strata::gpu::Stream cs, std::string& err);
+    bool record_gblock(const GBlock& b, int64_t l, int T, uint32_t& ring, std::vector<strata::gpu::Graph*>& segs,
+                       strata::gpu::Stream cs, std::string& err);
+    /// x [T][n_in] through w into y [T][n_out] (q8_1 of x into g_xq_ first unless `quantized`)
+    void gproj(const W& w, const float* x, float* y, int T, bool quantized, strata::gpu::Stream cs);
+    // GLM's per-sequence state: per KDA block its recurrence (H S S) and its three convolutions' last inputs (3 C 3);
+    // per DSA block the indexer's key | gate per cell, its pooled keys, the MLA latent per cell (FP16)
+    std::vector<float*> g_idx_cache_, g_pooled_;
+    std::vector<uint16_t*> g_latent_;
+    int64_t g_max_blocks_ = 0, g_cap_ = 0;
+    // GLM's window buffers (device)
+    float *g_hs_ = nullptr, *g_mixes_ = nullptr, *g_post_ = nullptr, *g_comb_ = nullptr, *g_y_ = nullptr;
+    uint8_t* g_xq_ = nullptr;
+    float *g_q_ = nullptr, *g_k_ = nullptr, *g_v_ = nullptr, *g_qc_ = nullptr, *g_kc_ = nullptr, *g_vc_ = nullptr,
+          *g_fa_ = nullptr, *g_f_ = nullptr, *g_gate_ = nullptr, *g_beta_ = nullptr, *g_ga_ = nullptr, *g_g2_ = nullptr,
+          *g_o_ = nullptr, *g_oy_ = nullptr;
+    float *g_qa_ = nullptr, *g_qr_ = nullptr, *g_qb_ = nullptr, *g_qbT_ = nullptr, *g_absT_ = nullptr, *g_abs_ = nullptr,
+          *g_kv_ = nullptr, *g_lat_ = nullptr, *g_latT_ = nullptr, *g_voT_ = nullptr, *g_vo_ = nullptr;
+    float *g_iq_ = nullptr, *g_ik_ = nullptr, *g_ig_ = nullptr, *g_iw_ = nullptr, *g_scores_ = nullptr;
+    int32_t *g_ids_ = nullptr, *g_steps_ = nullptr;
+    float *g_ffg_ = nullptr, *g_ffu_ = nullptr;
+    /// The recurrent states' sizes in bytes (a GDN's or a KDA's; its convolution history), for reset and spec_step.
+    size_t state_bytes_ = 0, conv_bytes_ = 0;
 
     PlainOptions opt_;
     ModelSpec spec_;
