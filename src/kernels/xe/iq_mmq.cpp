@@ -247,6 +247,26 @@ template<> struct Dec<42> {   // Q2_0: d (code - 1), 64 values a block
     }
 };
 
+template<> struct Dec<19> {   // IQ1_S: d (2 ls + 1) (grid +- 1/8), one scale and one delta a 32 (dequantize_row_iq1_s)
+    static constexpr int QK = 256, BSZ = (int) sizeof(block_iq1_s);
+    static Sub get(const uint8_t* row, int sb, [[maybe_unused]] size_t row_bytes) {
+        const block_iq1_s* b = reinterpret_cast<const block_iq1_s*>(row) + sb / 8;
+        const int ib = sb % 8;
+        const int qh = b->qh[ib];
+        // as IQ1_M's: the grid's nibbles (the value + 1) as 8 (value +- 1/8), the delta's sign from bit 15
+        const uint32_t c = qh & 0x8000 ? 0x07070707u : 0x09090909u;
+        Sub r;
+        for (int k = 0; k < 8; k += 2) {
+            const int l = k / 2;
+            const uint32_t g = iq1s_grid_gpu[b->qs[4 * ib + l] | (((qh >> 3 * l) & 0x07) << 8)];
+            r.v[k] = (((((g & 0x0F0F0F0Fu) << 3) + c) | 0x80808080u) - 0x10101010u) ^ 0x80808080u;
+            r.v[k + 1] = ((((((g >> 4) & 0x0F0F0F0Fu) << 3) + c) | 0x80808080u) - 0x10101010u) ^ 0x80808080u;
+        }
+        r.s0 = r.s1 = (float) b->d * 0.125f * (float) (2 * ((qh >> 12) & 0x07) + 1);
+        return r;
+    }
+};
+
 template<> struct Dec<29> {   // IQ1_M: d (2 ls + 1) (grid +- 1/8), a scale per 16
     static constexpr int QK = 256, BSZ = (int) sizeof(block_iq1_m);
     static Sub get(const uint8_t* row, int sb, [[maybe_unused]] size_t row_bytes) {
@@ -1232,7 +1252,7 @@ bool iq_mmq_type_sums(int t) { return t == 12 || t == 13; }   // has_min
 bool iq_mmq_type_ok(int t) {
     switch (t) {
         case 6: case 8: case 10: case 11: case 12: case 13: case 14: case kNativeQ6KRows: case kNativeQ8Rows:
-        case 16: case 17: case 18: case 20: case 21: case 22: case 23: case 29: case 42: return true;
+        case 16: case 17: case 18: case 19: case 20: case 21: case 22: case 23: case 29: case 42: return true;
         default: return false;
     }
 }
@@ -1256,6 +1276,7 @@ size_t iq_mmq_row_bytes(int t, int64_t cols) {
         case 22: return (size_t) (cols / Dec<22>::QK) * Dec<22>::BSZ;
         case 23: return (size_t) (cols / Dec<23>::QK) * Dec<23>::BSZ;
         case 29: return (size_t) (cols / Dec<29>::QK) * Dec<29>::BSZ;
+        case 19: return (size_t) (cols / Dec<19>::QK) * Dec<19>::BSZ;
         case 42: return (size_t) (cols / Dec<42>::QK) * Dec<42>::BSZ;
         default: return 0;
     }
@@ -1366,6 +1387,7 @@ sycl::event iq_mmq_grouped(sycl::queue& q, int t, const void* w, size_t expert_b
         STRATA_MMQ_CASE(22);
         STRATA_MMQ_CASE(23);
         STRATA_MMQ_CASE(29);
+        STRATA_MMQ_CASE(19);
         STRATA_MMQ_CASE(42);
         default: return {};
     }

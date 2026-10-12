@@ -323,6 +323,32 @@ template<> struct Split<22> {   // IQ2_S
     }
 };
 
+template<> struct Split<19> {   // IQ1_S (ggml-cuda's vec_dot_iq1_s_q8_1): one 32-value sub-block, a scale and a delta
+    struct W { int g[8]; float d1q, delta; };
+    static W load(const void* vbq, int kbx, int iqs) {
+        const block_iq1_s* bq1 = (const block_iq1_s*) vbq + kbx;
+        const uint32_t qs = (uint32_t) get_int_b2(bq1->qs, iqs);
+        const int qh = bq1->qh[iqs];
+        W r{};
+        for (int l0 = 0; l0 < 8; l0 += 2) {
+            const int grid = (int) iq1s_grid_gpu[byte_of(qs, l0 / 2) | (((qh >> 3 * (l0 / 2)) & 0x07) << 8)];
+            r.g[l0] = (grid >> 0) & 0x0F0F0F0F;
+            r.g[l0 + 1] = (grid >> 4) & 0x0F0F0F0F;
+        }
+        r.d1q = (float) bq1->d * (float) (((qh >> 11) & 0x0E) + 1);
+        r.delta = -1.0f + IQ1S_DELTA - (float) (qh & 0x8000) * (2.0f * IQ1S_DELTA / 0x8000);
+        return r;
+    }
+    static float apply(const W& r, const block_q8_1* bq8_1, int iqs) {
+        int sumi = 0;
+        for (int l0 = 0; l0 < 8; l0 += 2) {
+            sumi = dp4a(r.g[l0], get_int_b4(bq8_1[iqs].qs, l0 + 0), sumi);
+            sumi = dp4a(r.g[l0 + 1], get_int_b4(bq8_1[iqs].qs, l0 + 1), sumi);
+        }
+        return r.d1q * (low_half(bq8_1[iqs].ds) * (float) sumi + (float) bq8_1[iqs].ds[1] * r.delta);
+    }
+};
+
 template<> struct Split<29> {   // IQ1_M
     struct W { int g[8]; float delta[4]; int sc0, sc1; float d; };
     static W load(const void* vbq, int kbx, int iqs) {
@@ -773,6 +799,7 @@ template<> struct Fmt<20> : FmtOf<20, (int) sizeof(block_iq4_nl), 32, 2, 2> {};
 template<> struct Fmt<21> : FmtOf<21, (int) sizeof(block_iq3_s), 256, 8, 2> {};
 template<> struct Fmt<22> : FmtOf<22, (int) sizeof(block_iq2_s), 256, 8, 2> {};
 template<> struct Fmt<23> : FmtOf<23, (int) sizeof(block_iq4_xs), 256, 8, 4> {};
+template<> struct Fmt<19> : FmtOf<19, (int) sizeof(block_iq1_s), 256, 8, 1> {};
 template<> struct Fmt<29> : FmtOf<29, (int) sizeof(block_iq1_m), 256, 8, 1> {};
 template<> struct Fmt<42> : FmtOf<42, (int) sizeof(block_q2_0), 64, 2, 1> {};
 template<> struct Fmt<12> : FmtOf<12, (int) sizeof(block_q4_K), 256, QI4_K / VDR_Q4_K, VDR_Q4_K> {};
@@ -1327,6 +1354,20 @@ void dq_iq3_s(const void* vx, int64_t ibs, const Out& o, int tid) {
     o.template put<8>(y, v);
 }
 template<typename Out>
+void dq_iq1_s(const void* vx, int64_t ibs, const Out& o, int tid) {   // ggml-cuda's dequantize_block_iq1_s
+    const block_iq1_s* x = (const block_iq1_s*) vx;
+    const int64_t il = tid % 4, ib = tid / 4;          // neighbours in one sub-block: contiguous writes
+    const int y = (int) (32 * ib + 8 * il);
+    const int qh = x[ibs].qh[ib];
+    const float d = (float) x[ibs].d * (2 * ((qh >> 12) & 7) + 1);
+    const float delta = qh & 0x8000 ? -1 - IQ1S_DELTA : -1 + IQ1S_DELTA;
+    const uint32_t g = iq1s_grid_gpu[x[ibs].qs[4 * ib + il] | (((qh >> 3 * il) & 7) << 8)];
+    const uint32_t grid32[2] = {g & 0x0f0f0f0f, (g >> 4) & 0x0f0f0f0f};
+    float v[8];
+    for (int j = 0; j < 8; ++j) v[j] = d * ((int8_t) byte_of(grid32[j / 4], j % 4) + delta);
+    o.template put<8>(y, v);
+}
+template<typename Out>
 void dq_iq1_m(const void* vx, int64_t ibs, const Out& o, int tid) {
     const block_iq1_m* x = (const block_iq1_m*) vx;
     const int64_t il = tid % 4, ib = tid / 4;          // neighbours in one sub-block: contiguous writes
@@ -1589,6 +1630,7 @@ inline void dq_dispatch(int ty, const void* vx, int64_t ibs, const Out& o, int t
         case 21: dq_iq3_s(vx, ibs, o, tid); break;
         case 22: dq_iq2_s(vx, ibs, o, tid); break;
         case 29: dq_iq1_m(vx, ibs, o, tid); break;
+        case 19: dq_iq1_s(vx, ibs, o, tid); break;
         case 23: dq_iq4_xs(vx, ibs, o, tid); break;
         case 11: dq_q3_k(vx, ibs, o, tid); break;
         case 10: dq_q2_k(vx, ibs, o, tid); break;
@@ -1660,6 +1702,7 @@ inline void dq_one(const void* vx, int64_t ibs, const Out& o, int tid) {
     else if constexpr (TYPE == 22) dq_iq2_s(vx, ibs, o, tid);
     else if constexpr (TYPE == 23) dq_iq4_xs(vx, ibs, o, tid);
     else if constexpr (TYPE == 29) dq_iq1_m(vx, ibs, o, tid);
+    else if constexpr (TYPE == 19) dq_iq1_s(vx, ibs, o, tid);
     else if constexpr (TYPE == 42) dq_q2_0(vx, ibs, o, tid);
     else static_assert(TYPE == 16, "iq_gemm: type");
 }
@@ -1805,7 +1848,9 @@ sycl::event launch_iq_gemm(sycl::queue& q, const sycl::half* X, const IqGemmPtrs
 
 // the formats iq_gemm_grouped_f16 dequantizes into its tile (dq_one); the K-quants and Q5_1 / Q8_0 take the fp16
 // dequant and xmx_gemm_grouped instead
-bool in_iq_gemm(int t) { return t == 16 || t == 17 || t == 18 || t == 20 || t == 21 || t == 22 || t == 23 || t == 29 || t == 42; }
+bool in_iq_gemm(int t) {
+    return t == 16 || t == 17 || t == 18 || t == 19 || t == 20 || t == 21 || t == 22 || t == 23 || t == 29 || t == 42;
+}
 bool is_iq(int t) {
     return in_iq_gemm(t) || t == 10 || t == 11 || t == 12 || t == 13 || t == 14 || t == 6 || t == 7 || t == 8 || t == 2 ||
            t == 3;
@@ -1829,6 +1874,7 @@ size_t iq_row_bytes(int t, int64_t n) noexcept {
         case 21: return (size_t) (n / 256) * sizeof(block_iq3_s);
         case 22: return (size_t) (n / 256) * sizeof(block_iq2_s);
         case 29: return (size_t) (n / 256) * sizeof(block_iq1_m);
+        case 19: return (size_t) (n / 256) * sizeof(block_iq1_s);
         case 23: return (size_t) (n / 256) * sizeof(block_iq4_xs);
         case 10: return (size_t) (n / 256) * sizeof(block_q2_K);
         case 11: return (size_t) (n / 256) * sizeof(block_q3_K);
@@ -1899,6 +1945,7 @@ void iq_mmvq(int t, const void* w, const void* x_q8_1, float* y, int n_in, int n
         case 22: e = launch_mmvq<22>(q, W, rb, X, y, n_in, n_out, ncols); break;
         case 23: e = launch_mmvq<23>(q, W, rb, X, y, n_in, n_out, ncols); break;
         case 29: e = launch_mmvq<29>(q, W, rb, X, y, n_in, n_out, ncols); break;
+        case 19: e = launch_mmvq<19>(q, W, rb, X, y, n_in, n_out, ncols); break;
         case 42: e = launch_mmvq<42>(q, W, rb, X, y, n_in, n_out, ncols); break;
         case 12: e = launch_mmvq<12>(q, W, rb, X, y, n_in, n_out, ncols); break;
         case 13: e = launch_mmvq<13>(q, W, rb, X, y, n_in, n_out, ncols); break;
@@ -2000,6 +2047,7 @@ void iq_gemm_grouped_f16(int t, const uint16_t* X, const void* const* W, int64_t
         case 22: e = launch_iq_gemm<22>(q, x, w, interleave, Y, ldy, bounds, G, max_rows, N, K); break;
         case 23: e = launch_iq_gemm<23>(q, x, w, interleave, Y, ldy, bounds, G, max_rows, N, K); break;
         case 29: e = launch_iq_gemm<29>(q, x, w, interleave, Y, ldy, bounds, G, max_rows, N, K); break;
+        case 19: e = launch_iq_gemm<19>(q, x, w, interleave, Y, ldy, bounds, G, max_rows, N, K); break;
         default: e = launch_iq_gemm<42>(q, x, w, interleave, Y, ldy, bounds, G, max_rows, N, K); break;
     }
     sync_if_needed(stream, e, "iq_gemm_grouped_f16");
@@ -2098,6 +2146,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
             case 22: launch_native_gu<22, GU_LPR>(q, cg, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up, part); break;
             case 23: launch_native_gu<23, GU_LPR>(q, cg, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up, part); break;
             case 29: launch_native_gu<29, GU_LPR>(q, cg, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up, part); break;
+            case 19: launch_native_gu<19, GU_LPR>(q, cg, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up, part); break;
             case 42: launch_native_gu<42, GU_LPR>(q, cg, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up, part); break;
             case 12: launch_native_gu<12, GU_LPR>(q, cg, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up, part); break;
             case 13: launch_native_gu<13, GU_LPR>(q, cg, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up, part); break;

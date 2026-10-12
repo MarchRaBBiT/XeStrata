@@ -6,11 +6,17 @@
 // third_party/main/ggml/LICENSE): the mHC read, write and mean, the sigmoid router, the KDA gate and step, the clamped
 // SwiGLU.  The references are in double where ggml sums in float, so the tolerances are those of float rounding.
 #include "strata/kernels/glm5.hpp"
+#include "strata/kernels/iq_kernels.hpp"
+#include "strata/kernels/native_mmvq.hpp"
 #include "strata/kernels/f16_bits.hpp"
 #include "strata/kernels/qsa.hpp"
 #include "strata/kernels/qsa_select.hpp"
 
 #include "parity_device.hpp"
+
+#define GGML_COMMON_DECL_CPP
+#define GGML_COMMON_IMPL_CPP
+#include "ggml-common.h"
 
 #include <algorithm>
 #include <cmath>
@@ -481,6 +487,59 @@ int test_dsa() {
     return bad;
 }
 
+// ---- IQ1_S (UD-IQ1_S's experts): random blocks, the GPU's dequantization and dot against ggml's dequantize_row_iq1_s
+int test_iq1_s() {
+    const int rows = 16, cols = 2048, nb = cols / QK_K;
+    std::uniform_int_distribution<int> byte(0, 255), word(0, 65535);
+    std::vector<block_iq1_s> blocks((size_t) rows * nb);
+    for (auto& b : blocks) {
+        b.d = strata::kernels::f16_from_f32(std::uniform_real_distribution<float>(0.001f, 0.02f)(rng));
+        for (auto& q : b.qs) q = (uint8_t) byte(rng);
+        for (auto& h : b.qh) h = (uint16_t) word(rng);
+    }
+    std::vector<double> ref((size_t) rows * cols);
+    for (size_t i = 0; i < blocks.size(); ++i) {   // ggml-quants.c's dequantize_row_iq1_s
+        const block_iq1_s& b = blocks[i];
+        const double d = strata::kernels::f32_from_f16(b.d);
+        for (int ib = 0; ib < QK_K / 32; ++ib) {
+            const double dl = d * (2 * ((b.qh[ib] >> 12) & 7) + 1);
+            const double delta = b.qh[ib] & 0x8000 ? -IQ1S_DELTA : IQ1S_DELTA;
+            for (int l = 0; l < 4; ++l) {
+                const int8_t* grid = (const int8_t*) (iq1s_grid + (b.qs[ib * 4 + l] | (((b.qh[ib] >> 3 * l) & 7) << 8)));
+                for (int j = 0; j < 8; ++j) ref[i * QK_K + (size_t) (ib * 32 + l * 8 + j)] = dl * (grid[j] + delta);
+            }
+        }
+    }
+    strata::parity::Device dev;
+    uint8_t* dw = dev.alloc<uint8_t>(blocks.size() * sizeof(block_iq1_s));
+    strata::parity::copy_in(dw, (const uint8_t*) blocks.data(), blocks.size() * sizeof(block_iq1_s));
+    float* dq = dev.alloc<float>(ref.size());
+    strata::kernels::iq_dequant_f32(19, dw, (int64_t) ref.size(), dq, strata::parity::stream());
+    std::vector<float> got(ref.size());
+    strata::parity::copy_out(got.data(), dq, got.size());
+    int bad = compare("IQ1_S dequantization", got, ref, 1e-6);
+    // the dot of two columns, as iq_parity: to the q8_1 rounding of the activations
+    std::vector<float> x = randn((size_t) 2 * cols);
+    float* dx = dev.upload(x);
+    uint8_t* xq = dev.alloc<uint8_t>(strata::kernels::native_q8_1_bytes(cols, 2));
+    float* dy = dev.alloc<float>((size_t) 2 * rows);
+    strata::kernels::quantize_q8_1_rows(dx, 2, cols, xq, strata::parity::stream());
+    strata::kernels::native_mmvq(19, dw, xq, dy, cols, rows, 2, strata::parity::stream());
+    std::vector<float> y((size_t) 2 * rows);
+    strata::parity::copy_out(y.data(), dy, y.size());
+    double num = 0, den = 0;
+    for (int c = 0; c < 2; ++c)
+        for (int r = 0; r < rows; ++r) {
+            double acc = 0;
+            for (int k = 0; k < cols; ++k) acc += ref[(size_t) r * cols + k] * x[(size_t) c * cols + k];
+            num += std::fabs(y[(size_t) c * rows + r] - acc);
+            den += std::fabs(acc);
+        }
+    const double rel = num / (den + 1e-30);
+    std::printf("  %-34s rel %.2e  %s\n", "IQ1_S mmvq (q8_1 activations)", rel, rel < 2e-2 ? "ok" : "*** FAIL ***");
+    return bad + (rel < 2e-2 ? 0 : 1);
+}
+
 // ---- the clamped SwiGLU
 int test_swiglu_clamp() {
     const size_t n = 4096;
@@ -510,7 +569,7 @@ int main(int argc, char** argv) {
             return 2;
         }
     std::printf("glm5_parity: GLM-5.3-Flash's kernels against host references\n");
-    const int bad = test_hc() + test_router() + test_kda() + test_dsa() + test_swiglu_clamp();
+    const int bad = test_hc() + test_router() + test_kda() + test_dsa() + test_iq1_s() + test_swiglu_clamp();
     std::printf("%s\n", bad ? "FAIL" : "PASS");
     return bad ? 1 : 0;
 }
