@@ -37,6 +37,7 @@
 #include "strata/kernels/sampler.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -271,6 +272,14 @@ private:
     bool prompt_borrow(int64_t T, std::string& err);
     bool prompt_chunks(const int32_t* tokens, int64_t n, int64_t pos, int32_t* out, float* logits, std::string& err);
     bool prompt_warm_products(std::string& err);
+    /// The chunk's routed experts of MoE layer `ml`: pb_.hn its T normed rows (and pb_.x16 their FP16 copy for the FP16
+    /// path), pb_.ids their routes; writes pb_.parts in routing order, the routes into `routes` (null: not kept).
+    /// `mark(stage)` is the profile's (1 the grouping, 2 the experts).
+    struct PromptRouted {
+        int64_t cpu_n = 0, cpu_rows = 0, miss_n = 0;   ///< the CPU's experts and rows, the experts not in VRAM
+    };
+    bool prompt_routed(int64_t ml, int64_t T, bool cpu_share, int32_t* routes, const std::function<void(int)>& mark,
+                       PromptRouted& st, std::string& err);
     bool prompt_cpu_experts(int64_t ml, const std::vector<int32_t>& experts, const std::vector<int32_t>& count,
                             const std::vector<int32_t>& start, std::string& err);
     bool prompt_return(std::string& err);
