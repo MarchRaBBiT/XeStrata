@@ -45,6 +45,7 @@
 #include <cstring>
 #include <exception>
 #include <functional>
+#include <future>
 #include <set>
 #include <tuple>
 #include <vector>
@@ -359,6 +360,25 @@ bool PlainModel::prompt_routed(int64_t ml, int64_t T, bool cpu_share, int32_t* r
     const bool transient = src_->transient(ml, experts.empty() ? 0 : experts[0]);
     int64_t max_rows = 0;
     for (int32_t e : experts) max_rows = std::max<int64_t>(max_rows, count[(size_t) e]);
+    // a source that assembles its experts from the files (transient: GGUF read in place): each group's missed experts
+    // read ahead on the source's threads (prefetch, its page faults side by side), the next group's while this one is
+    // copied and multiplied.  Group gi of the loop below takes the gi-th kGroup of the missed experts in order.
+    // (GLM-5.3-Flash UD-IQ3_XXS on the B70, a 1K-token prompt: its 11,735 missed experts took 22 s read one by one.)
+    std::vector<std::vector<int64_t>> ahead;
+    if (use_mmq && transient)
+        for (int32_t e : experts)
+            if (res_[(size_t) (ml * E + e)] < 0) {
+                if (ahead.empty() || (int) ahead.back().size() == PromptBufs::kGroup) ahead.emplace_back();
+                ahead.back().push_back(e);
+            }
+    std::future<void> fetch;
+    auto fetch_group = [&](size_t i) {
+        if (i < ahead.size())
+            fetch = std::async(std::launch::async, [this, ml, &ahead, i] {
+                src_->prefetch(ml, ahead[i].data(), (int64_t) ahead[i].size());
+            });
+    };
+    fetch_group(0);
     // int8: as many experts a launch as the staging lets (those in VRAM read where they lie, kGroup from
     // RAM at most), gate/up, the SwiGLU, its rows to int8, down
     for (size_t g0 = 0, gi = 0; use_mmq && g0 < experts.size(); ++gi) {
@@ -366,6 +386,8 @@ bool PlainModel::prompt_routed(int64_t ml, int64_t T, bool cpu_share, int32_t* r
             err = std::string("plain prompt: ") + strata::gpu::last_error();
             return false;
         }
+        if (fetch.valid()) fetch.wait();   // this group's missed experts are assembled
+        fetch_group(gi + 1);
         size_t g1 = g0;
         int staged = 0;
         int64_t mr = 0;
