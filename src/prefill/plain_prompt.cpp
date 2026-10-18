@@ -381,8 +381,11 @@ bool PlainModel::prompt_routed(int64_t ml, int64_t T, bool cpu_share, int32_t* r
     fetch_group(0);
     // int8: as many experts a launch as the staging lets (those in VRAM read where they lie, kGroup from
     // RAM at most), gate/up, the SwiGLU, its rows to int8, down
+    // a transient source's blobs through pinned host memory (h_stage's halves, as the device staging's) with the copies
+    // beside the products, instead of each copied from pageable memory before the next is read
+    const bool bounce = transient && P.h_stage != nullptr && pg.overlap();
     for (size_t g0 = 0, gi = 0; use_mmq && g0 < experts.size(); ++gi) {
-        if (transient && !strata::gpu::stream_sync(cs)) {   // the staging's last readers are done
+        if (transient && !bounce && !strata::gpu::stream_sync(cs)) {   // the staging's last readers are done
             err = std::string("plain prompt: ") + strata::gpu::last_error();
             return false;
         }
@@ -392,8 +395,12 @@ bool PlainModel::prompt_routed(int64_t ml, int64_t T, bool cpu_share, int32_t* r
         int staged = 0;
         int64_t mr = 0;
         // the half of the staging this group takes; its copies wait for the products two groups back
-        const bool ovl = !transient && pg.overlap();
+        const bool ovl = (!transient || bounce) && pg.overlap();
         const int h = (int) (gi % 2);
+        if (bounce && pg.ready_live[h] && !strata::gpu::event_sync(pg.ready[h])) {   // the half's last copies are done
+            err = std::string("plain prompt: ") + strata::gpu::last_error();
+            return false;
+        }
         strata::gpu::Stream ccs = ovl ? pg.xs : cs;
         if (ovl && pg.used_live[h] && !strata::gpu::stream_wait_event(ccs, pg.used[h])) {
             err = std::string("plain prompt: ") + strata::gpu::last_error();
@@ -407,10 +414,15 @@ bool PlainModel::prompt_routed(int64_t ml, int64_t T, bool cpu_share, int32_t* r
                 blob = cache_.device_slot(sl);
             } else {
                 if (staged == PromptBufs::kGroup) break;
-                uint8_t* dst = P.stage + (size_t) ((ovl ? h * PromptBufs::kGroup : 0) + staged++) * lay.max_blob;
+                const size_t at = (size_t) ((ovl ? h * PromptBufs::kGroup : 0) + staged++) * lay.max_blob;
+                uint8_t* dst = P.stage + at;
                 const uint8_t* hb = src_->blob(ml, e);
-                const bool copied = hb != nullptr &&
-                    (transient ? strata::gpu::copy(dst, hb, f.bytes) : strata::gpu::copy_async(dst, hb, f.bytes, ccs));
+                if (bounce && hb != nullptr) {
+                    std::memcpy(P.h_stage + at, hb, f.bytes);
+                    hb = P.h_stage + at;
+                }
+                const bool copied = hb != nullptr && (transient && !bounce ? strata::gpu::copy(dst, hb, f.bytes)
+                                                                           : strata::gpu::copy_async(dst, hb, f.bytes, ccs));
                 if (!copied) { err = "plain prompt: an expert could not be read"; return false; }
                 blob = dst;
             }
@@ -421,6 +433,7 @@ bool PlainModel::prompt_routed(int64_t ml, int64_t T, bool cpu_share, int32_t* r
             err = std::string("plain prompt: ") + strata::gpu::last_error();
             return false;
         }
+        if (ovl) pg.ready_live[h] = true;
         const int G = (int) (g1 - g0);
         const int32_t r0 = P.h_bounds[g0], nr = P.h_bounds[g1] - r0;
         int32_t* hrb = P.h_rbounds + g0 + gi;

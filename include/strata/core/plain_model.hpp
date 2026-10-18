@@ -234,6 +234,8 @@ private:
         int32_t* entry = nullptr;          ///< grouped row -> routing entry: where the int8 down product writes
         uint16_t *dq_gu = nullptr, *dq_d = nullptr;   ///< kGroup experts' FP16 weights
         uint8_t* stage = nullptr;          ///< 2 kGroup expert blobs copied from RAM (two halves)
+        uint8_t* h_stage = nullptr;        ///< pinned host: the same two halves, a source's assembled blobs bounced
+                                           ///< through them (plain_prompt.cpp)
         uint8_t *xq = nullptr, *hq = nullptr;   ///< the int8 products' activations: the routed rows, the SwiGLU's
         uint8_t* xq2 = nullptr;            ///< the routed rows for the up product of a layer whose gate and up
                                            ///< differ in the blocks' repetition (iq_mmq_type_dup); else null

@@ -21,6 +21,7 @@ struct PlainModel::PromptGemm {
     strata::gpu::Stream xs = nullptr;
     strata::gpu::Event *ready[2] = {}, *used[2] = {};
     bool used_live[2] = {};
+    bool ready_live[2] = {};   // ready[h] recorded: a pinned bounce half (h_stage) is free once it completes
     ~PromptGemm() {
         if (xs != nullptr) strata::gpu::stream_sync(xs);
         for (int h = 0; h < 2; ++h) {

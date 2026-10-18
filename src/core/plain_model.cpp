@@ -639,6 +639,7 @@ void PlainModel::prompt_carve(int64_t T, PromptBufs& b, uint8_t* dev, uint8_t* h
     hold(b.h_wtab, E * sizeof(void*)); hold(b.h_rbounds, (2 * E + 2) * 4);
     hold(b.h_hn, U * N * 4); hold(b.h_cpu, (uint64_t) b.cpu_cap * N * 4); hold(b.h_cpu_row, (uint64_t) b.cpu_cap * 4);
     hold(b.h_nact, U * k::cpu::kNativeActBytes); hold(b.h_dense_bounds, 2 * sizeof(int32_t));
+    hold(b.h_stage, 2 * (uint64_t) PromptBufs::kGroup * lay.max_blob);
     host_bytes = at;
 }
 
