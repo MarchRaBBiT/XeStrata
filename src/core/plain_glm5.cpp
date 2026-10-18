@@ -272,8 +272,8 @@ bool PlainModel::load_glm5(std::string& err) {
     // the q8_1 rows: a token's 4N stream values, the widest input, or the MLA's per-head rows of every token
     const size_t xq = std::max({k::native_q8_1_bytes((int) (kHC * N), (int) T), k::native_q8_1_bytes((int) FW, (int) T),
                                 k::native_q8_1_bytes((int) (NH * VD), (int) T),
-                                k::native_q8_1_bytes((int) KVR, (int) (NH * T)),
-                                k::native_q8_1_bytes((int) QK, (int) (NH * T))});
+                                k::native_q8_1_rows_bytes((int) KVR, (int64_t) (NH * T)),
+                                k::native_q8_1_rows_bytes((int) QK, (int64_t) (NH * T))});
     auto dev = [&](auto** p, uint64_t bytes) {
         void* d = nullptr;
         if (!strata::gpu::alloc_device(&d, (size_t) std::max<uint64_t>(bytes, 256))) return false;
@@ -399,19 +399,19 @@ bool PlainModel::record_gblock(const GBlock& b, int64_t l, int T, uint32_t& ring
         const size_t kb = k::native_mmvq_weight_bytes(file_type(b.k_b.type), (int) QK, (int) KVR);
         const size_t vb = k::native_mmvq_weight_bytes(file_type(b.v_b.type), (int) KVR, (int) VD);
         k::glm5_transpose_abd(g_qb_, g_qbT_, T, H, QK, cs);
-        k::native_quantize_q8_1(g_qbT_, g_xq_, (int) QK, (int) (H * T), cs);
+        k::native_quantize_q8_1_rows(g_qbT_, g_xq_, (int) QK, H * T, cs);
         for (int64_t h = 0; h < H; ++h)
             k::native_mmvq(b.k_b.type, (const uint8_t*) b.k_b.data + h * kb,
-                           g_xq_ + k::native_q8_1_bytes((int) QK, (int) (h * T)), g_absT_ + h * T * KVR, (int) QK,
+                           g_xq_ + k::native_q8_1_rows_bytes((int) QK, h * T), g_absT_ + h * T * KVR, (int) QK,
                            (int) KVR, T, cs);
         k::glm5_transpose_abd(g_absT_, g_abs_, H, T, KVR, cs);
         k::glm5_mla_attn(g_abs_, g_latent_[(size_t) d], g_ids_, g_cap_, g_steps_, (int) H, 1.0f / std::sqrt((float) QK),
                          T, g_lat_, cs);
         k::glm5_transpose_abd(g_lat_, g_latT_, T, H, KVR, cs);
-        k::native_quantize_q8_1(g_latT_, g_xq_, (int) KVR, (int) (H * T), cs);
+        k::native_quantize_q8_1_rows(g_latT_, g_xq_, (int) KVR, H * T, cs);
         for (int64_t h = 0; h < H; ++h)
             k::native_mmvq(b.v_b.type, (const uint8_t*) b.v_b.data + h * vb,
-                           g_xq_ + k::native_q8_1_bytes((int) KVR, (int) (h * T)), g_voT_ + h * T * VD, (int) KVR,
+                           g_xq_ + k::native_q8_1_rows_bytes((int) KVR, h * T), g_voT_ + h * T * VD, (int) KVR,
                            (int) VD, T, cs);
         k::glm5_transpose_abd(g_voT_, g_vo_, H, T, VD, cs);
         gproj(b.o, g_vo_, mix_, T, false, cs);

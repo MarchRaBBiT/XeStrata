@@ -757,12 +757,24 @@ std::size_t native_q8_1_bytes(int n_in, int ncols) {
 
 void native_quantize_q8_1(const float* x, void* x_q8_1, int n_in, int ncols, void* stream) {
     validate_shape(n_in, ncols);
+    native_quantize_q8_1_rows(x, x_q8_1, n_in, ncols, stream);
+}
+
+std::size_t native_q8_1_rows_bytes(int n_in, int64_t rows) {
+    if (n_in <= 0 || n_in % Q8K != 0 || rows < 0)
+        throw std::invalid_argument("native Q8_1 rows require n_in > 0 and divisible by 32, and rows >= 0");
+    return std::size_t(rows) * std::size_t(n_in / Q8K) * sizeof(Q81Block);
+}
+
+void native_quantize_q8_1_rows(const float* x, void* x_q8_1, int n_in, int64_t rows, void* stream) {
+    if (n_in <= 0 || n_in % Q8K != 0 || rows < 1 || (int64_t) n_in * rows > INT32_MAX)
+        throw std::invalid_argument("native Q8_1 rows require n_in > 0 and divisible by 32, and 1 <= rows");
     validate_pointer(x);
     validate_pointer(x_q8_1);
     auto& q = validate_stream(stream);
     // Columns are contiguous and n_in is a multiple of 32, so ncols columns quantize as one vector of
     // ncols * n_in elements: every 32-element block stays inside one column.
-    const int n_total = n_in * ncols;
+    const int n_total = (int) ((int64_t) n_in * rows);
     auto* y = static_cast<Q81Block*>(x_q8_1);
     const std::size_t global = (std::size_t(n_total) + QUANT_THREADS - 1) / QUANT_THREADS * QUANT_THREADS;
     q.parallel_for(sycl::nd_range<1>(global, QUANT_THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
