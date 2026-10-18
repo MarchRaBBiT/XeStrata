@@ -1358,7 +1358,7 @@ B70 では、`cvec_parity` が制御ベクトルのカーネルを確かめて�
 | `... gives this GPU no XMX` | そのコンパイラでは GPU の XMX が使えません。setup の選択肢から選びます。XMX なしでも動き、prefill に約 1.6 倍の時間がかかります（[BUILD.ja.md](BUILD.ja.md#sycl-のコンパイラ)）。 |
 | `no SYCL compiler for the engine` | SYCL のコンパイラがありません。ディストリビューションの DPC++ を入れるか、`--intel-llvm-build` を付けます。 |
 | 起動時に `alloc_device: ... refused` | B70 でまれに起きます（約 120 回の起動で 3 回）。もう一度起動すれば、たいていは動きます（[XE.ja.md](XE.ja.md#出力ヘッドの-vram-の確保が断られる)）。 |
-| 起動のログに `IGC's GEP simplification is off` と出る | Intel Graphics Compiler（IGC）の 2.27〜2.30（Ubuntu 26.04 の 2.28.4 など）は、Xe2 の GPU（Arc B シリーズ、Lunar Lake）向けに一部の読みを誤って訳し、GPU が範囲外を読んで止まるか、答えが狂います。エンジンは、入っている IGC がその版のとき（Windows では版が分からないので常に）、起動時に `IGC_EnableGEPSimplification=0` を設定してその最適化を切ります（B70 では 1K の decode が 5〜10% 遅くなり、32K は変わりません）。自分で `IGC_EnableGEPSimplification=1` を設定していれば、そちらが優先されます。 |
+| 起動のログに `IGC's GEP simplification is off` と出る | Intel Graphics Compiler（IGC）の 2.27〜2.30（Ubuntu 26.04 の 2.28.4 など）は、Xe2 以降の GPU（Arc B シリーズ、Lunar Lake、Panther Lake）向けに一部の読みを誤って訳し、GPU が範囲外を読んで止まるか、答えが狂います。Linux のエンジンは、入っている IGC がその版で、Xe2 以降の GPU があるとき、起動時に `IGC_EnableGEPSimplification=0` を設定してその最適化を切ります（B70 では 1K の decode が 5〜10% 遅くなり、32K は変わりません）。自分で `IGC_EnableGEPSimplification=1` を設定していれば、そちらが優先されます。元の速さで動かすには、Fedora 44 を使うか（IGC が 2.32 以降です）、[Podman で入れます](../README.ja.md#podman)（中は Fedora 44 です）。 |
 | Python やビルドの道具を入れられなかった | 示されたものを入れて、もう一度実行します。済んだことは残っていて、飛ばします。 |
 | `port 8095 is already in use` | XeStrata がすでに動いている（そのウィンドウを探す）か、ほかのプログラムがそのポートを使っています: `./setup.sh --port 8081`。 |
 | 初回の起動に数分かかる | RAM に 23〜50 GB を読み込んでいます。ファイルが OS のキャッシュにある間は、2 回目の方が速くなります。 |
