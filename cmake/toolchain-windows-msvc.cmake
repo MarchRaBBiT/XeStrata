@@ -50,6 +50,13 @@ set(CMAKE_CXX_FLAGS_INIT "${_strata_win_flags}")
 set(_strata_lld_dir "${CMAKE_BINARY_DIR}/strata-lld-link")
 file(MAKE_DIRECTORY "${_strata_lld_dir}")
 file(CREATE_LINK "${STRATA_LLD_LINK}" "${_strata_lld_dir}/lld-link" SYMBOLIC)
+# the AMD device code's link (ELF) takes -fuse-ld=lld-link as the name ld.lld-link: the compiler's own ld.lld under it
+if(CMAKE_CXX_COMPILER)
+  get_filename_component(_strata_cxx_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
+  if(EXISTS "${_strata_cxx_bin}/ld.lld")
+    file(CREATE_LINK "${_strata_cxx_bin}/ld.lld" "${_strata_lld_dir}/ld.lld-link" SYMBOLIC)
+  endif()
+endif()
 set(_strata_win_link "-B\"${_strata_lld_dir}\" -L\"${STRATA_XWIN}/crt/lib/x86_64\" \
 -L\"${STRATA_XWIN}/sdk/lib/um/x86_64\" -L\"${STRATA_XWIN}/sdk/lib/ucrt/x86_64\" -L\"${STRATA_SYCL_WINDOWS}/lib\"")
 set(CMAKE_EXE_LINKER_FLAGS_INIT "${_strata_win_link}")

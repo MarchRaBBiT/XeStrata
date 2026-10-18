@@ -163,12 +163,19 @@ function(strata_hip_device_libs arch out)
     # compiler's own only where none of them builds
     get_filename_component(own "${CMAKE_CXX_COMPILER}" DIRECTORY)
     get_filename_component(own "${own}/../amdgcn/bitcode" ABSOLUTE)
+    if(CMAKE_CROSSCOMPILING AND WIN32)
+      # a Windows host's (its wchar_t of 16 bits), which tools/intel_llvm_build.py --windows makes
+      set(own "${STRATA_SYCL_WINDOWS}/amdgcn/bitcode")
+    endif()
     file(GLOB dirs /opt/rocm/amdgcn/bitcode /opt/rocm*/amdgcn/bitcode /opt/rocm*/core-*/amdgcn/bitcode
                    /opt/rocm*/lib/llvm/amdgcn/bitcode /opt/rocm*/core-*/lib/llvm/amdgcn/bitcode
                    /opt/rocm*/lib/llvm/lib/clang/*/lib/amdgcn/bitcode
                    /usr/lib64/rocm/llvm/lib/clang/*/lib/amdgcn/bitcode
                    /usr/lib/llvm-*/lib/clang/*/amdgcn/bitcode /usr/lib/llvm-*/lib/clang/*/lib/amdgcn/bitcode)
     list(SORT dirs COMPARE NATURAL ORDER DESCENDING)
+    if(CMAKE_CROSSCOMPILING AND WIN32)
+      set(dirs "")                                  # this machine's are a Linux host's
+    endif()
     set(libs "")
     set(tried "")
     foreach(dir IN ITEMS ${dirs} "${own}")
@@ -212,6 +219,7 @@ function(strata_hip_choose archs targets_out opts_out)
     endif()
     list(APPEND targets amd_gpu_${arch})
   endforeach()
+  strata_win_spirv_check(amdgcn-amd-amdhsa)
   list(GET archs 0 first)
   strata_hip_device_libs(${first} libs)
   set(opts "--rocm-device-lib-path=${libs}")
