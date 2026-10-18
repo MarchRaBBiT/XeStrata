@@ -249,8 +249,24 @@ CompilerWorkaround intel_compiler_workaround() {
     return done;
 }
 
+// The SYCL runtime's on-disk cache of the device code it builds (SYCL_CACHE_PERSISTENT), on unless the user set it:
+// without it every start builds each kernel module it uses from the SPIR-V again, linking the device libraries in, and
+// the GPU driver's own cache does not spare that.  GLM-5.3-Flash on the B70 (2026-10-19): a 1K-token prompt took 54.7 s
+// (17 s of it the first use of the q8_1 kernels' module) and the first decode tokens 7.6 s; from the cache 27.4 s and
+// 0.19 s, the model loaded in 1.3 s instead of 11.8.  The cache's keys hold the device, the driver's version and the
+// build options, so a new driver builds anew.
+static void sycl_code_cache() {
+    if (std::getenv("SYCL_CACHE_PERSISTENT") != nullptr) return;
+#if defined(_WIN32)
+    _putenv_s("SYCL_CACHE_PERSISTENT", "1");
+#else
+    setenv("SYCL_CACHE_PERSISTENT", "1", 0);
+#endif
+}
+
 const std::vector<sycl::device>& engine_devices() {
     static const std::vector<sycl::device> devices = [] {
+        sycl_code_cache();
         const CompilerWorkaround w = intel_compiler_workaround();
         std::vector<sycl::device> found = find_devices();
         if (w.set && std::any_of(found.begin(), found.end(), [](const sycl::device& d) {
