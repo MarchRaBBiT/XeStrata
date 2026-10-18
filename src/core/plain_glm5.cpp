@@ -368,9 +368,7 @@ bool PlainModel::record_gblock(const GBlock& b, int64_t l, int T, uint32_t& ring
         k::glm5_l2_heads(g_kc_, H, kL2Eps, T, cs);
         k::glm5_kda_gate(g_f_, b.dt, b.a, (float) s.kda_gate_lower_bound, g_gate_, H, S, T, cs);
         k::native_gdn_beta_gate(g_beta_, H * T, cs);
-        for (int t = 0; t < T; ++t)   // the recurrence, token by token
-            k::glm5_kda_step(state, g_qc_ + (size_t) t * C, g_kc_ + (size_t) t * C, g_vc_ + (size_t) t * C,
-                             g_gate_ + (size_t) t * C, g_beta_ + (size_t) t * H, g_o_ + (size_t) t * C, H, cs);
+        k::glm5_kda_scan(state, g_qc_, g_kc_, g_vc_, g_gate_, g_beta_, g_o_, H, T, cs);   // the recurrence
         k::glm5_kda_out(g_o_, g_g2_, b.o_norm, eps, g_oy_, H, T, cs);
         gproj(b.o, g_oy_, mix_, T, false, cs);
     } else {

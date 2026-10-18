@@ -73,6 +73,10 @@ void glm5_kda_out(const float* o, const float* g2, const float* w, float eps, fl
 ///   out   (H, S) = (S_h' q) / sqrt(S), S_h' = diag(exp g) S_h + k delta^T, delta = (v - (diag(exp g) S_h)^T k) beta
 void glm5_kda_step(float* state, const float* q, const float* k, const float* v, const float* g, const float* beta,
                    float* out, int64_t n_heads, void* stream);
+/// glm5_kda_step for n_tokens in order in one launch: q, k, v, g, out [T][H][S], beta [T][H].  A state column's
+/// recurrence depends on no other column, so each walks the tokens by itself; every value is the per-token calls'.
+void glm5_kda_scan(float* state, const float* q, const float* k, const float* v, const float* g, const float* beta,
+                   float* out, int64_t n_heads, int64_t n_tokens, void* stream);
 
 // ---- the DSA layers: the k-pool indexer and the MLA attention over its selection.  Cells are sequence positions
 // from 0 (the step records' kStepPos, qsa.hpp); a pool is the `kpool` cells [kpool m, kpool m + kpool), and a token at

@@ -313,6 +313,54 @@ void glm5_kda_step(float* state, const float* q, const float* k, const float* v,
     sync_if_needed(stream, event, "glm5_kda_step");
 }
 
+void glm5_kda_scan(float* state, const float* q, const float* k, const float* v, const float* g, const float* beta,
+                   float* out, int64_t n_heads, int64_t n_tokens, void* stream) {
+    constexpr int S = 128;
+    constexpr int COLS = 4;   // columns (sub-groups) a work-group
+    if (n_heads <= 0 || n_heads > 65535) throw core::DeviceError("glm5_kda_scan: " + std::to_string(n_heads) + " heads");
+    if (n_tokens <= 0) return;
+    const int H = (int) n_heads;
+    const int64_t T = n_tokens, TS = (int64_t) H * S;
+    const float scale = 1.0f / sycl::sqrt((float) S);
+    // one sub-group a (head, column): its four state rows a lane in registers, as native_gdn_step
+    const auto event = queue_for(stream).parallel_for(
+        sycl::nd_range<2>({(size_t) H, (size_t) S * WARP}, {1, (size_t) COLS * WARP}),
+        [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(WARP)]] {
+            const sycl::sub_group sg = it.get_sub_group();
+            const int head = (int) it.get_group(0);
+            const int lane = (int) sg.get_local_linear_id();
+            const int col = (int) it.get_group(1) * COLS + (int) sg.get_group_linear_id();
+            float s[4];
+            for (int r = 0; r < 4; ++r) s[r] = state[((size_t) (r * WARP + lane) * H + head) * S + col];
+            const int64_t hs = (int64_t) head * S;
+            for (int64_t t = 0; t < T; ++t) {   // glm5_kda_step's body a token, the column's state kept in registers
+                const float* gt = g + t * TS + hs;
+                const float* kt = k + t * TS + hs;
+                const float* qt = q + t * TS + hs;
+                float kr[4], qr[4];
+                float kv = 0.0f;
+                for (int r = 0; r < 4; ++r) {
+                    const int i = r * WARP + lane;
+                    s[r] = sycl::exp(gt[i]) * s[r];   // the decay first, as ggml
+                    kr[r] = kt[i];
+                    qr[r] = qt[i];
+                    kv += s[r] * kr[r];
+                }
+                kv = sycl::reduce_over_group(sg, kv, sycl::plus<float>());
+                const float delta = (v[t * TS + hs + col] - kv) * beta[t * H + head];
+                float o = 0.0f;
+                for (int r = 0; r < 4; ++r) {
+                    s[r] += kr[r] * delta;
+                    o += s[r] * qr[r];
+                }
+                o = sycl::reduce_over_group(sg, o, sycl::plus<float>());
+                if (lane == 0) out[t * TS + hs + col] = o * scale;
+            }
+            for (int r = 0; r < 4; ++r) state[((size_t) (r * WARP + lane) * H + head) * S + col] = s[r];
+        });
+    sync_if_needed(stream, event, "glm5_kda_scan");
+}
+
 void glm5_idx_steps(const int32_t* steps_in, int64_t n_tokens, int kpool, int top_k, int32_t* steps_out, void* stream) {
     if (n_tokens <= 0) return;
     if (kpool <= 1 || top_k <= 0) throw core::DeviceError("glm5_idx_steps: kpool above 1 and a positive top_k");
