@@ -33,7 +33,7 @@ How it differs from Strata:
 - **For Intel Arc,** and it runs on AMD and NVIDIA GPUs too.
 - **One GPU, as a rule.** The layers can also be spread over two or more GPUs in the same PC ([MULTIGPU](docs/MULTIGPU.md)).
   The GPUs may be of different makers, Intel, AMD and NVIDIA (for example an Intel Arc Battlemage and an NVIDIA Ada; with NVIDIA, in the contrib-llvm build).
-- **Linux and Windows.** On Windows, Intel and NVIDIA GPUs; AMD GPUs on Linux only ([Windows](#windows)). WSL 2 may work (pull requests welcome).
+- **Linux and Windows.** On Windows too, Intel, NVIDIA and AMD GPUs ([Windows](#windows)). WSL 2 may work (pull requests welcome).
 - **Runs with free software only, too** (the free build, free enough for Debian main; [made from the source](docs/BUILD.md#the-deb-and-rpm-packages)). The contrib-llvm packages use
   Intel's oneMKL and NVIDIA's cuBLAS, which are not free software, when they are installed ([Install](#install)).
 
@@ -286,7 +286,7 @@ Installing from the source with `./setup.sh` is in [docs/BUILD.md](docs/BUILD.md
 
 - **What it needs:** the [.NET 10 runtime](https://dotnet.microsoft.com/download/dotnet/10.0), the [Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe) and the GPU's driver.
   Without the Visual C++ Redistributable, `xestrata.exe` says so and stops.
-- **GPUs:** Intel and NVIDIA (NVIDIA from Pascal on, the code of the cuda12.4 package). AMD GPUs do not run on Windows yet.
+- **GPUs:** Intel, NVIDIA (from Pascal on, the code of the cuda12.4 package) and AMD (RDNA2 and later, the gfx of the Ubuntu packages). AMD needs Adrenalin 26.5.1 or a later driver (`amdhip64_7.dll`).
 - **Where things go:** nothing is written into the 7z's folder. The settings go to `%APPDATA%\xestrata`, the logs and the rest to `%LOCALAPPDATA%\xestrata`, the models to the data folder (by default `%LOCALAPPDATA%\xestrata\data`).
 - **Updates:** unpack the new 7z into a folder of its own and start its `xestrata.exe`. The settings and the models carry over.
 

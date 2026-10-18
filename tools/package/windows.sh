@@ -5,7 +5,8 @@
 # container, with the commit's files in /src, /out for the 7z and /cache for the downloads kept between builds (xwin's
 # and NuGet's).  Everything is built here, on Linux, for Windows (docs/DEVTOOLS.md#windows-cross-build): intel/llvm's
 # contrib toolchain (whose tools the next step runs), intel/llvm's SYCL runtime for Windows, the engine (the
-# contrib-llvm mode: Intel's GPUs through Level Zero, NVIDIA's through CUDA; oneMath is not on Windows yet), the
+# contrib-llvm mode: Intel's GPUs through Level Zero, NVIDIA's through CUDA, AMD's through HIP; oneMath is not on
+# Windows yet), the
 # launchers (windows/launcher, .NET), and Python's embeddable distribution with the packages setup.py uses;
 # tools/package/windows_bundle.py makes the folder, its notices and the 7z.
 set -eu
@@ -14,6 +15,8 @@ variant=$XESTRATA_VARIANT
 cuda_ver=${variant#cuda}
 # as the cuda12.4 deb (tools/package/container.sh): from Pascal on
 archs="sm_60;sm_61;sm_70;sm_75;sm_80;sm_86;sm_89;sm_90"
+# as the Ubuntu debs (the RDNA2 and later GPUs their rocBLAS has code for)
+hip_archs="gfx1030;gfx1031;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1200;gfx1201"
 xwin_ver=0.10.0
 python_ver=3.14.8
 
@@ -21,9 +24,11 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
 # llvm-21 and lld-21: llvm-lib, llvm-rc, llvm-mt, llvm-ml and lld-link, which intel/llvm does not install;
 # nvidia-cuda-toolkit: CUDA 12.4, for intel/llvm's CUDA target and the engine's NVIDIA code (not free software);
-# dotnet-sdk-10.0 for the launchers
+# dotnet-sdk-10.0 for the launchers; ROCm's HIP (free software) for intel/llvm's HIP target and the Windows HIP
+# adapter's headers, and the device libraries the AMD code links (as container.sh)
 apt-get install -y -q --no-install-recommends git cmake ninja-build g++ libhwloc-dev libzstd-dev python3 python3-pip \
-  curl ca-certificates unzip ccache lld lld-21 llvm-21 dotnet-sdk-10.0 7zip nvidia-cuda-toolkit opencl-headers
+  curl ca-certificates unzip ccache lld lld-21 llvm-21 dotnet-sdk-10.0 7zip nvidia-cuda-toolkit opencl-headers \
+  libamdhip64-dev rocm-device-libs-21
 cuda_path=/usr/lib/cuda
 
 # build.sh's compiler cache, shared with the Ubuntu packages (container.sh)
@@ -62,8 +67,8 @@ cmake -G Ninja -S "$src" -B /build/engine -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_TOOLCHAIN_FILE="$src/cmake/toolchain-windows-msvc.cmake" \
   -DCMAKE_CXX_COMPILER="$src/.tools/intel-llvm-contrib/install/bin/clang++" -DSTRATA_LICENSE=contrib \
   -DSTRATA_XWIN=/build/xwin -DSTRATA_SYCL_WINDOWS="$sycl" -DSTRATA_CUDA_ARCHS="$archs" -DSTRATA_CUDA_PATH="$cuda_path" \
-  -DSTRATA_CUDA_PTX= -DSTRATA_ONEMKL=OFF -DSTRATA_HIP_ARCHS= -DSTRATA_ENABLE_XE=ON -DSTRATA_NATIVE_EXPERTS=ON \
-  -DSTRATA_BUILD_TESTS=OFF -DSTRATA_PORTABLE=ON -DSTRATA_GGML_DIR="$llama"
+  -DSTRATA_CUDA_PTX= -DSTRATA_ONEMKL=OFF -DSTRATA_HIP_ARCHS="$hip_archs" -DSTRATA_ENABLE_XE=ON \
+  -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_BUILD_TESTS=OFF -DSTRATA_PORTABLE=ON -DSTRATA_GGML_DIR="$llama"
 cmake --build /build/engine --target strata strata-device strata-image -j "$jobs"
 
 # the launchers (framework-dependent: Windows' .NET 10 runtime runs them); Avalonia's build telemetry off
@@ -86,7 +91,8 @@ version=$(sed -n 's/^set(STRATA_UPSTREAM_VERSION "\(.*\)")$/\1/p' "$src/CMakeLis
   's/^set(XESTRATA_REVISION \([0-9]*\))$/\1/p' "$src/CMakeLists.txt")
 python3 "$src/tools/package/windows_bundle.py" --src "$src" --engine /build/engine --sycl "$sycl" \
   --launcher /build/launcher --nuget /cache/nuget --python-zip "/build/python-$python_ver-embed-amd64.zip" \
-  --wheels /build/wheels --llama "$llama" --version "$version" --cuda-archs "$archs" --out /build/out
+  --wheels /build/wheels --llama "$llama" --version "$version" --cuda-archs "$archs" --hip-archs "$hip_archs" \
+  --out /build/out
 cp /build/out/*.7z /out/
 
 {

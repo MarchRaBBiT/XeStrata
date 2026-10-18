@@ -30,13 +30,13 @@ import zipfile
 from pathlib import Path
 
 # The SYCL runtime's DLLs a Windows engine loads (sycl-jit.dll, the runtime compiler, is not: 120 MB the engine does
-# not use).  ze_loader.dll comes with Intel's driver, nvcuda.dll and nvml.dll with NVIDIA's.
-SYCL_DLLS = ("sycl9.dll", "ur_win_proxy_loader.dll", "ur_loader.dll", "ur_adapter_cuda.dll",
+# not use).  ze_loader.dll comes with Intel's driver, nvcuda.dll and nvml.dll with NVIDIA's, amdhip64_7.dll with AMD's.
+SYCL_DLLS = ("sycl9.dll", "ur_win_proxy_loader.dll", "ur_loader.dll", "ur_adapter_cuda.dll", "ur_adapter_hip.dll",
              "ur_adapter_level_zero.dll", "ur_adapter_level_zero_v2.dll", "xptifw.dll")
 ENGINE_EXES = ("strata.exe", "strata-device.exe", "strata-image.exe")
 # what a Windows PC brings (the Visual C++ runtime, which xestrata.exe checks for) and what must never be carried
 FORBIDDEN = ("vcruntime*.dll", "msvcp*.dll", "concrt*.dll", "ucrtbase*.dll", "api-ms-win-*.dll", "nvcuda.dll",
-             "nvml.dll", "cublas*.dll", "cudart*.dll", "mkl_*.dll")
+             "nvml.dll", "cublas*.dll", "cudart*.dll", "mkl_*.dll", "amdhip64*.dll", "amd_comgr*.dll")
 # the Python packages the 7z carries (requirements.txt without the build tools, and colorama, which tqdm takes on
 # Windows): a wheel not named here stops the script
 WHEELS = ("numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "pillow", "psutil", "markupsafe", "certifi",
@@ -50,7 +50,8 @@ COMPONENTS = [
           *(f"app/engine/{e}" for e in ENGINE_EXES)]),
     ("intel/llvm (DPC++) SYCL runtime, with Unified Runtime, UMF and hwloc", "intel-llvm",
      "Apache-2.0 WITH LLVM-exception; UMF Apache-2.0 WITH LLVM-exception; hwloc BSD-3-Clause; Level Zero loader "
-     "headers MIT", "https://github.com/intel/llvm", ["sycl:licenses/*"], [f"app/engine/{d}" for d in SYCL_DLLS]),
+     "headers MIT; AMD's HIP headers MIT", "https://github.com/intel/llvm", ["sycl:licenses/*"],
+     [f"app/engine/{d}" for d in SYCL_DLLS]),
     (".NET application host", "dotnet", "MIT", "https://github.com/dotnet/runtime",
      ["https://raw.githubusercontent.com/dotnet/runtime/main/LICENSE.TXT",
       "https://raw.githubusercontent.com/dotnet/runtime/main/THIRD-PARTY-NOTICES.TXT"], []),
@@ -143,6 +144,7 @@ def main() -> None:
     ap.add_argument("--python-zip", type=Path, required=True)
     ap.add_argument("--version", required=True)
     ap.add_argument("--cuda-archs", required=True, help="the engine's NVIDIA architectures, sm_60;sm_61;...")
+    ap.add_argument("--hip-archs", required=True, help="the engine's AMD architectures, gfx1030;gfx1100;...")
     a = ap.parse_args()
 
     top_name = f"XeStrata-{a.version}-windows-x64"
@@ -179,7 +181,8 @@ def main() -> None:
     archs = [x for x in a.cuda_archs.split(";") if x]
     (eng / "BUILD.json").write_text(json.dumps({
         "source": "package", "backend": "xe", "package": top_name, "version": a.version, "license": "contrib",
-        "cuda_archs": archs, "hip_archs": [], "runtime": {}, "lib_dirs": []}, indent=1) + "\n")
+        "cuda_archs": archs, "hip_archs": [x for x in a.hip_archs.split(";") if x], "runtime": {}, "lib_dirs": []},
+        indent=1) + "\n")
 
     # ---- Python: the embeddable distribution without its Visual C++ runtime (the user's, which xestrata.exe checks)
     # and its ._pth (which would leave the script's folder off sys.path: setup.py imports serve/ from beside it), and
