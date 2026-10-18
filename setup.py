@@ -32,8 +32,8 @@ answers, no questions), --setup (install another model / change settings instead
 (EXPERIMENTAL, off by default),
 --models-dir DIR, --gguf-dir DIR (use GGUF files you already have), --check (only check this PC), --check-update
 (whether a newer XeStrata release is out), --images qwen-image|no (image generation: Qwen-Image-2.1-Turbo on
-XeStrata's image engine, POST /v1/images/generations; --image-quant Q4_K_M|Q6_K|Q8_0, --image-ssd-offload on|off,
---image-gpu-policy auto|keep|shrink|unload).
+XeStrata's image engine, POST /v1/images/generations; --image-quant Q4_K_M|Q6_K|Q8_0, --image-text-encoder
+stock|uncensored, --image-ssd-offload on|off, --image-gpu-policy auto|keep|shrink|unload).
 
 Setup recommends, it never forces: the recommended answers are the defaults (--yes, or Enter), and a bigger choice
 than it recommends - a longer context, a size it thinks will not fit - is kept, with what it risks.  With --yes, an
@@ -2349,42 +2349,45 @@ def setup_images(a, gpu: dict, models_dir: Path, eng: Path, text_gb: float | Non
     if not exe.exists():
         fail(f"the image engine is missing ({exe})", "run setup again to compile the engine (it builds both)")
     asked = a.image_quant or QI.DEFAULT_QUANT
+    enc = getattr(a, "image_text_encoder", None) or QI.DEFAULT_TEXT_ENCODER
     ssd = getattr(a, "image_ssd_offload", None) == "on"
     quant = asked
     lowered = None
     if not ssd and text_gb is not None:
         left = ram_gb() - text_gb
-        fit, fits = QI.quant_for_ram(left)
+        fit, fits = QI.quant_for_ram(left, enc)
         if QI.QUANTS.index(fit) < QI.QUANTS.index(asked):
             quant = fit
             # kept in the config: the server says it at start and on the web page (the user's decision, 2026-10-15)
-            lowered = {"from": asked, "to": quant, "need_gb": round(QI.ram_need_gb(asked), 1),
+            lowered = {"from": asked, "to": quant, "need_gb": round(QI.ram_need_gb(asked, enc), 1),
                        "ram_left_gb": round(max(left, 0.0), 1)}
-            warn(f"image model lowered from {asked} to {quant}: {asked} needs ~{QI.ram_need_gb(asked):.0f} GB of "
+            warn(f"image model lowered from {asked} to {quant}: {asked} needs ~{QI.ram_need_gb(asked, enc):.0f} GB of "
                  f"RAM beside the text model, which leaves ~{max(left, 0):.0f} GB. --image-ssd-offload on keeps "
                  f"{asked} and reads what does not fit from the SSD (slower)")
         if not fits:
-            warn(f"even {quant} (~{QI.ram_need_gb(quant):.0f} GB) does not fit the ~{max(left, 0):.0f} GB of RAM "
+            warn(f"even {quant} (~{QI.ram_need_gb(quant, enc):.0f} GB) does not fit the ~{max(left, 0):.0f} GB of RAM "
                  "the text model leaves: images read part of the model from the SSD (slower), and the PC may run "
                  "short of RAM while one is made")
     elif ssd:
         ok(f"image model {quant} with SSD offload: what does not fit in RAM is read from the SSD")
     say(f"  Image generation: Qwen-Image-2.1-Turbo {quant} on XeStrata's image engine (8 steps; "
         "POST /v1/images/generations)")
+    if enc != QI.DEFAULT_TEXT_ENCODER:
+        say(f"  Text encoder: {QI.FILES[QI.TEXT_ENCODERS[enc]][0]} (Qwen3-VL-8B with its refusal direction removed)")
     say("  " + QI.LICENSE_NOTE)
-    need = sum(QI.FILES[k][2] for k in (quant, "vae", "llm", "mmproj")) / 1e9
+    need = sum(QI.FILES[k][2] for k in QI.file_names(quant, enc)) / 1e9
     if ask(f"Download the image model ({need:.1f} GB) and set up image generation?", ["y", "n"], "y", a.yes) != "y":
         return None
     models_dir.mkdir(parents=True, exist_ok=True)
     if free_gb(models_dir) < need + 5:
         warn(f"less than {need + 5:.0f} GB free for the image model: the download may run out of disk space")
-    for name in (quant, "vae", "llm", "mmproj"):
+    for name in QI.file_names(quant, enc):
         repo, path, size, sha = QI.FILES[name]
         dst = QI.local_path(models_dir, name)
         download(QI.file_url(name, hf_endpoint()), dst, f"image model: {Path(path).name}")
         verify_sha256(dst, size, sha)
     cfg = QI.image_config(quant, exe, models_dir, uma=bool((gpu or {}).get("integrated")),
-                          policy=a.image_gpu_policy or "auto", ssd_offload=ssd)
+                          policy=a.image_gpu_policy or "auto", ssd_offload=ssd, text_encoder=enc)
     if lowered:
         cfg["quant_lowered"] = lowered
     ok(f"image generation: {quant}, GPU policy {cfg['gpu_policy']}")
@@ -4202,6 +4205,10 @@ def main() -> int:
     ap.add_argument("--image-quant", choices=["Q4_K_M", "Q6_K", "Q8_0"],
                     help="the image model's size (default Q8_0, lowered when its files would not fit the RAM the "
                          "text model leaves; the GPU's memory does not decide it)")
+    ap.add_argument("--image-text-encoder", choices=["stock", "uncensored"],
+                    help="the image model's text encoder: stock (default: Qwen3-VL-8B, Unsloth's UD-Q4_K_XL) or "
+                         "uncensored (AtomicChat's Qwen3-VL-8B with its refusal direction removed, AD-Q4_K); the "
+                         "denoiser, the VAE and the vision encoder stay the same")
     ap.add_argument("--image-ssd-offload", choices=["on", "off"],
                     help="on: keep the image model's size even when the RAM is short, and read what does not fit "
                          "from the SSD (slower); off (default): a smaller size instead")

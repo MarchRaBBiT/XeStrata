@@ -1298,6 +1298,7 @@ Setup downloads the image model, its VAE, its text encoder (Qwen3-VL-8B) and, fo
 The image model is Q8_0 by default. The engine streams from RAM the layers that do not fit in VRAM, so the GPU's memory does not decide the size.
 The RAM does: when the four files (the vision encoder for the edits among them) and the engine's own (about 16.6 GB with Q8_0, 15.3 GB with Q6_K, 13.2 GB with Q4_K_M) do not fit the RAM the text model leaves, setup takes the largest that fits (Q6_K, Q4_K_M).
 With `--image-ssd-offload on` it keeps the size chosen and reads what does not fit from the SSD (slower).
+With `--image-text-encoder uncensored` the text encoder is AtomicChat's Qwen3-VL-8B with its refusal direction removed (AD-Q4_K, about 5.3 GB); the image model, the VAE and the vision encoder stay the same. Its authors measured no change in what it can draw, only a small overall shift in the pictures.
 When setup lowers it, setup, the server at start and the web page (the Images tab) say so.
 With the same seed it makes the image stable-diffusion.cpp makes with the model card's command (within an LPIPS of 0.03).
 Qwen-Image-2.1-Turbo's weights are under the Qwen Research License, not a free software license: read it before any commercial use.
