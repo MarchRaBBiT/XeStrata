@@ -34,11 +34,13 @@ The config's "images" section (written by setup --images, tools/image/qimage.py)
    "llm": "...Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf", "quant": "Q8_0", "gpu_policy": "auto", "reload": "lazy"|"eager",
    "max_n": 4, "max_side": 2048, "timeout_s": 3600, "uma": false, "out_dir": null, "keep_files": 64,
    "vision": "...mmproj-F16.gguf", "max_refs": 3, "reserve_mib": 512, "spare_mib": 1024, "ssd_offload": false,
-   "quant_lowered": {"from": "Q8_0", "to": "Q6_K", "need_gb": 15.5, "ram_left_gb": 14.0}}
+   "text_encoder": "stock", "text_quant": "Q4_K",
+   "quant_lowered": {"from": "Q8_0", "to": "Q6_K", "text_from": "Q8_0", "text_to": "Q4_K", "need_gb": 20.2,
+                     "ram_left_gb": 14.0}}
   vision: Qwen3-VL's vision encoder (mmproj), for the edits (without it they are refused); max_refs: the reference
   images an edit takes at most; reserve_mib: VRAM the image engine leaves free when it sizes itself; spare_mib: the
   free VRAM that must remain after a job under keep for the engine to keep its layers; quant_lowered (only when setup
-  lowered it): the size setup took instead of the one asked for, because the RAM the text model leaves was short
+  lowered them): the sizes setup took instead of the ones asked for, because the RAM the text model leaves was short
   (note(): the server's log and the web page say so).
 """
 from __future__ import annotations
@@ -468,14 +470,21 @@ class ImageGen:
         self.progress: tuple | None = None         # (step, steps) of the running job
 
     def note(self) -> str | None:
-        """What the user is told about this setup at start and on the web page: the image model's size lowered for
-        the RAM (setup's "quant_lowered"), or None."""
+        """What the user is told about this setup at start and on the web page: the sizes of the image model and its
+        text encoder lowered for the RAM (setup's "quant_lowered"), or None."""
         q = self.cfg.get("quant_lowered")
         if not isinstance(q, dict) or not q.get("from") or not q.get("to"):
             return None
-        return (f"The image model runs at {q['to']} instead of {q['from']}: {q['from']} needs about "
+        parts = []
+        if q["to"] != q["from"]:
+            parts.append(f"the image model at {q['to']} instead of {q['from']}")
+        if q.get("text_from") and q.get("text_to") and q["text_to"] != q["text_from"]:
+            parts.append(f"its text encoder at {q['text_to']} instead of {q['text_from']}")
+        if not parts:
+            return None
+        return (f"Image generation runs {' and '.join(parts)}: the larger sizes need about "
                 f"{q.get('need_gb', '?')} GB of RAM beside the text model, which leaves about "
-                f"{q.get('ram_left_gb', '?')} GB. Run setup with --image-ssd-offload on to keep {q['from']} "
+                f"{q.get('ram_left_gb', '?')} GB. Run setup with --image-ssd-offload on to keep them "
                 "(what does not fit is read from the SSD, slower).")
 
     def missing(self) -> list[str]:
