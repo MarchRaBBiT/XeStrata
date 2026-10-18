@@ -716,6 +716,34 @@ def drm_memory(render: str, driver: str):
         os.close(fd)
 
 
+def drm_graphics_ip(render: str) -> int | None:
+    """The graphics IP's major version the xe driver reports for the GPU's main GT (DRM_XE_DEVICE_QUERY_GT_LIST: 20 on
+    Xe2, 30 on Xe3; 0 on a GPU without GMD_ID, Alchemist and older), or None when it cannot be asked."""
+    import ctypes
+    import fcntl
+    try:
+        fd = os.open(render, os.O_RDWR)
+    except OSError:
+        return None
+    try:
+        # struct drm_xe_device_query; DRM_XE_DEVICE_QUERY_GT_LIST = 3; GTs of 96 bytes after 8, type at 0 (MAIN = 0),
+        # ip_ver_major at 32
+        q = bytearray(struct.pack("QIIQQQ", 0, 3, 0, 0, 0, 0))
+        req = _drm_iowr(0x40, len(q))
+        fcntl.ioctl(fd, req, q)
+        buf = ctypes.create_string_buffer(struct.unpack_from("I", q, 12)[0])
+        struct.pack_into("Q", q, 16, ctypes.addressof(buf))
+        fcntl.ioctl(fd, req, q)
+        for i in range(struct.unpack_from("I", buf, 0)[0]):
+            if struct.unpack_from("H", buf, 8 + 96 * i)[0] == 0:
+                return struct.unpack_from("H", buf, 8 + 96 * i + 32)[0]
+        return None
+    except (OSError, struct.error):
+        return None
+    finally:
+        os.close(fd)
+
+
 def pci_name(vendor: int, device: int) -> str:
     """The card's name from the PCI ID database (hwdata), or its IDs."""
     maker = {0x8086: "Intel", 0x1002: "AMD"}.get(vendor, f"0x{vendor:04x}")
@@ -1110,6 +1138,53 @@ def runtime_commands(need: list, fast: list, repos: list) -> list:
     return [f"  {r}" for r in repos] + ([f"  {install_cmd(need + fast)}"] if need or fast else [])
 
 
+def igc_version() -> str | None:
+    """The version of the Intel Graphics Compiler the loader finds (libigc.so.2 -> libigc.so.2.28.4+0: "2.28.4"), None
+    when there is none or its file name carries no version."""
+    if WIN:
+        return None
+    try:
+        out = subprocess.run(["ldconfig", "-p"], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        if "libigc.so.2 " in line and " => " in line:
+            name = os.path.basename(os.path.realpath(line.split(" => ", 1)[1].strip()))
+            m = re.fullmatch(r"libigc\.so\.(\d+(?:\.\d+)+).*", name)
+            return m.group(1) if m else None
+    return None
+
+
+def igc_affected(version: str | None) -> bool:
+    """IGC 2.27 to 2.30 miscompile some reads for Xe2 and later GPUs (2.24 and 2.32 on do not): the engine turns their
+    GEP simplification off, which costs decode speed on short prompts (AGENTS.md, "Intel Graphics Compiler")."""
+    if not version:
+        return False
+    parts = version.split(".")
+    try:
+        major, minor = int(parts[0]), int(parts[1])
+    except (IndexError, ValueError):
+        return False
+    return major == 2 and 25 <= minor < 32
+
+
+def check_igc(makers: set) -> None:
+    """Says, without stopping, when an Intel GPU of Xe2 or later (the xe driver's graphics IP 20 or later, as the
+    engine asks it: xe_gpu_from_xe2 in src/core/device.cpp) runs with a compiler the engine works around
+    (igc_affected), and sends the user to Fedora 44, whose IGC is a fixed one, or to the Podman container (Fedora
+    44 inside)."""
+    if WIN or "intel" not in makers:
+        return
+    v = igc_version()
+    if not igc_affected(v):
+        return
+    if not any(g["vendor"] == "intel" and (g.get("ip") or 0) >= 20 for g in gpus()):
+        return
+    warn(f"Intel's compiler (IGC {v}) has a bug XeStrata works around at the engine's start: the decode of short "
+         "prompts is up to 10% slower. For full speed, use Fedora 44 (its IGC is 2.32 or later), or install "
+         "with Podman (Fedora 44 inside: README, Install).")
+
+
 def check_runtime(makers: set) -> None:
     """Stops when the GPUs of `makers` lack their makers' packages, and says how to install them; names oneMKL and
     cuBLAS too when they are missing, without stopping (XeStrata's own kernels do their work).  Windows: the GPU
@@ -1117,6 +1192,7 @@ def check_runtime(makers: set) -> None:
     checks the Visual C++ runtime; the engine there has no oneMath yet, so oneMKL and cuBLAS have no use."""
     if WIN:
         return
+    check_igc(makers)
     need, fast, repos = runtime_missing(makers)
     if not need and not fast:
         return
@@ -1234,7 +1310,8 @@ def gpus():
         visible = mem[1] / 2 ** 30 if mem else bar_gb
         found.append({"index": len(found), "name": pci_name(0x8086, did), "vram_gb": vram, "device_id": did,
                       "driver": driver, "integrated": integrated, "supported": True, "pci": pci,
-                      "bar_gb": visible, "link": host_link(dev), "render": node, "vendor": "intel"})
+                      "bar_gb": visible, "link": host_link(dev), "render": node, "vendor": "intel",
+                      "ip": drm_graphics_ip(node) if node and driver == "xe" else None})
     if not (found or nvidia or amd) and wsl_version() == 2:
         return gpus_wsl()
     return found + [{"index": len(found) + i, **g} for i, g in enumerate(nvidia + amd)]
