@@ -151,8 +151,14 @@ void glm5_hc_mean(const float* x, float* y, int64_t n_embd, int64_t n_tokens, vo
     const int64_t N = n_embd;
     const auto event = queue_for(stream).parallel_for(sycl::range<1>((size_t) (n_tokens * N)), [=](sycl::id<1> id) {
         const int64_t i = (int64_t) id[0], t = i / N, n = i % N;
-        const float* xt = x + t * HC * N + n;
-        y[i] = (((xt[0] + xt[N]) + xt[2 * N]) + xt[3 * N]) * (1.0f / HC);
+        // each stream's pointer one step of N from the last: written as xt[N], xt[2 * N], xt[3 * N], IGC 2.27 to 2.30
+        // read xt[N], xt[8 * N], xt[9 * N] on Xe2 GPUs, a fault past the buffer (AGENTS.md, "Intel Graphics Compiler";
+        // the runtime turns the pass off, this form compiles right either way)
+        const float* x0 = x + t * HC * N + n;
+        const float* x1 = x0 + N;
+        const float* x2 = x1 + N;
+        const float* x3 = x2 + N;
+        y[i] = (((*x0 + *x1) + *x2) + *x3) * (1.0f / HC);
     });
     sync_if_needed(stream, event, "glm5_hc_mean");
 }
