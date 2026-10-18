@@ -10,9 +10,9 @@ the "images" section into a run config (or prints it), as setup.py --images qwen
     python tools/image/install.py --quant Q6_K --print
 
 --gpu-policy auto|keep|shrink|unload: what the text model does during an image job (serve/images.py).
---quant: the image model's size, lowered when its files would not fit the RAM the config's text model leaves, unless
---ssd-offload on.
---text-encoder stock|uncensored: the text encoder (setup.py --image-text-encoder).
+--quant: the image model's size, lowered (after its text encoder's) when the files would not fit the RAM the config's
+text model leaves, unless --ssd-offload on.
+--text-encoder stock|uncensored: the text encoder (setup.py --image-text-encoder), Q8_0 or lowered first.
 """
 from __future__ import annotations
 
