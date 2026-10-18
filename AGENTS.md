@@ -235,3 +235,15 @@ sde64 -icx -- ./build/free/pool_test --selftest       # from the repository root
 The same tests must also still pass or skip natively, so the AVX-2 path is checked as well.
 SDE measures correctness only: its timings say nothing about the speed on real hardware.
 Whether SDE runs the tests that also use the GPU (`native_expert_parity`) is `unverified`.
+
+## Intel Graphics Compiler (IGC): the GEP simplification of 2.27 to 2.30
+
+IGC 2.27.10, 2.28.4 and 2.30.1 miscompile, for Xe2 GPUs (the targets `bmg` and `lnl`: the Arc B-series, Lunar Lake), a kernel that reads from one pointer at a runtime index and at constant multiples of it.
+With `const float* xt = x + base; xt[0] + xt[N] + xt[2 * N] + xt[3 * N]`, intel/llvm's optimizer writes `xt[2 * N]` and `xt[3 * N]` as byte offsets (8N and 12N bytes) from the pointer it already offset for `xt[N]`, and IGC's GEP simplification takes those byte offsets for element indices: the kernel reads `xt[8 * N]` and `xt[9 * N]`, a fault past the buffer (`DEVICE_LOST`, `Engine memory CAT error` in the kernel's log) or wrong values inside it.
+2.24.8 and earlier and 2.32.7 and later compile the reads right (each release's libigc from GitHub on the reproducer's SPIR-V, 2026-10-19); Alchemist (`dg2`) is not affected.
+Ubuntu 26.04, Debian and Arch ship 2.28.4; Fedora 44 ships 2.24.8 and updates to 2.41.9.
+The reproducer and the checks are in the data folder's `records/igc-gep-check/` (`<data>: LOCAL.md`).
+
+- The runtime sets `IGC_EnableGEPSimplification=0` in its environment before the SYCL runtime lists the devices (`engine_devices` in `src/core/device.cpp`), unless the user set the variable; IGC reads it when it first compiles a kernel, which the runtime does as it lists the devices. Off, the pass costs the B70 5 to 10% of the decode of a 1K prompt and nothing at 32K (generate, 2026-10-19), so the variable is set only where it is needed: on Linux when the `libigc.so.2` the loader finds is 2.25 to 2.31 by its file name (`libigc.so.2.28.4+0`), or carries no version; on Windows always, since nothing reaches the driver's `igc64.dll` before the driver loads it (unverified on an Intel GPU). The start log says so (`IGC's GEP simplification is off`).
+- Write kernels that compile right either way: step a pointer by N from the last read (`glm5_hc_mean`), or index the stream in one product (`x[(t * HC + s) * N + n]`), not `xt[k * N]` with a constant k of 2 or more beside `xt[N]`.
+- To see what IGC makes of a kernel without running it, compile ahead for Xe2 with IGC's dumps on, `IGC_ShaderDumpEnable=1 IGC_DumpToCustomDir=dump clang++ -fsycl -fsycl-targets=intel_gpu_bmg_g31 ...`, and read `dump/*_entry_*.asm`: the miscompile shows as a scalar `mul ... 0x1C:uw` (28N: the 32N bytes of the misread `xt[8 * N]`, less the 4N of `xt[N]`) ahead of the loads; `*_beforeUnification.ll` is the IR IGC received. `IGC_EnableGEPSimplification=1 ./igc_gep_probe` runs the pattern on the GPU with room for the wrong reads and fails on an affected IGC; CTest runs it through the runtime's workaround, where it passes on every GPU.
