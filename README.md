@@ -287,6 +287,7 @@ Installing from the source with `./setup.sh` is in [docs/BUILD.md](docs/BUILD.md
 - **What it needs:** the [.NET 10 runtime](https://dotnet.microsoft.com/download/dotnet/10.0), the [Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe) and the GPU's driver.
   Without the Visual C++ Redistributable, `xestrata.exe` says so and stops.
 - **GPUs:** Intel, NVIDIA (from Pascal on, the code of the cuda12.4 package) and AMD (RDNA2 and later, the gfx of the Ubuntu packages). AMD needs Adrenalin 26.5.1 or a later driver (`amdhip64_7.dll`).
+- **oneMKL:** on an Intel GPU, the prompt's dense products take Intel's oneMKL 2026.2 where it is installed (the 7z does not carry it); without it, XeStrata's own kernels.
 - **Where things go:** nothing is written into the 7z's folder. The settings go to `%APPDATA%\xestrata`, the logs and the rest to `%LOCALAPPDATA%\xestrata`, the models to the data folder (by default `%LOCALAPPDATA%\xestrata\data`).
 - **Updates:** unpack the new 7z into a folder of its own and start its `xestrata.exe`. The settings and the models carry over.
 

@@ -34,6 +34,8 @@ from pathlib import Path
 SYCL_DLLS = ("sycl9.dll", "ur_win_proxy_loader.dll", "ur_loader.dll", "ur_adapter_cuda.dll", "ur_adapter_hip.dll",
              "ur_adapter_level_zero.dll", "ur_adapter_level_zero_v2.dll", "xptifw.dll")
 ENGINE_EXES = ("strata.exe", "strata-device.exe", "strata-image.exe")
+# oneMath and its oneMKL backend (the engine's build folder's bin/), which loads oneMKL where the user installed it
+ONEMATH_DLLS = ("onemath.dll", "onemath_blas_mklgpu.dll")
 # what a Windows PC brings (the Visual C++ runtime, which xestrata.exe checks for) and what must never be carried
 FORBIDDEN = ("vcruntime*.dll", "msvcp*.dll", "concrt*.dll", "ucrtbase*.dll", "api-ms-win-*.dll", "nvcuda.dll",
              "nvml.dll", "cublas*.dll", "cudart*.dll", "mkl_*.dll", "amdhip64*.dll", "amd_comgr*.dll")
@@ -48,6 +50,8 @@ COMPONENTS = [
     ("XeStrata", "version", "LGPL-3.0-or-later (with MIT parts: NOTICE)", "https://github.com/MistVVK/XeStrata",
      [], ["xestrata.exe", "xestrata-cli.exe", "xestrata.dll", "xestrata-cli.dll", "Xestrata.Launcher.Core.dll",
           *(f"app/engine/{e}" for e in ENGINE_EXES)]),
+    ("oneMath (XeStrata's fork)", "onemath", "Apache-2.0", "https://github.com/MistVVK/oneMath", ["onemath:LICENSE"],
+     [f"app/engine/{d}" for d in ONEMATH_DLLS]),
     ("intel/llvm (DPC++) SYCL runtime, with Unified Runtime, UMF and hwloc", "intel-llvm",
      "Apache-2.0 WITH LLVM-exception; UMF Apache-2.0 WITH LLVM-exception; hwloc BSD-3-Clause; Level Zero loader "
      "headers MIT; AMD's HIP headers MIT", "https://github.com/intel/llvm", ["sycl:licenses/*"],
@@ -178,6 +182,8 @@ def main() -> None:
         shutil.copy2(a.engine / e, eng / e)
     for d in SYCL_DLLS:
         shutil.copy2(a.sycl / "bin" / d, eng / d)
+    for d in ONEMATH_DLLS:
+        shutil.copy2(a.engine / "bin" / d, eng / d)
     archs = [x for x in a.cuda_archs.split(";") if x]
     (eng / "BUILD.json").write_text(json.dumps({
         "source": "package", "backend": "xe", "package": top_name, "version": a.version, "license": "contrib",
@@ -213,10 +219,14 @@ def main() -> None:
                 "python": a.python_zip.stem.split("-")[1]}
     sycl_rec = json.loads((a.sycl / "XESTRATA.json").read_text())
     versions["intel-llvm"] = f"{sycl_rec['tag']} ({sycl_rec['commit'][:12]}, with XeStrata's patches)"
+    # the fork's tag the engine's build fetched (CMakeLists.txt pins it)
+    m = re.search(r"tags/([\w.-]+)\.tar\.gz", (a.engine / "CMakeCache.txt").read_text())
+    versions["onemath"] = m.group(1) if m else "the archive CMakeLists.txt pins"
     for pkg in ("avalonia", "avalonia.angle.windows.natives", "skiasharp", "harfbuzzsharp", "fsharp.core",
                 "microcom.runtime", "tmds.dbus.protocol"):
         versions[pkg] = nuget_version(a.nuget, pkg)
-    roots = {"sycl": a.sycl, "python": py, "llama": a.llama, "src": a.src, "nuget": a.nuget}
+    roots = {"sycl": a.sycl, "python": py, "llama": a.llama, "src": a.src, "nuget": a.nuget,
+             "onemath": a.engine / "_deps" / "strata_onemath-src"}
     rows = []
     covered: set = set()
     files = [p.relative_to(top).as_posix() for p in top.rglob("*") if p.is_file()]

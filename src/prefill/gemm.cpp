@@ -15,11 +15,13 @@
 #include "strata/core/runtime.hpp"
 #include "strata/kernels/matrix_report.hpp"
 #include <oneapi/math/blas.hpp>
+#include <filesystem>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <type_traits>
 #include <unordered_map>
+#include <vector>
 #endif
 
 #include <algorithm>
@@ -55,8 +57,35 @@ struct Backend {
 std::mutex g_mutex;
 std::unordered_map<sycl::device, Backend> g_backends;
 
+// Windows: oneMKL's DLLs, which the 7z does not carry (not free software), where Intel's installer puts them, for
+// oneMath's oneMKL backend to load: after the PATH the user set (setvars.bat, a Python environment's), oneAPI's mkl and
+// tbb folders (ONEAPI_ROOT, which the installer sets, else its default folder) and MKLROOT's.  Without them the backend
+// does not load and the products take XeStrata's own kernels.
+void add_onemkl_dirs() {
+#if defined(_WIN32)
+    static std::once_flag once;
+    std::call_once(once, [] {
+        std::vector<std::string> roots;
+        if (const char* r = std::getenv("ONEAPI_ROOT")) roots.emplace_back(r);
+        roots.emplace_back("C:\\Program Files (x86)\\Intel\\oneAPI");
+        std::vector<std::string> dirs;
+        for (const std::string& r : roots)
+            for (const char* sub : {"mkl\\latest\\bin", "tbb\\latest\\bin"}) dirs.push_back(r + "\\" + sub);
+        if (const char* m = std::getenv("MKLROOT")) dirs.push_back(std::string(m) + "\\bin");
+        const char* old = std::getenv("PATH");
+        std::string path = old != nullptr ? old : "";
+        for (const std::string& d : dirs) {
+            std::error_code ec;
+            if (std::filesystem::is_directory(d, ec)) path += ";" + d;
+        }
+        _putenv_s("PATH", path.c_str());
+    });
+#endif
+}
+
 // The backend of `dev`, its trial's outcome taken in (waited for) the first time
 Backend backend(const sycl::device& dev) {
+    add_onemkl_dirs();
     std::shared_future<Trial> ready;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -164,6 +193,7 @@ void Gemm::prepare() {
     // first prompt): one small product of each type on a queue of its own, beside the model's loading.  An error of the
     // BF16 one (thrown, or reported by the queue afterwards) leaves the BF16 products to XeStrata's own kernels.
     sycl::queue& c = core::Runtime::get().compute();
+    add_onemkl_dirs();
     std::lock_guard<std::mutex> lock(g_mutex);
     Backend& b = g_backends[c.get_device()];
     if (!b.blas || b.ready.valid()) return;

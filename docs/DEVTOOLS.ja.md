@@ -258,6 +258,7 @@ ninja -C build/win $(git diff --name-only HEAD -- '*.cpp' | sed "s|^|$PWD/|; s|$
 
 NVIDIA の GPU 向けには、クロスビルドを `-DSTRATA_LICENSE=contrib -DSTRATA_CUDA_ARCHS=<GPU の版> -DSTRATA_CUDA_PATH=<CUDA ツールキット>` で構成します。CUDA ツールキットは、動かす PC のドライバの対応する版以下にします。
 AMD の GPU 向けには `-DSTRATA_HIP_ARCHS=<gfx の名前>` を足します（Linux と同じく RDNA2 以降）。
+oneMKL を使うには `-DSTRATA_ONEMKL=ON -DMKL_ROOT=<oneMKL の Windows 版の Library/>` を足します。oneMKL の Windows 版のヘッダー・インポートライブラリ・CMake のパッケージは、Intel の PyPI の wheel（`mkl-devel`・`mkl-include`・`mkl-devel-dpcpp`・`onemkl-sycl-include`、win_amd64）の `Library/` にあります。oneMKL の CMake のパッケージは Windows では DLL があることも確かめるので、`mkl` と `onemkl-sycl-*` の wheel の DLL も同じ `Library/` に展開します（リンクにだけ使い、7z には入れません）。oneMath とその oneMKL の backend（`onemath.dll`・`onemath_blas_mklgpu.dll`）ができ、エンジンは Windows では PATH のあとに oneAPI の `mkl` と `tbb` のフォルダー（`ONEAPI_ROOT`、なければインストーラーの既定の場所）と `MKLROOT` を足して oneMKL を探します。cuBLAS と rocBLAS の backend は、oneMath が Linux のライブラリしか探さないので Windows では作りません。
 Windows 版の 7z は、`tools/package/build.sh windows cuda12.4` が Ubuntu 26.04 の使い捨てのコンテナでここまでをすべて作ります（[BUILD.md](BUILD.ja.md)）。
 
 ### Windows の PC で動かす
