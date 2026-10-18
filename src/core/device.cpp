@@ -18,7 +18,16 @@
 
 #ifndef _WIN32
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <link.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#if defined(__has_include)
+#if __has_include(<drm/xe_drm.h>)
+#include <drm/drm.h>
+#include <drm/xe_drm.h>
+#endif
+#endif
 #endif
 
 #include <algorithm>
@@ -149,31 +158,70 @@ std::vector<sycl::device> find_devices() {
     return candidates;
 }
 
-// IGC 2.27 to 2.30 (Ubuntu 26.04's and Debian's 2.28.4 among them) miscompile, for Xe2 GPUs, reads from one pointer
-// at a runtime index N and at constant multiples of it: the byte offsets of x[2N] and x[3N] are taken for element
-// indices, and the kernel reads x[8N] and x[9N] (a fault past the buffer, or wrong values inside it).  Their GEP
-// simplification does it, and IGC_EnableGEPSimplification=0 turns that pass off: on the B70 the decode of a 1K prompt
-// reads 5 to 10% slower with it off and 32K the same, so it is off only where the installed IGC is one of those (2.24
-// and 2.32 on compile the reads right; AGENTS.md, "Intel Graphics Compiler").  IGC reads its IGC_ variables from the
-// environment when it first compiles a kernel, which the SYCL runtime does as it lists the devices, so the variable
-// is set before that; a value the user set stays.  On Linux the version is the name of the libigc.so.2 the loader
-// finds (libigc.so.2.28.4+0), loaded here ahead of the driver; Windows gives no way to its igc64.dll before the
-// driver loads it, so there the pass is off for every version (unverified on an Intel GPU).
+// IGC 2.27 to 2.30 (Ubuntu 26.04's and Debian's 2.28.4 among them) miscompile, for Xe2 and Xe3 GPUs, reads from one
+// pointer at a runtime index N and at constant multiples of it: the byte offsets of x[2N] and x[3N] are taken for
+// element indices, and the kernel reads x[8N] and x[9N] (a fault past the buffer, or wrong values inside it).  Their
+// GEP simplification does it, and IGC_EnableGEPSimplification=0 turns that pass off: on the B70 the decode of a 1K
+// prompt reads 5 to 10% slower with it off and 32K the same, so it is off only where both are true: the installed IGC
+// is one of those (2.24 and 2.32 on compile the reads right) and a GPU the xe driver runs is Xe2 or later (graphics IP
+// 20 and on; Alchemist, IP 12.55, compiles the reads right; AGENTS.md, "Intel Graphics Compiler").  IGC reads its
+// IGC_ variables when Level Zero loads it, as the SYCL runtime lists the devices, so the GPUs are asked of the kernel
+// driver here, before that; a value the user set stays.  Linux only: Windows keeps its driver's compiler as it is.
 struct CompilerWorkaround {
     bool set = false;      // the engine set IGC_EnableGEPSimplification=0
     std::string version;   // IGC's, when known
 };
 
+#if !defined(_WIN32) && defined(__has_include)
+#if __has_include(<drm/xe_drm.h>)
+#define STRATA_XE_QUERY 1
+#endif
+#endif
+
+// Whether a GPU of the xe kernel driver has a graphics IP of 20 or later (DRM_XE_DEVICE_QUERY_GT_LIST, the main GT's
+// ip_ver_major; 0 on a GPU without GMD_ID, Alchemist and older, which is not one).  False when no xe GPU can be opened.
+#if !defined(_WIN32)
+bool xe_gpu_from_xe2() {
+#if defined(STRATA_XE_QUERY)
+    for (int minor = 128; minor < 192; ++minor) {
+        const std::string node = "/dev/dri/renderD" + std::to_string(minor);
+        const int fd = open(node.c_str(), O_RDWR | O_CLOEXEC);
+        if (fd < 0) continue;
+        char name[16] = {};
+        drm_version ver{};
+        ver.name_len = sizeof(name) - 1;
+        ver.name = name;
+        bool found = false;
+        if (ioctl(fd, DRM_IOCTL_VERSION, &ver) == 0 && std::strcmp(name, "xe") == 0) {
+            drm_xe_device_query q{};
+            q.query = DRM_XE_DEVICE_QUERY_GT_LIST;
+            if (ioctl(fd, DRM_IOCTL_XE_DEVICE_QUERY, &q) == 0 && q.size >= sizeof(drm_xe_query_gt_list)) {
+                std::vector<uint64_t> buf((q.size + 7) / 8);
+                q.data = (uint64_t) (uintptr_t) buf.data();
+                if (ioctl(fd, DRM_IOCTL_XE_DEVICE_QUERY, &q) == 0) {
+                    const auto* list = reinterpret_cast<const drm_xe_query_gt_list*>(buf.data());
+                    for (uint32_t i = 0; i < list->num_gt; ++i)
+                        if (list->gt_list[i].type == DRM_XE_QUERY_GT_TYPE_MAIN && list->gt_list[i].ip_ver_major >= 20)
+                            found = true;
+                }
+            }
+        }
+        close(fd);
+        if (found) return true;
+    }
+#endif
+    return false;
+}
+#endif
+
 CompilerWorkaround intel_compiler_workaround() {
     static const CompilerWorkaround done = [] {
         CompilerWorkaround w;
-        if (std::getenv("IGC_EnableGEPSimplification") != nullptr) return w;
-        bool affected = true;
-#if defined(_WIN32)
-        _putenv_s("IGC_EnableGEPSimplification", "0");
-#else
+#if !defined(_WIN32)
+        if (std::getenv("IGC_EnableGEPSimplification") != nullptr || !xe_gpu_from_xe2()) return w;
         void* lib = dlopen("libigc.so.2", RTLD_LAZY | RTLD_LOCAL);   // the driver loads the same one later
         if (lib == nullptr) return w;                                 // no Intel compiler: nothing to set
+        bool affected = true;                                         // (a file name with no version: as affected)
         link_map* map = nullptr;
         char path[PATH_MAX];
         if (dlinfo(lib, RTLD_DI_LINKMAP, static_cast<void*>(&map)) == 0 && map != nullptr && map->l_name != nullptr &&
@@ -193,8 +241,8 @@ CompilerWorkaround intel_compiler_workaround() {
             }
         }
         if (affected) setenv("IGC_EnableGEPSimplification", "0", 0);
-#endif
         w.set = affected;
+#endif
         return w;
     }();
     return done;
@@ -208,7 +256,9 @@ const std::vector<sycl::device>& engine_devices() {
                 return d.get_backend() == sycl::backend::ext_oneapi_level_zero;
             }))
             std::fprintf(stderr, "Xe runtime: IGC's GEP simplification is off (IGC_EnableGEPSimplification=0; IGC %s): "
-                                 "2.27 to 2.30 miscompile some reads for Xe2 GPUs\n",
+                                 "2.27 to 2.30 miscompile some reads for Xe2 and later GPUs. The decode of short "
+                                 "prompts is up to 10%% slower. For full speed, use Fedora 44 (its IGC is 2.32 or "
+                                 "later), or install with Podman (Fedora 44 inside)\n",
                          w.version.empty() ? "version unknown" : w.version.c_str());
         return found;
     }();
