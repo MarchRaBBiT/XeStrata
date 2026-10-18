@@ -395,6 +395,11 @@ echo "#$ TOP={root}"
 echo "#$ INCLUDES=\"-I{root}/include\""
 echo "#$ LIBRARIES=\"-L{root}/lib/x64\""
 """
+# AMD's HIP for the Windows HIP adapter (AMD GPUs): the HIP headers of this machine's ROCm (free software; AMD's
+# Windows SDK carries the same) and an import library of the HIP 7 runtime AMD's Windows driver puts into System32
+# (Adrenalin 26.5.1 and later ship only it, in place of amdhip64_6.dll), made with llvm-dlltool from the names the
+# Linux runtime of the same major version exports
+WIN_HIP_DLL = "amdhip64_7.dll"
 # what a Windows engine's SYCL runtime is: the headers and the device libraries, installed by their components, and
 # the DLLs and import libraries, copied (their components install the Debug ones too, which are not built)
 WIN_COMPONENTS = ("sycl-headers", "sycl-headers-extras", "OpenCL-Headers", "ur_headers", "libsycldevice",
@@ -440,6 +445,59 @@ def fetch_win_cuda(dest: Path) -> Path:
     nvcc.write_text(NVCC_STAND_IN.format(version=".".join(WIN_CUDA.split(".")[:2]), root=dest))
     nvcc.chmod(0o755)
     return dest
+
+
+def win_hip(dest: Path) -> Path | None:
+    """A HIP tree for the Windows HIP adapter in `dest` (include/ and lib/amdhip64.lib), or None when this machine has
+    no ROCm HIP of WIN_HIP_DLL's major version."""
+    rocm = rocm_dirs()
+    major = WIN_HIP_DLL.removesuffix(".dll").rsplit("_", 1)[1]
+    if rocm is None or not (rocm[1] / f"libamdhip64.so.{major}").exists():
+        return None
+    so = rocm[1] / f"libamdhip64.so.{major}"
+    # the headers' license (MIT), for the Windows package's notices: the adapter carries their inline code
+    lic = [*Path("/usr/share/doc/libamdhip64-dev").glob("copyright"),
+           *Path("/usr/share/licenses").glob("rocm-hip*/LICENSE*"), *(rocm[0] / "share" / "doc").glob("hip*/LICENSE*")]
+    if not lic:
+        fail("ROCm's HIP headers are here, but not their license text", "install ROCm's HIP development package whole")
+    inc = dest / "include"
+    shutil.rmtree(dest, ignore_errors=True)
+    for name in ("hip", "hsa"):
+        if (rocm[0] / "include" / name).is_dir():
+            shutil.copytree(rocm[0] / "include" / name, inc / name, symlinks=True)   # hsa/hsa: a link to itself
+    out = subprocess.run(["nm", "-D", "--defined-only", "--format=posix", str(so)], capture_output=True, text=True,
+                         check=True).stdout
+    # the C functions, without their symbol versions (hipMalloc@@hip_4.2); the Itanium-mangled C++ ones have other
+    # names in the Windows DLL
+    names = sorted({f.split()[0].split("@")[0] for f in out.splitlines()
+                    if len(f.split()) > 1 and f.split()[1] in ("T", "W") and not f.startswith("_Z")})
+    (dest / "lib").mkdir(parents=True)
+    shutil.copy2(lic[0], dest / "LICENSE-hip.txt")
+    (dest / "amdhip64.def").write_text(f"LIBRARY {WIN_HIP_DLL}\nEXPORTS\n" + "".join(f"  {n}\n" for n in names))
+    run([llvm_bin_with("llvm-dlltool"), "-m", "i386:x86-64", "-d", dest / "amdhip64.def", "-l",
+         dest / "lib" / "amdhip64.lib"])
+    return dest
+
+
+def win_device_libs(host: Path, dest: Path) -> None:
+    """ROCm's device libraries for a Windows host in `dest`: the contrib toolchain's, with their wchar_size module flag
+    2 in place of 4.  ROCm builds Windows' with -fshort-wchar (device-libs' cmake/OCL.cmake), which changes nothing
+    else (none of their sources uses wchar_t), and a module of a Windows host's (wchar_t of 16 bits) does not link with
+    4.  Each goes to text through the toolchain's clang, which runs no pass on it (the toolchain has no llvm-dis), has
+    the flag changed, and back through its llvm-as."""
+    tmp = OUT / "wchar2"
+    tmp.mkdir(parents=True, exist_ok=True)
+    dest.mkdir(parents=True, exist_ok=True)
+    for bc in sorted((host / "amdgcn" / "bitcode").glob("*.bc")):
+        ll = tmp / (bc.stem + ".ll")
+        run([host / "bin" / "clang", "-cc1", "-triple", "amdgcn-amd-amdhsa", "-emit-llvm", "-disable-llvm-passes",
+             "-x", "ir", bc, "-o", ll])
+        text, n = re.subn(r'(!\{i32 \d+, !"wchar_size", i32 )4\}', r"\g<1>2}", ll.read_text())
+        if n != 1:
+            fail(f"{bc.name}: no wchar_size flag of 4 to change", "a ROCm device library of another form")
+        ll.write_text(text)
+        run([host / "bin" / "llvm-as", ll, "-o", dest / bc.name])
+    shutil.rmtree(tmp)
 
 
 def win_toolchain(xwin: Path, host_bin: Path) -> Path:
@@ -495,6 +553,10 @@ def build_windows(tag: str, xwin: Path, keep_build: bool, jobs: int | None) -> N
         fail(f"no MSVC CRT and Windows SDK in {xwin}", "xwin's splat: docs/DEVTOOLS.md#windows-cross-build, or --xwin")
     prepare_source(tag)
     cuda = fetch_win_cuda(OUT / "cuda")
+    hip = win_hip(OUT / "hip") if "hip" in rec.get("backends", []) else None
+    if hip is None:
+        say(f"note: no ROCm HIP for {WIN_HIP_DLL} here, or a contrib toolchain without the HIP target: the Windows "
+            "runtime without AMD GPUs")
     hb = host / "bin"
     # the device libraries: the host compiler for Windows, with the CRT's and the SDK's headers after its own
     devflags = " ".join(["-nostdlibinc", *(f"-idirafter {d}" for d in (
@@ -504,7 +566,8 @@ def build_windows(tag: str, xwin: Path, keep_build: bool, jobs: int | None) -> N
     options = [
         f"-DCMAKE_TOOLCHAIN_FILE={win_toolchain(xwin, hb)}", "-DCMAKE_BUILD_TYPE=Release",
         f"-DCMAKE_INSTALL_PREFIX={INSTALL}", "-DLLVM_ENABLE_ASSERTIONS=OFF",
-        "-DLLVM_TARGETS_TO_BUILD=X86;SPIRV;NVPTX", "-DLLVM_HOST_TRIPLE=x86_64-pc-windows-msvc",
+        f"-DLLVM_TARGETS_TO_BUILD=X86;SPIRV;NVPTX{';AMDGPU' if hip else ''}",
+        "-DLLVM_HOST_TRIPLE=x86_64-pc-windows-msvc",
         # BLAKE3's MASM files: LLVM's ml (llvm-ml) does not assemble them; the C versions are taken
         "-DLLVM_DISABLE_ASSEMBLY_FILES=ON",
         f"-DLLVM_EXTERNAL_PROJECTS={projects}", f"-DLLVM_ENABLE_PROJECTS=clang;{projects};libclc",
@@ -515,11 +578,12 @@ def build_windows(tag: str, xwin: Path, keep_build: bool, jobs: int | None) -> N
         "-DLLVM_BUILD_TOOLS=ON", "-DSYCL_ENABLE_WERROR=OFF", "-DSYCL_INCLUDE_TESTS=OFF", "-DLLVM_ENABLE_DOXYGEN=OFF",
         "-DLLVM_ENABLE_SPHINX=OFF", "-DBUILD_SHARED_LIBS=OFF", "-DSYCL_ENABLE_XPTI_TRACING=ON",
         "-DLLVM_ENABLE_LLD=OFF", "-DLLVM_SPIRV_ENABLE_LIBSPIRV_DIS=OFF", "-DXPTI_ENABLE_WERROR=OFF",
-        "-DSYCL_ENABLE_BACKENDS=level_zero;level_zero_v2;cuda;opencl",
+        f"-DSYCL_ENABLE_BACKENDS=level_zero;level_zero_v2;cuda;opencl{';hip' if hip else ''}",
         # no sycl-jit (the runtime compiler, kernel_compiler's), which the engine does not use: it would build most of
         # LLVM's code generation and clang for Windows
         "-DSYCL_ENABLE_EXTENSION_JIT=OFF",
-        "-DSYCL_ENABLE_MAJOR_RELEASE_PREVIEW_LIB=OFF", "-DLIBCLC_TARGETS_TO_BUILD=nvptx64--nvidiacl",
+        "-DSYCL_ENABLE_MAJOR_RELEASE_PREVIEW_LIB=OFF",
+        f"-DLIBCLC_TARGETS_TO_BUILD=nvptx64--nvidiacl{';amdgcn--amdhsa' if hip else ''}",
         "-DLIBCLC_GENERATE_REMANGLED_VARIANTS=ON", "-DLIBCLC_NATIVECPU_HOST_TARGET=OFF",
         "-DSYCL_UR_FORCE_FETCH_LEVEL_ZERO=ON", f"-DCUDAToolkit_ROOT={cuda}", "-DLLVM_ENABLE_DIA_SDK=OFF",
         "-DLLVM_ENABLE_ZSTD=OFF",
@@ -531,18 +595,30 @@ def build_windows(tag: str, xwin: Path, keep_build: bool, jobs: int | None) -> N
         # it PYTHON_EXECUTABLE (empty unless given) over its own
         f"-DPYTHON_EXECUTABLE={sys.executable}", "-DCROSS_TOOLCHAIN_FLAGS_NATIVE=-DSYCL_ENABLE_EXTENSION_JIT=OFF",
     ]
+    if hip:
+        options += ["-DUR_HIP_PLATFORM=AMD", f"-DUR_HIP_ROCM_DIR={hip}", f"-DUR_HIP_INCLUDE_DIR={hip / 'include'}",
+                    f"-DUR_HIP_HSA_INCLUDE_DIRS={hip / 'include'}", f"-DUR_HIP_LIB_DIR={hip / 'lib'}"]
     # llvm-rc preprocesses the resource scripts with the clang it finds on PATH: the host toolchain's
     env = dict(os.environ, PATH=f"{hb}{os.pathsep}{os.environ.get('PATH', '')}")
     started = time.time()
     if not (BUILD / "build.ninja").exists():
         run(["cmake", "-G", "Ninja", "-S", s / "llvm", "-B", BUILD, *options], env=env)
-    run(["cmake", "--build", BUILD, "--target", *WIN_TARGETS, "--", "-j", str(jobs or os.cpu_count() or 4)], env=env)
+    targets = [*WIN_TARGETS, *(["ur_adapter_hip"] if hip else [])]
+    run(["cmake", "--build", BUILD, "--target", *targets, "--", "-j", str(jobs or os.cpu_count() or 4)], env=env)
     shutil.rmtree(INSTALL, ignore_errors=True)
     for component in WIN_COMPONENTS:
         run(["cmake", "--install", BUILD, "--component", component])
-    for rel in WIN_FILES:
+    for rel in (*WIN_FILES, *(["bin/ur_adapter_hip.dll"] if hip else [])):
         (INSTALL / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(BUILD / rel, INSTALL / rel)
+    if hip:
+        win_device_libs(host, INSTALL / "amdgcn" / "bitcode")
+    # the libspirv of the Windows long (l32) into the contrib toolchain's own folder, where its driver looks for it when
+    # it compiles for a Windows host: one -fsycl-libspirv-path cannot name both the NVIDIA and the AMD one
+    clc_in = next(INSTALL.glob("lib/clang/*/lib/libclc"))
+    clc_host = next(host.glob("lib/clang/*/lib/libclc"))
+    for f in clc_in.glob("remangled-l32-*.bc"):
+        shutil.copy2(f, clc_host / f.name)
     shutil.copytree(s / "xpti" / "include" / "xpti", INSTALL / "include" / "xpti", dirs_exist_ok=True)
     # the license texts of what the DLLs carry: intel/llvm's, and those of the projects its build fetched (UMF and the
     # hwloc it links statically, Level Zero's loader and headers, emhash, parallel-hashmap, OpenCL's headers and ICD
@@ -550,6 +626,8 @@ def build_windows(tag: str, xwin: Path, keep_build: bool, jobs: int | None) -> N
     lic = INSTALL / "licenses"
     lic.mkdir(parents=True, exist_ok=True)
     shutil.copy2(s / "llvm" / "LICENSE.TXT", lic / "intel-llvm.txt")
+    if hip:
+        shutil.copy2(hip / "LICENSE-hip.txt", lic / "hip-headers.txt")
     for dep in sorted((BUILD / "_deps").glob("*-src")):
         for f in sorted(dep.iterdir()):
             if f.is_file() and f.name.upper().startswith(("LICENSE", "COPYING", "NOTICE")):
@@ -557,6 +635,7 @@ def build_windows(tag: str, xwin: Path, keep_build: bool, jobs: int | None) -> N
     commit = subprocess.run(["git", "-C", str(SRC), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
     RECORD.write_text(json.dumps({"tag": tag, "commit": commit, "fixes": [patch_id(p) for p in PATCHES],
                                   "target": "x86_64-pc-windows-msvc", "cuda": WIN_CUDA,
+                                  "hip": WIN_HIP_DLL if hip else None,
                                   "built": time.strftime("%Y-%m-%d %H:%M"),
                                   "minutes": round((time.time() - started) / 60)}, indent=1))
     if not keep_build:
