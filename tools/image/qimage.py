@@ -7,12 +7,15 @@ with the text engine).
 
 setup.py (--images qwen-image) and tools/image/install.py use these pieces; serve/images.py runs the result.
 
-  files     the denoiser (DiT) quant (Unsloth's LPIPS vs bf16: Q4_K_M 0.153, Q6_K 0.055, Q8_0 0.036): the engine
-            streams what does not fit in VRAM, so the GPU's memory does not decide it; the RAM does.  Q8_0 when the
-            four files fit the RAM the text model leaves, else the largest that fits (quant_for_ram), unless the
-            SSD offload is on (then the quant asked for, the rest read from the SSD).  The VAE (bf16); the
-            Qwen3-VL-8B text encoder UD-Q4_K_XL (the model card's choice).  Each file is checked against the
-            SHA-256 the Hugging Face API lists for it at the pinned revision.
+  files     the denoiser (DiT) quant (Unsloth's LPIPS vs bf16: Q4_K_M 0.153, Q6_K 0.055, Q8_0 0.036) and the
+            Qwen3-VL-8B text encoder's (AtomicChat's LPIPS of the pictures vs a bf16 encoder: Q8_0 0.031, Q6_K
+            0.043, Q5_K 0.066, Q4_K 0.087): the engine streams what does not fit in VRAM, so the GPU's memory does
+            not decide them; the RAM does.  Both Q8_0 when the four files fit the RAM the text model leaves; else
+            the encoder is lowered first, then the DiT (fit_ram, the user's decision of 2026-10-19), unless the SSD
+            offload is on (then the sizes asked for, the rest read from the SSD).  The encoder is Unsloth's
+            (stock) or, with --image-text-encoder uncensored, AtomicChat's abliterated one (the same tensors, its
+            refusal direction projected out).  The VAE (bf16).  Each file is checked against the SHA-256 the
+            Hugging Face API lists for it at the pinned revision.
 """
 from __future__ import annotations
 
@@ -23,8 +26,11 @@ REVISIONS = {                                       # the `sha` of https://huggi
     "unsloth/Qwen-Image-2.1-Turbo-GGUF": "5d1f9f759ea877ae556cda88dbec958b62ad3809",
     "unsloth/Qwen-Image-2.1-FP8": "bb21a8ba7f0371c19ad1f72c82a5e8fc10f39939",
     "unsloth/Qwen3-VL-8B-Instruct-GGUF": "b93a7ee713758252c555be4210c00540df954dc2",
+    "AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF": "df96693dbdfb8738c0bf1bbd0337d149808db948",  # 2026-10-19
 }
 _DIT = "unsloth/Qwen-Image-2.1-Turbo-GGUF"
+_VL = "unsloth/Qwen3-VL-8B-Instruct-GGUF"
+_AC = "AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF"
 # name -> (repo, path in the repo, bytes, sha256): the Hub's LFS pointers at the pinned revisions
 FILES = {
     "Q4_K_M": (_DIT, "qwen-image-2.1-turbo-Q4_K_M.gguf", 4_199_565_120,
@@ -35,35 +41,69 @@ FILES = {
              "399d2ddc3636f36456e2f5bfa57187da4e38721bc046430317f42a9eab5b1712"),
     "vae": ("unsloth/Qwen-Image-2.1-FP8", "vae/qwen_image_2.1_vae_bf16.safetensors", 675_508_656,
             "71879ffd5321e6d10c3c87513e2b474b1252efa7f3dec2969214a9bf06a6dd5c"),
-    "llm": ("unsloth/Qwen3-VL-8B-Instruct-GGUF", "Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf", 5_148_699_488,
-            "e3d1a6e87c5cb31e054f2c3bc0dd82ffde052f613de5eef3665b7bd33c9b703e"),
+    # the text encoders, "llm-<encoder>-<TEXT_QUANTS>"
+    "llm-stock-Q8_0": (_VL, "Qwen3-VL-8B-Instruct-Q8_0.gguf", 8_709_520_224,
+                       "cb8616bf6ed228982d9e47d7b72b42195342efa26044b0ee1873e61d9e78d3d7"),
+    "llm-stock-Q6_K": (_VL, "Qwen3-VL-8B-Instruct-UD-Q6_K_XL.gguf", 7_490_550_624,
+                       "dc3cc983735542500f40c32c1a9dacdeff198a440fac541056dca6b550389130"),
+    "llm-stock-Q5_K": (_VL, "Qwen3-VL-8B-Instruct-UD-Q5_K_XL.gguf", 5_884_767_072,
+                       "d138d047fe5736cdc678490d6ba16d2e42f690a6d648b5c8fbdac0e17789fac6"),
+    "llm-stock-Q4_K": (_VL, "Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf", 5_148_699_488,
+                       "e3d1a6e87c5cb31e054f2c3bc0dd82ffde052f613de5eef3665b7bd33c9b703e"),
+    "llm-uncensored-Q8_0": (_AC, "Qwen-Image-2.1-Turbo-Uncensored-Q8_0.gguf", 8_709_520_096,
+                            "f8f9f6276b726db5291f4a5343089612cb5fd08aa81e8f0791dc66d2c03d07ca"),
+    "llm-uncensored-Q6_K": (_AC, "Qwen-Image-2.1-Turbo-Uncensored-AD-Q6_K.gguf", 7_490_550_720,
+                            "f30f66b0fa833d3ce95c522271fc96182cc2c72a1e577d9b3444633b201b334d"),
+    "llm-uncensored-Q5_K": (_AC, "Qwen-Image-2.1-Turbo-Uncensored-AD-Q5_K.gguf", 6_281_292_736,
+                            "ea5473082841c6a0eda38d2d42d784ca5bc6f3a2e8cf648e305ea4da6373525b"),
+    "llm-uncensored-Q4_K": (_AC, "Qwen-Image-2.1-Turbo-Uncensored-AD-Q4_K.gguf", 5_287_517_120,
+                            "8123f36d2b3e562deef164dffdae33bdb1d152797ad10bb630827eaa7bce795d"),
     # Qwen3-VL's vision encoder, for the edits: the reference images into the text encoder's prompt
-    "mmproj": ("unsloth/Qwen3-VL-8B-Instruct-GGUF", "mmproj-F16.gguf", 1_159_030_336,
+    "mmproj": (_VL, "mmproj-F16.gguf", 1_159_030_336,
                "d406d03ebabefdef86a2c86bf0c1b65f9e046f7a81c218f25de4931b46a07fc4"),
 }
 QUANTS = ("Q4_K_M", "Q6_K", "Q8_0")
+TEXT_QUANTS = ("Q4_K", "Q5_K", "Q6_K", "Q8_0")      # the text encoder's, smallest first like QUANTS
+TEXT_ENCODERS = ("stock", "uncensored")             # --image-text-encoder
+DEFAULT_TEXT_ENCODER = "stock"
 LICENSE_NOTE = ("Qwen-Image-2.1-Turbo is under the Qwen Research License (not Apache 2.0): "
                 "https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/main/LICENSE - read it before you use the "
                 "images commercially")
 MODEL_DIR = "qwen-image-2.1-turbo"
 IMAGE_EXE = "strata-image.exe" if os.name == "nt" else "strata-image"
 DEFAULT_QUANT = "Q8_0"
+DEFAULT_TEXT_QUANT = "Q8_0"
 HOST_GB = 2.0          # the image engine's own RAM besides its files (its process, the pinned relay, the prompt states)
 
 
-def ram_need_gb(quant: str) -> float:
-    """The RAM (GB) an image job keeps busy with `quant`: the four files, read through the OS file cache (the engine
-    maps them), and the engine's own."""
-    return sum(FILES[k][2] for k in (quant, "vae", "llm", "mmproj")) / 1e9 + HOST_GB
+def text_file(text_encoder: str, text_quant: str) -> str:
+    """The FILES entry of the text encoder `text_encoder` at `text_quant`."""
+    return f"llm-{text_encoder}-{text_quant}"
 
 
-def quant_for_ram(ram_left_gb: float) -> tuple[str, bool]:
-    """The largest denoiser whose files fit `ram_left_gb` (the RAM the text model leaves) -> (quant, fits); the
-    smallest, not fitting, when none does."""
-    for q in reversed(QUANTS):
-        if ram_need_gb(q) <= ram_left_gb:
-            return q, True
-    return QUANTS[0], False
+def file_names(quant: str, text_encoder: str = DEFAULT_TEXT_ENCODER,
+               text_quant: str = DEFAULT_TEXT_QUANT) -> tuple[str, ...]:
+    """The FILES entries an image install with `quant` and that text encoder uses."""
+    return (quant, "vae", text_file(text_encoder, text_quant), "mmproj")
+
+
+def ram_need_gb(quant: str, text_encoder: str = DEFAULT_TEXT_ENCODER, text_quant: str = DEFAULT_TEXT_QUANT) -> float:
+    """The RAM (GB) an image job keeps busy with `quant` and that text encoder: the four files, read through the OS
+    file cache (the engine maps them), and the engine's own."""
+    return sum(FILES[k][2] for k in file_names(quant, text_encoder, text_quant)) / 1e9 + HOST_GB
+
+
+def fit_ram(ram_left_gb: float, text_encoder: str = DEFAULT_TEXT_ENCODER, quant: str = DEFAULT_QUANT,
+            text_quant: str = DEFAULT_TEXT_QUANT) -> tuple[str, str, bool]:
+    """The DiT and text encoder quants whose files fit `ram_left_gb` (the RAM the text model leaves), from `quant`
+    and `text_quant` down -> (quant, text_quant, fits): the encoder is lowered first and the DiT only when the
+    smallest encoder does not fit, the encoder then the largest that fits beside that DiT.  The smallest of both, not
+    fitting, when nothing does."""
+    for q in reversed(QUANTS[:QUANTS.index(quant) + 1]):
+        for t in reversed(TEXT_QUANTS[:TEXT_QUANTS.index(text_quant) + 1]):
+            if ram_need_gb(q, text_encoder, t) <= ram_left_gb:
+                return q, t, True
+    return QUANTS[0], TEXT_QUANTS[0], False
 
 
 def file_url(name: str, endpoint: str = "https://huggingface.co") -> str:
@@ -76,10 +116,13 @@ def local_path(models_dir: Path, name: str) -> Path:
 
 
 def image_config(quant: str, exe: Path, models_dir: Path, *, uma: bool = False, policy: str = "auto",
-                 ssd_offload: bool = False) -> dict:
+                 ssd_offload: bool = False, text_encoder: str = DEFAULT_TEXT_ENCODER,
+                 text_quant: str = DEFAULT_TEXT_QUANT) -> dict:
     """The run config's "images" section (serve/images.py reads it)."""
     return {"model_name": "qwen-image-2.1-turbo", "exe": str(exe), "quant": quant,
             "diffusion_model": str(local_path(models_dir, quant)), "vae": str(local_path(models_dir, "vae")),
-            "llm": str(local_path(models_dir, "llm")), "vision": str(local_path(models_dir, "mmproj")),
+            "llm": str(local_path(models_dir, text_file(text_encoder, text_quant))), "text_encoder": text_encoder,
+            "text_quant": text_quant,
+            "vision": str(local_path(models_dir, "mmproj")),
             "gpu_policy": policy, "uma": bool(uma),
             "ssd_offload": bool(ssd_offload)}
