@@ -15,7 +15,8 @@
 //   DSA:      qr = rms_norm(q_a(h)); q = q_b(qr) per head, through wk_b into the latent (absorbed); kv = rms_norm(kv_a(h)),
 //             the latent the cell keeps; the k-pool indexer (key LayerNorm(indexer.attn_k(h)), pool gate, pools of 4,
 //             32 heads of indexer.attn_q_b(qr) weighted by indexer.proj(h)) selects the top 512 complete pools; softmax
-//             over them; wv_b per head; out = attn_output(.)
+//             over their cells and the token's unfinished pool up to it (kpool_select_tail); wv_b per head;
+//             out = attn_output(.)
 //   FFN:      the leading layers a dense SwiGLU; then the sigmoid router (bias for the choice, weights normalized,
 //             x expert_weights_scale), the routed experts, the shared expert (no gate); every SwiGLU clamped
 //
@@ -158,9 +159,9 @@ bool PlainModel::load_glm5(std::string& err) {
     const ModelSpec& s = spec_;
     glm_ = true;
     // the shapes the kernels are written for (glm5.hpp: four streams, KDA heads of 128, the MLA's 512-wide latent and
-    // 256-wide heads, the indexer's 128-wide keys in pools of 4 without the unfinished tail, at most 32 routed experts)
+    // 256-wide heads, the indexer's 128-wide keys in pools of 4, at most 32 routed experts)
     if (s.hc != 4 || s.kda_head_dim != 128 || s.ssm_d_conv != 4 || s.kv_lora_rank != 512 || s.key_length_mla != 256 ||
-        s.value_length_mla != 256 || s.idx_key_length != 128 || s.idx_kpool != 4 || s.idx_kpool_select_tail ||
+        s.value_length_mla != 256 || s.idx_key_length != 128 || s.idx_kpool != 4 ||
         !(s.kda_gate_lower_bound < 0) || s.n_expert_used > 15 || s.gating != ExpertGating::Sigmoid ||
         s.n_ff_shexp <= 0 || s.n_embd % 256 != 0 || s.q_lora_rank % 32 != 0) {
         err = "plain model: a GLM-5.3-Flash shape this engine's kernels are not built for";
@@ -406,7 +407,7 @@ bool PlainModel::record_gblock(const GBlock& b, int64_t l, int T, uint32_t& ring
                            (int) KVR, T, cs);
         k::glm5_transpose_abd(g_absT_, g_abs_, H, T, KVR, cs);
         k::glm5_mla_attn(g_abs_, g_latent_[(size_t) d], g_ids_, g_cap_, g_steps_, (int) H, 1.0f / std::sqrt((float) QK),
-                         T, g_lat_, cs);
+                         T, g_lat_, cs, s.idx_kpool_select_tail ? (int) s.idx_kpool : 0);
         k::glm5_transpose_abd(g_lat_, g_latT_, T, H, KVR, cs);
         k::native_quantize_q8_1_rows(g_latT_, g_xq_, (int) KVR, H * T, cs);
         for (int64_t h = 0; h < H; ++h)

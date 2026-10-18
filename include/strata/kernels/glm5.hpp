@@ -76,8 +76,9 @@ void glm5_kda_step(float* state, const float* q, const float* k, const float* v,
 
 // ---- the DSA layers: the k-pool indexer and the MLA attention over its selection.  Cells are sequence positions
 // from 0 (the step records' kStepPos, qsa.hpp); a pool is the `kpool` cells [kpool m, kpool m + kpool), and a token at
-// position p sees the pools that end at or before it, (p + 1) / kpool of them: the cells of an unfinished pool are not
-// attended (GLM-5.3-Flash writes no indexer.kpool_select_tail).
+// position p chooses among the pools that end at or before it, (p + 1) / kpool of them; with indexer.kpool_select_tail
+// (llama.cpp's default where the file has no such key, as GLM-5.3-Flash's) it also attends the cells of its own
+// unfinished pool up to itself, [kpool ((p + 1) / kpool), p].
 
 /// The selection's step records from the window's (qsa.hpp's layout): kStepPos copied, kStepNBid = (pos + 1) / kpool
 /// complete pools, kStepNKv = kpool times that (so the unfinished pool weighs no cell in qsa_block_topk), and
@@ -107,10 +108,10 @@ void glm5_latent_store(const float* kv, const int32_t* steps, int64_t n_tokens, 
 
 /// The absorbed MLA attention over each token's selection: for head h, p_j = softmax_j(q[t][h] . latent[c_j] scale),
 /// out[t][h] = sum_j p_j latent[c_j], over the steps[t][kStepWidth] cells ids[t][0 ..) (qsa_block_topk's output, cap
-/// apart).  A token with no cell selected gets zeros.  q, out [T][H][L] (q already through wk_b); latent [cells][L]
-/// FP16.  L = 512.
+/// apart) and, with `tail_kpool` (the pool size; 0 for none), the token's unfinished pool's cells up to it.  A token
+/// with no cell gets zeros.  q, out [T][H][L] (q already through wk_b); latent [cells][L] FP16.  L = 512.
 void glm5_mla_attn(const float* q, const uint16_t* latent, const int32_t* ids, int64_t cap, const int32_t* steps,
-                   int n_heads, float scale, int64_t n_tokens, float* out, void* stream);
+                   int n_heads, float scale, int64_t n_tokens, float* out, void* stream, int tail_kpool = 0);
 
 /// GLM's clamped SwiGLU (ggml_swiglu_clamp): out = silu(min(gate, limit)) clamp(up, -limit, limit), n values.
 /// `out` may be `gate` or `up`.

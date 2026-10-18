@@ -259,7 +259,8 @@ inline bool read_model_spec(const GgufFile& g, ModelSpec& s, std::string& err) {
     s.idx_key_length = spec_int(g, A, "attention.indexer.key_length");
     s.idx_top_k = spec_int(g, A, "attention.indexer.top_k");
     s.idx_kpool = spec_int(g, A, "attention.indexer.kpool");
-    s.idx_kpool_select_tail = spec_int(g, A, "attention.indexer.kpool_select_tail") != 0;
+    // llama.cpp's default where the file has no such key (llama-hparams.h): GLM-5.3-Flash's GGUF writes none
+    s.idx_kpool_select_tail = spec_int(g, A, "attention.indexer.kpool_select_tail", 1) != 0;
 
     if (s.arch == ModelArch::Glm5Next) {
         // glm5-next.cpp asserts these: an mHC of 4 streams and a pool size that divides the indexer's budget

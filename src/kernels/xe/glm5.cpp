@@ -427,21 +427,26 @@ void glm5_latent_store(const float* kv, const int32_t* steps, int64_t n_tokens, 
 }
 
 void glm5_mla_attn(const float* q, const uint16_t* latent, const int32_t* ids, int64_t cap, const int32_t* steps,
-                   int n_heads, float scale, int64_t n_tokens, float* out, void* stream) {
+                   int n_heads, float scale, int64_t n_tokens, float* out, void* stream, int tail_kpool) {
     constexpr int L = 512, WG = 256, NSG = WG / WARP, PER = L / WARP;
     if (n_tokens <= 0) return;
-    if (n_heads <= 0 || cap <= 0 || n_tokens * n_heads > 0x7fffffff)
-        throw core::DeviceError("glm5_mla_attn: " + std::to_string(n_heads) + " heads, cap " + std::to_string(cap));
-    const int H = n_heads;
+    if (n_heads <= 0 || cap <= 0 || n_tokens * n_heads > 0x7fffffff || tail_kpool < 0 || tail_kpool == 1)
+        throw core::DeviceError("glm5_mla_attn: " + std::to_string(n_heads) + " heads, cap " + std::to_string(cap) +
+                                ", tail pool " + std::to_string(tail_kpool));
+    const int H = n_heads, KP = tail_kpool;
     const auto event = queue_for(stream).submit([&](sycl::handler& hd) {
-        sycl::local_accessor<float, 1> sc(sycl::range<1>((size_t) cap), hd);
+        sycl::local_accessor<float, 1> sc(sycl::range<1>((size_t) (cap + (KP > 0 ? KP - 1 : 0))), hd);
         hd.parallel_for(sycl::nd_range<1>((size_t) (n_tokens * H) * WG, WG),
                         [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
             const int64_t th = (int64_t) it.get_group(0), t = th / H;
             const int lid = (int) it.get_local_id(0);
             const sycl::sub_group sg = it.get_sub_group();
             const int warp = (int) sg.get_group_linear_id(), lane = (int) sg.get_local_linear_id();
-            const int64_t width = sycl::min<int64_t>(steps[t * kStepCount + kStepWidth], cap);
+            const int64_t chosen = sycl::min<int64_t>(steps[t * kStepCount + kStepWidth], cap);
+            // the unfinished pool's cells up to the token, after the chosen ones: cell j - chosen + tail0
+            const int32_t pos = steps[t * kStepCount + kStepPos];
+            const int64_t tail0 = KP > 0 && pos >= 0 ? (int64_t) ((pos + 1) / KP) * KP : 0;
+            const int64_t width = chosen + (KP > 0 && pos >= 0 ? (int64_t) pos + 1 - tail0 : 0);
             const float* qh = q + th * L;
             float* oh = out + th * L;
             if (width <= 0) {   // uniform over the work-group
@@ -451,8 +456,9 @@ void glm5_mla_attn(const float* q, const uint16_t* latent, const int32_t* ids, i
             float qr[PER];
             for (int i = 0; i < PER; ++i) qr[i] = qh[lane * PER + i];
             const int32_t* sel = ids + t * cap;
+            auto cell = [&](int64_t j) { return j < chosen ? (int64_t) sel[j] : tail0 + (j - chosen); };
             for (int64_t j = warp; j < width; j += NSG) {   // a sub-group a cell
-                const uint16_t* row = latent + (int64_t) sel[j] * L + lane * PER;
+                const uint16_t* row = latent + cell(j) * L + lane * PER;
                 float d = 0.0f;
                 for (int i = 0; i < PER; ++i) d += qr[i] * f32_from_f16(row[i]);
                 d = sycl::reduce_over_group(sg, d, sycl::plus<float>());
@@ -470,7 +476,7 @@ void glm5_mla_attn(const float* q, const uint16_t* latent, const int32_t* ids, i
             sycl::group_barrier(it.get_group());
             for (int d = lid; d < L; d += WG) {
                 float acc = 0.0f;
-                for (int64_t j = 0; j < width; ++j) acc += sc[j] * f32_from_f16(latent[(int64_t) sel[j] * L + d]);
+                for (int64_t j = 0; j < width; ++j) acc += sc[j] * f32_from_f16(latent[cell(j) * L + d]);
                 oh[d] = acc;
             }
         });
