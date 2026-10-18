@@ -626,16 +626,25 @@ bool PlainModel::open_experts(std::string& err) {
     // the RAM tier: every expert loaded into pinned RAM when the host has the room (the GPU reads them over PCIe and
     // the pool from RAM), else the GGUF read in place through the page cache.  The room is the resident copy's (#11,
     // resident_pin_fits): the pinned experts and 8 GiB beside them
+    // On Level Zero the device's own allocations also need RAM beside the pinned experts: on the B70 (xe, 32 GiB) with
+    // 100 GiB of host memory registered and 14 GiB left, 2 GiB device allocations were refused or the device was lost;
+    // with 85 GiB and 29 GiB left, 24 GiB of them ran (2026-10-19).  So the room there counts the VRAM as well.
     bool in_ram = !opt_.mmap_experts;
     if (in_ram) {
         detail::HostMemory hm;
         const uint64_t need = lay.total + lay.max_blob;
+        uint64_t beside = 8ull << 30;
+        if (Runtime::get().device().get_backend() == sycl::backend::ext_oneapi_level_zero) {
+            size_t f = 0, t = 0;
+            if (strata::gpu::mem_info(&f, &t)) beside += (uint64_t) t;
+        }
         std::string why;
         if (detail::host_available_memory(hm) &&
-            !detail::resident_pin_fits(need, 0, 8ull << 30, std::min(hm.available, hm.cgroup_limit), why)) {
-            std::fprintf(stderr, "strata plain: the experts need %.1f GiB of RAM and 8 GiB beside them, %.1f GiB is "
+            !detail::resident_pin_fits(need, 0, beside, std::min(hm.available, hm.cgroup_limit), why)) {
+            std::fprintf(stderr, "strata plain: the experts need %.1f GiB of RAM and %.1f GiB beside them, %.1f GiB is "
                                  "available: read in place\n",
-                         (double) need / 1073741824.0, (double) std::min(hm.available, hm.cgroup_limit) / 1073741824.0);
+                         (double) need / 1073741824.0, (double) beside / 1073741824.0,
+                         (double) std::min(hm.available, hm.cgroup_limit) / 1073741824.0);
             in_ram = false;
         }
     }
