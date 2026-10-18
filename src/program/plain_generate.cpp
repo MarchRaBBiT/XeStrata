@@ -431,7 +431,7 @@ int plain_main(int argc, char** argv) {
         std::fprintf(stderr, "strata (%s): %s\n", arch.c_str(), err.c_str());
         return 1;
     }
-    opt.prompt_chunk = model.prompt_chunk();   // the model may take the prompt in windows (GLM-5.3-Flash for now)
+    opt.prompt_chunk = model.prompt_chunk();   // the model may take the prompt in windows (short of pinned memory)
     if (opt.prompt_chunk > 0) {
         const char* experts = model.prompt_int8() ? strata::prefill::mmq::path() : nullptr;
         std::fprintf(stderr, "strata (%s): prompt matrix products on %s; the experts' in %s%s%s\n", arch.c_str(),

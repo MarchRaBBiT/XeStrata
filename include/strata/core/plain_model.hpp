@@ -255,6 +255,18 @@ private:
         int32_t* h_dense_bounds = nullptr;
         uint8_t* h_nact = nullptr;         ///< the CPU's activations: a token's in the layer's native format
         int32_t* h_rbounds = nullptr;
+        // GLM-5.3-Flash's (plain_prompt_glm5.cpp): the four streams, the mHC's mixes, the window's selection steps, the
+        // KDA and DSA intermediates, the dense FFN's gate and up
+        float *g_hs = nullptr, *g_mixes = nullptr, *g_post = nullptr, *g_comb = nullptr, *g_y = nullptr;
+        int32_t* g_steps = nullptr;
+        float *g_q = nullptr, *g_k = nullptr, *g_v = nullptr, *g_qc = nullptr, *g_kc = nullptr, *g_vc = nullptr,
+              *g_fa = nullptr, *g_f = nullptr, *g_gate = nullptr, *g_beta = nullptr, *g_ga = nullptr, *g_g2 = nullptr,
+              *g_o = nullptr, *g_oy = nullptr;
+        float *g_qa = nullptr, *g_qr = nullptr, *g_qb = nullptr, *g_qbT = nullptr, *g_absT = nullptr, *g_abs = nullptr,
+              *g_kv = nullptr, *g_lat = nullptr, *g_latT = nullptr, *g_voT = nullptr, *g_vo = nullptr, *g_iq = nullptr,
+              *g_ik = nullptr, *g_ig = nullptr, *g_iw = nullptr, *g_scores = nullptr;
+        int32_t* g_ids = nullptr;
+        float *g_ffg = nullptr, *g_ffu = nullptr;
     };
     /// Lays the buffers for chunks of `T` tokens out from `dev` / `host` (null: only counts), returning the device and
     /// host bytes.
@@ -271,6 +283,8 @@ private:
     /// prompts.  The slots go to the layers in turn (slot s is layer s % L's), so the last ones are every layer's.
     bool prompt_borrow(int64_t T, std::string& err);
     bool prompt_chunks(const int32_t* tokens, int64_t n, int64_t pos, int32_t* out, float* logits, std::string& err);
+    bool prompt_chunks_glm5(const int32_t* tokens, int64_t n, int64_t pos, int32_t* out, float* logits,
+                            std::string& err);
     bool prompt_warm_products(std::string& err);
     /// The chunk's routed experts of MoE layer `ml`: pb_.hn its T normed rows (and pb_.x16 their FP16 copy for the FP16
     /// path), pb_.ids their routes; writes pb_.parts in routing order, the routes into `routes` (null: not kept).

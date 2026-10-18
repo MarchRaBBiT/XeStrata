@@ -35,6 +35,7 @@
 #include "strata/kernels/native_qsa.hpp"
 #include "strata/kernels/native_rope.hpp"
 #include "strata/kernels/qsa.hpp"
+#include "strata/kernels/qsa_select.hpp"
 #include "strata/kernels/qsa_decode_attn.hpp"
 #include "strata/kernels/rope_scaling.hpp"
 #include "strata/kernels/router_top10.hpp"
@@ -530,7 +531,11 @@ void PlainModel::prompt_carve(int64_t T, PromptBufs& b, uint8_t* dev, uint8_t* h
     const uint64_t K = (uint64_t) s.n_expert_used, FS = (uint64_t) s.n_ff_shexp, FF = (uint64_t) s.n_ff_exp;
     // the MTP layer's input rows ([embedding | trunk row], 2 N wide) go through qfull and x16
     const uint64_t U = (uint64_t) T, TK = U * K, QW = std::max<uint64_t>((has_gate_ ? 2u : 1u) * NH * HD, has_mtp_ ? 2 * N : 0);
-    const uint64_t max_in = std::max<uint64_t>({N, ZV, NH * HD, FS, FF, has_mtp_ ? 2 * N : 0});
+    // GLM-5.3-Flash's widest inputs: the four streams (the mHC's mixes), the MLA's output, the dense FFN's down, KDA's
+    const uint64_t gw = glm_ ? std::max<uint64_t>({4 * N, NH * (uint64_t) s.value_length_mla, (uint64_t) s.n_ff,
+                                                   NH * (uint64_t) s.kda_head_dim})
+                             : 0;
+    const uint64_t max_in = std::max<uint64_t>({N, ZV, NH * HD, FS, FF, has_mtp_ ? 2 * N : 0, gw});
     b.T = T;
     b.gu_elems = (int64_t) (2 * FF * N);
     b.d_elems = (int64_t) (N * FF);
@@ -543,6 +548,10 @@ void PlainModel::prompt_carve(int64_t T, PromptBufs& b, uint8_t* dev, uint8_t* h
     for (const Block* bl : all)
         for (const W* w : {&bl->qkv, &bl->z, &bl->alpha, &bl->beta, &bl->ssm_out, &bl->q, &bl->k, &bl->v, &bl->o,
                            &bl->sh_gate, &bl->sh_up, &bl->sh_down})
+            b.gemm_elems = std::max<int64_t>(b.gemm_elems, (int64_t) w->n_in * w->n_out);
+    for (const GBlock& g : gblocks_)
+        for (const W* w : {&g.hc_attn_fn, &g.hc_ffn_fn, &g.q, &g.k, &g.v, &g.f_a, &g.f_b, &g.beta, &g.g_a, &g.g_b, &g.q_a,
+                           &g.q_b, &g.kv_a, &g.idx_q_b, &g.idx_k, &g.idx_gate, &g.o, &g.ffn_gate, &g.ffn_up, &g.ffn_down})
             b.gemm_elems = std::max<int64_t>(b.gemm_elems, (int64_t) w->n_in * w->n_out);
     b.gemm_elems = std::min<int64_t>(b.gemm_elems, (int64_t) 1 << 25);
     uint64_t at = 0;
@@ -580,6 +589,9 @@ void PlainModel::prompt_carve(int64_t T, PromptBufs& b, uint8_t* dev, uint8_t* h
     for (const Block* bl : all)
         for (const W* w : {&bl->qkv, &bl->z, &bl->ssm_out, &bl->q, &bl->k, &bl->v, &bl->o})
             dup = dup || k::iq_mmq_type_dup(w->type);
+    for (const GBlock& g : gblocks_)
+        for (const W* w : {&g.q, &g.k, &g.v, &g.o, &g.q_a, &g.q_b, &g.ffn_gate, &g.ffn_down})
+            dup = dup || k::iq_mmq_type_dup(w->type);
     dup = dup || (has_mtp_ && k::iq_mmq_type_dup(mtp_eh_.type));
     const uint64_t rep = dup ? 2 : 1;
     const uint64_t xq_cols = rep * std::max<uint64_t>(TK * N, U * max_in);   // the routed rows', or a dense input's
@@ -592,6 +604,29 @@ void PlainModel::prompt_carve(int64_t T, PromptBufs& b, uint8_t* dev, uint8_t* h
     b.cpu_cap = std::min<int64_t>((int64_t) TK, (int64_t) k::cpu::MAXT * (int64_t) E);
     take(b.cpu, (uint64_t) b.cpu_cap * N * 4); take(b.cpu_row, (uint64_t) b.cpu_cap * 4);
     take(b.gemm_scratch, (uint64_t) b.gemm_elems * 2);
+    if (glm_) {   // plain_prompt_glm5.cpp
+        const uint64_t HC = 4, MIX = (2 + HC) * HC, S = (uint64_t) s.kda_head_dim, GC = NH * S;
+        const uint64_t QLR = (uint64_t) s.q_lora_rank, KVR = (uint64_t) s.kv_lora_rank;
+        const uint64_t QK = (uint64_t) s.key_length_mla, VD = (uint64_t) s.value_length_mla;
+        const uint64_t IH = (uint64_t) s.idx_n_head, ID = (uint64_t) s.idx_key_length;
+        const uint64_t FW = (uint64_t) std::max<int64_t>(s.n_ff, s.n_ff_shexp);
+        const uint64_t blocks = (uint64_t) (opt_.max_cells / s.idx_kpool + 1);
+        k::QsaShapes qs;
+        qs.idx_block = s.idx_kpool;
+        qs.idx_top_k = s.idx_top_k;
+        const uint64_t cap = (uint64_t) k::qsa_selection_width(k::kTopkMaxCells, qs);
+        take(b.g_hs, U * HC * N * 4); take(b.g_mixes, U * MIX * 4); take(b.g_post, U * HC * 4);
+        take(b.g_comb, U * HC * HC * 4); take(b.g_y, U * N * 4); take(b.g_steps, U * k::kStepCount * 4);
+        for (float** p : {&b.g_q, &b.g_k, &b.g_v, &b.g_qc, &b.g_kc, &b.g_vc, &b.g_f, &b.g_gate, &b.g_g2, &b.g_o, &b.g_oy})
+            take(*p, U * GC * 4);
+        take(b.g_fa, U * S * 4); take(b.g_ga, U * S * 4); take(b.g_beta, U * NH * 4);
+        take(b.g_qa, U * QLR * 4); take(b.g_qr, U * QLR * 4); take(b.g_qb, U * NH * QK * 4); take(b.g_qbT, U * NH * QK * 4);
+        for (float** p : {&b.g_absT, &b.g_abs, &b.g_lat, &b.g_latT}) take(*p, U * NH * KVR * 4);
+        take(b.g_kv, U * KVR * 4); take(b.g_voT, U * NH * VD * 4); take(b.g_vo, U * NH * VD * 4);
+        take(b.g_iq, U * IH * ID * 4); take(b.g_ik, U * ID * 4); take(b.g_ig, U * ID * 4); take(b.g_iw, U * IH * 4);
+        take(b.g_scores, U * blocks * 4); take(b.g_ids, U * cap * 4);
+        take(b.g_ffg, U * FW * 4); take(b.g_ffu, U * FW * 4);
+    }
     dev_bytes = at;
     at = 0;
     auto hold = [&](auto*& ptr, uint64_t bytes) {

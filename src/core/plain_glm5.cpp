@@ -20,7 +20,7 @@
 //   FFN:      the leading layers a dense SwiGLU; then the sigmoid router (bias for the choice, weights normalized,
 //             x expert_weights_scale), the routed experts, the shared expert (no gate); every SwiGLU clamped
 //
-// The prompt runs in windows and the MTP layer does not draft yet.
+// The prompt runs in chunks (src/prefill/plain_prompt_glm5.cpp); the MTP layer does not draft yet.
 #include "strata/core/plain_model.hpp"
 
 #include "strata/artifact/gguf_reader.hpp"
@@ -167,8 +167,7 @@ bool PlainModel::load_glm5(std::string& err) {
         err = "plain model: a GLM-5.3-Flash shape this engine's kernels are not built for";
         return false;
     }
-    // the prompt runs in windows, and the MTP layer does not draft (both not GLM's yet)
-    opt_.prompt_chunk = 0;
+    // the MTP layer does not draft (not GLM's yet)
     has_mtp_ = false;
     opt_.max_cells = (opt_.max_cells + s.idx_kpool - 1) / s.idx_kpool * s.idx_kpool;
     cs_ = strata::gpu::stream_create();
@@ -314,8 +313,8 @@ bool PlainModel::load_glm5(std::string& err) {
     segs_.assign((size_t) opt_.max_t + 1, {});
     mexec_.assign((size_t) opt_.max_t + 1, nullptr);
     msegs_.assign((size_t) opt_.max_t + 1, {});
-    std::fprintf(stderr, "strata plain: GLM-5.3-Flash, %lld KDA and %lld DSA blocks, %lld cells; the prompt in windows\n",
-                 (long long) n_kda, (long long) n_dsa, (long long) cells);
+    std::fprintf(stderr, "strata plain: GLM-5.3-Flash, %lld KDA and %lld DSA blocks, %lld cells; the prompt in chunks of "
+                         "%lld\n", (long long) n_kda, (long long) n_dsa, (long long) cells, (long long) opt_.prompt_chunk);
     return reset(err);
 }
 

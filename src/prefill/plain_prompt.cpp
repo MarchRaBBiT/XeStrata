@@ -35,7 +35,7 @@
 #include "strata/prefill/gemm.hpp"
 #include "strata/prefill/moe_mmq.hpp"
 #include "strata/prefill/kernels.hpp"
-#include "strata/prefill/moe_mmq.hpp"
+#include "plain_prompt.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -53,26 +53,6 @@ namespace strata::core {
 
 namespace k = strata::kernels;
 
-/// The products' state: Gemm over the dequantization scratch carved with the other buffers.
-struct PlainModel::PromptGemm {
-    prefill::Gemm gemm;
-    prefill::mmq::Context mmq;
-    bool identity = false;   // pb_.identity written
-    // the int8 products' copies from RAM on a stream of their own, into the staging's two halves in turn: ready[h]
-    // when half h holds its group, used[h] when that group's products are done with it
-    strata::gpu::Stream xs = nullptr;
-    strata::gpu::Event *ready[2] = {}, *used[2] = {};
-    bool used_live[2] = {};
-    ~PromptGemm() {
-        if (xs != nullptr) strata::gpu::stream_sync(xs);
-        for (int h = 0; h < 2; ++h) {
-            if (ready[h] != nullptr) strata::gpu::event_destroy(ready[h]);
-            if (used[h] != nullptr) strata::gpu::event_destroy(used[h]);
-        }
-        if (xs != nullptr) strata::gpu::stream_destroy(xs);
-    }
-    bool overlap() const { return xs != nullptr && ready[0] && ready[1] && used[0] && used[1]; }
-};
 
 void PlainModel::prompt_gemm_free(PromptGemm* g) { delete g; }
 
@@ -234,6 +214,7 @@ bool PlainModel::prompt_warm_products(std::string& err) {
     // A library's first product of a kind loads its kernels for it, inside whichever prompt comes first (rocBLAS on
     // the RX 9060 XT: 0.5 s for the first product, 0.9 s more for the first of 32 rows): each dense shape the prompt
     // takes, once, on a chunk of zeros into the buffers the prompt overwrites.
+    if (glm_) return true;   // GLM-5.3-Flash's first prompt loads its products' kernels itself
     PromptBufs& P = pb_;
     prefill::Gemm& gm = prompt_gemm().gemm;
     const int64_t T = P.T, HV = spec_.ssm_dt_rank;
@@ -516,6 +497,7 @@ bool PlainModel::prompt_routed(int64_t ml, int64_t T, bool cpu_share, int32_t* r
 bool PlainModel::prompt(const int32_t* tokens, int64_t n, int64_t pos, int32_t* out, float* logits, std::string& err) {
     if (opt_.prompt_chunk <= 0 || n <= 0 || prompt_host_ == nullptr) { err.clear(); return false; }
     if (pos < 0 || pos + n > opt_.max_cells) { err = "plain prompt: past the context"; return false; }
+    const auto tb = std::chrono::steady_clock::now();
     // one chunk the prompt's length, up to prompt_chunk (prompt_borrow may take fewer)
     if (!prompt_borrow(std::min<int64_t>(n, opt_.prompt_chunk), err)) {
         // a report on WSL 2 (an RTX 2050, 4 GB): the tier lent too little for even a short chunk and every request
@@ -528,20 +510,37 @@ bool PlainModel::prompt(const int32_t* tokens, int64_t n, int64_t pos, int32_t* 
         }
         return false;
     }
+    static const bool profile = std::getenv("STRATA_PROMPT_PROFILE") != nullptr;
+    if (profile)
+        std::fprintf(stderr, "strata plain: borrowing the tier's slots %.1f ms\n",
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tb).count());
+    auto since = [](std::chrono::steady_clock::time_point t) {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+    };
+    auto tc = std::chrono::steady_clock::now();
     const bool ok = prompt_chunks(tokens, n, pos, out, logits, err);
+    const double chunks_ms = since(tc);
+    tc = std::chrono::steady_clock::now();
     std::string err2;
     if (!prompt_return(err2) && ok) { err = err2; return false; }
+    if (profile)
+        std::fprintf(stderr, "strata plain: the chunks %.1f ms, giving the tier its slots back %.1f ms\n", chunks_ms, since(tc));
     // the tier to the experts the prompt routed most, at once (upstream's q36 engine: up to 2048 slot replacements
     // after a prompt): the rounds between windows move at most adapt_swaps each, so an empty tier (no profile) took
     // a hundred windows to fill.  The copies run on the copy stream beside the first windows.
     int64_t n_free = 0;   // and every free slot: those copies displace nothing
     for (const auto& f : free_) n_free += (int64_t) f.size();
+    const auto t0 = std::chrono::steady_clock::now();
     if (ok && !disp_.usage.empty() && !adapt(err, std::max<int64_t>(2048, n_free))) return false;
+    if (profile)
+        std::fprintf(stderr, "strata plain: the tier after the prompt: %.1f ms\n",
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     return ok;
 }
 
 bool PlainModel::prompt_chunks(const int32_t* tokens, int64_t n, int64_t pos, int32_t* out, float* logits,
                                std::string& err) {
+    if (glm_) return prompt_chunks_glm5(tokens, n, pos, out, logits, err);
     PromptBufs& P = pb_;
     const ModelSpec& s = spec_;
     const int64_t N = s.n_embd, NH = s.n_head, HD = s.key_length, NKV = nkv_, HV = s.ssm_dt_rank, HK = s.ssm_n_group;
