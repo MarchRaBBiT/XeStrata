@@ -674,6 +674,12 @@ def narrate_start(log_path: str, offset: int, args: list, done: threading.Event,
                 elif "expert cache " in line and " slots, " in line and "auto" not in line:
                     n = line.split("expert cache ", 1)[1].split(";")[0].replace(" slots,", " experts,").strip()
                     say("cache", f"[strata] filling the GPU's expert cache ({n}) ...")
+                elif "IGC's GEP simplification is off" in line:   # Intel's compiler 2.27 to 2.30 (AGENTS.md)
+                    v = line.split("; IGC ", 1)[1].split(")", 1)[0] if "; IGC " in line else "?"
+                    say("igc", f"[strata] Intel's compiler IGC {v} has a bug XeStrata works around: the decode of "
+                        "short prompts is up to 10% slower.\n"
+                        "         For full speed, use Fedora 44 (its IGC is 2.32 or later), or install with Podman "
+                        "(Fedora 44 inside).")
                 elif "session is up" in line:
                     say("up", "[strata] almost ready ...")
         if time.time() - last > heartbeat:

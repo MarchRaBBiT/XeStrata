@@ -171,6 +171,7 @@ struct CompilerWorkaround {
     bool set = false;      // the engine set IGC_EnableGEPSimplification=0
     std::string version;   // IGC's, when known
 };
+std::string g_workaround_version;   // set by engine_devices when the workaround applies to a listed GPU
 
 #if !defined(_WIN32) && defined(__has_include)
 #if __has_include(<drm/xe_drm.h>)
@@ -254,12 +255,13 @@ const std::vector<sycl::device>& engine_devices() {
         std::vector<sycl::device> found = find_devices();
         if (w.set && std::any_of(found.begin(), found.end(), [](const sycl::device& d) {
                 return d.get_backend() == sycl::backend::ext_oneapi_level_zero;
-            }))
+            })) {
+            g_workaround_version = w.version.empty() ? "unknown" : w.version;
             std::fprintf(stderr, "Xe runtime: IGC's GEP simplification is off (IGC_EnableGEPSimplification=0; IGC %s): "
                                  "2.27 to 2.30 miscompile some reads for Xe2 and later GPUs. The decode of short "
                                  "prompts is up to 10%% slower. For full speed, use Fedora 44 (its IGC is 2.32 or "
-                                 "later), or install with Podman (Fedora 44 inside)\n",
-                         w.version.empty() ? "version unknown" : w.version.c_str());
+                                 "later), or install with Podman (Fedora 44 inside)\n", g_workaround_version.c_str());
+        }
         return found;
     }();
     return devices;
@@ -283,6 +285,11 @@ thread_local int t_current = 0;
 // is stuck in the driver or the host, and only a thread other than the waiter can report that.
 constexpr auto kHangLimit = std::chrono::seconds(120);
 }  // namespace
+
+std::string compiler_workaround() {
+    (void) engine_devices();
+    return g_workaround_version;
+}
 
 int current_device() { return t_current; }
 
