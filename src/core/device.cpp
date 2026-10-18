@@ -17,6 +17,7 @@
 #endif
 
 #ifndef _WIN32
+#include <dlfcn.h>
 #include <link.h>
 #endif
 
@@ -24,6 +25,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -147,8 +149,69 @@ std::vector<sycl::device> find_devices() {
     return candidates;
 }
 
+// IGC 2.27 to 2.30 (Ubuntu 26.04's and Debian's 2.28.4 among them) miscompile, for Xe2 GPUs, reads from one pointer
+// at a runtime index N and at constant multiples of it: the byte offsets of x[2N] and x[3N] are taken for element
+// indices, and the kernel reads x[8N] and x[9N] (a fault past the buffer, or wrong values inside it).  Their GEP
+// simplification does it, and IGC_EnableGEPSimplification=0 turns that pass off: on the B70 the decode of a 1K prompt
+// reads 5 to 10% slower with it off and 32K the same, so it is off only where the installed IGC is one of those (2.24
+// and 2.32 on compile the reads right; AGENTS.md, "Intel Graphics Compiler").  IGC reads its IGC_ variables from the
+// environment when it first compiles a kernel, which the SYCL runtime does as it lists the devices, so the variable
+// is set before that; a value the user set stays.  On Linux the version is the name of the libigc.so.2 the loader
+// finds (libigc.so.2.28.4+0), loaded here ahead of the driver; Windows gives no way to its igc64.dll before the
+// driver loads it, so there the pass is off for every version (unverified on an Intel GPU).
+struct CompilerWorkaround {
+    bool set = false;      // the engine set IGC_EnableGEPSimplification=0
+    std::string version;   // IGC's, when known
+};
+
+CompilerWorkaround intel_compiler_workaround() {
+    static const CompilerWorkaround done = [] {
+        CompilerWorkaround w;
+        if (std::getenv("IGC_EnableGEPSimplification") != nullptr) return w;
+        bool affected = true;
+#if defined(_WIN32)
+        _putenv_s("IGC_EnableGEPSimplification", "0");
+#else
+        void* lib = dlopen("libigc.so.2", RTLD_LAZY | RTLD_LOCAL);   // the driver loads the same one later
+        if (lib == nullptr) return w;                                 // no Intel compiler: nothing to set
+        link_map* map = nullptr;
+        char path[PATH_MAX];
+        if (dlinfo(lib, RTLD_DI_LINKMAP, static_cast<void*>(&map)) == 0 && map != nullptr && map->l_name != nullptr &&
+            realpath(map->l_name, path) != nullptr) {
+            // libigc.so.2.28.4+0: the version after "libigc.so.", up to the build number
+            const char* name = std::strrchr(path, '/');
+            name = name ? name + 1 : path;
+            if (std::strncmp(name, "libigc.so.", 10) == 0) {
+                const char* v = name + 10;
+                size_t n = 0;
+                while (std::isdigit((unsigned char) v[n]) || v[n] == '.') ++n;
+                w.version.assign(v, n);
+                char* rest = nullptr;
+                const long major = std::strtol(w.version.c_str(), &rest, 10);
+                const long minor = rest != nullptr && *rest == '.' ? std::strtol(rest + 1, nullptr, 10) : -1;
+                if (minor >= 0) affected = major == 2 && minor >= 25 && minor < 32;
+            }
+        }
+        if (affected) setenv("IGC_EnableGEPSimplification", "0", 0);
+#endif
+        w.set = affected;
+        return w;
+    }();
+    return done;
+}
+
 const std::vector<sycl::device>& engine_devices() {
-    static const std::vector<sycl::device> devices = find_devices();
+    static const std::vector<sycl::device> devices = [] {
+        const CompilerWorkaround w = intel_compiler_workaround();
+        std::vector<sycl::device> found = find_devices();
+        if (w.set && std::any_of(found.begin(), found.end(), [](const sycl::device& d) {
+                return d.get_backend() == sycl::backend::ext_oneapi_level_zero;
+            }))
+            std::fprintf(stderr, "Xe runtime: IGC's GEP simplification is off (IGC_EnableGEPSimplification=0; IGC %s): "
+                                 "2.27 to 2.30 miscompile some reads for Xe2 GPUs\n",
+                         w.version.empty() ? "version unknown" : w.version.c_str());
+        return found;
+    }();
     return devices;
 }
 
