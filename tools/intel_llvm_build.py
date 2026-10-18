@@ -513,8 +513,10 @@ def win_toolchain(xwin: Path, host_bin: Path) -> Path:
     libs = [xwin / "crt" / "lib" / "x86_64", *(xwin / "sdk" / "lib" / s / "x86_64" for s in ("um", "ucrt")), case_lib]
     flags = " ".join(["--target=x86_64-pc-windows-msvc", "-Wno-unused-command-line-argument",
                       *(f"/imsvc{d}" for d in inc)])
-    # intel/llvm installs lld only where it builds the AMD target (ROCm installed): else the distribution's
-    linker = host_bin / "lld-link" if (host_bin / "lld-link").exists() else llvm_bin_with("lld-link")
+    # the distribution's lld-link, which merges the DLLs' manifests itself (with libxml2); intel/llvm's, which it
+    # installs where it builds the AMD target, looks for Windows' mt.exe for them and stopped sycl9.dll's link
+    dist = [d for d in sorted(Path("/usr/lib").glob("llvm-*/bin/lld-link")) if d.exists()]
+    linker = llvm_bin_with("lld-link") if dist else host_bin / "lld-link"
     tc = OUT / "toolchain.cmake"
     tc.write_text(f"""set(CMAKE_SYSTEM_NAME Windows)
 set(CMAKE_SYSTEM_VERSION 10.0)
