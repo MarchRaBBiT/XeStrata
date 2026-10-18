@@ -1260,7 +1260,8 @@ def gpus_wsl():
 def gpus_from_engine():
     """The GPUs as the engine sees them (strata-device --list-devices), in its order (the card it would take first), in
     gpus()'s form.  What sysfs alone gives on Linux is not known here: the PCIe link, a small BAR (taken as the whole
-    VRAM), an AMD card's gfx name; the render node is not needed (no device files to open)."""
+    VRAM); an AMD card's gfx name is the HIP runtime's (its "arch"), the render node is not needed (no device files to
+    open)."""
     vendors = {0x8086: "intel", 0x10DE: "nvidia", 0x1002: "amd"}
     try:
         lines = [json.loads(x) for x in engine_tool("--list-devices").splitlines() if x.strip()]
@@ -1274,7 +1275,7 @@ def gpus_from_engine():
         found.append({"index": len(found), "name": d.get("name") or "GPU", "vram_gb": vram,
                       "device_id": d.get("device_id", 0), "driver": d.get("backend"), "integrated": integrated,
                       "supported": True, "pci": d.get("pci"), "bar_gb": vram, "link": None, "render": None,
-                      "vendor": vendors.get(d.get("vendor_id"), "other")})
+                      "vendor": vendors.get(d.get("vendor_id"), "other"), "gfx": d.get("arch") or None})
     return found
 
 
@@ -1297,18 +1298,18 @@ def gpu_problem(g, together=False):
         return None
     if g.get("vendor") == "nvidia" and license_mode(ARGS) != "contrib":
         return "an NVIDIA GPU needs the contrib build (--license contrib: NVIDIA's CUDA toolkit, not free software)"
-    if g.get("vendor") == "amd" and WIN:
-        return "AMD GPUs are not supported on Windows yet"
     if g.get("vendor") == "amd":
         gfx = g.get("gfx")
         if not gfx:
-            return "the kernel's KFD (amdgpu's compute part, /dev/kfd) does not list it"
+            return ("AMD's driver does not report its architecture (its HIP runtime, amdhip64_7.dll)" if WIN else
+                    "the kernel's KFD (amdgpu's compute part, /dev/kfd) does not list it")
         if not AMD_ARCH.fullmatch(gfx):
             return f"{gfx}: the engine needs an RDNA2 or later AMD GPU (gfx103x, gfx11xx, gfx12xx)"
         if PACKAGED:
             meta = packaged_engine()
             if gfx not in meta.get("hip_archs", []):
-                return f"{meta.get('package', 'this package')} has no code for {gfx}: " + amd_elsewhere()
+                where = "" if WIN else ": " + amd_elsewhere()
+                return f"{meta.get('package', 'this package')} has no code for {gfx}{where}"
         elif (have := rocblas_archs()) is not None and gfx not in have:
             return (f"this distribution's rocBLAS, which the engine's dense matrix products run in, has no code for "
                     f"{gfx}: " + amd_elsewhere())
