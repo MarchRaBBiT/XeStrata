@@ -4716,6 +4716,17 @@ def main() -> int:
                                           else "the rest is read from the SSD as needed)"))
             any_fits = any_fits or not verdict.startswith("does not fit")
             say(f"  {m:10s} needs ~{d['ram_gb']} GB RAM: {verdict}")
+        # the other models (PLAIN_FAMILIES): their weights and 8 GB beside, in RAM and the GPU together (the experts
+        # the GPU holds are not copied into RAM)
+        plain_vram = max(0.0, gpu.get("vram_gb", 0.0) - 5)
+        for fam in PLAIN_FAMILIES.values():
+            for m, d in fam["models"].items():
+                gb = d["size"] / 1e9
+                verdict = "fits" if ram >= gb + 8 else "fits with the GPU's VRAM" if ram + plain_vram >= gb + 8 \
+                    else "slow (the experts that do not fit are read from the SSD)"
+                if gpu.get("integrated") and gpu.get("vendor") == "intel":
+                    verdict = "not on the processor's own graphics yet"
+                say(f"  {fam['title']} {m}: ~{gb + 8:.0f} GB of RAM and VRAM: {verdict}")
         if not any_fits:
             # upstream #977: every size says "does not fit", so the verdict says so too (and the exit code, for
             # scripts). It only reports: --model NAME --yes still installs one anyway.
