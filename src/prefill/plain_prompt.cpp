@@ -607,7 +607,7 @@ bool PlainModel::prompt_split(const int32_t* tokens, int64_t n, int64_t pos, int
         const OnDevice on(st->dev_);
         int64_t n_free = 0;
         for (const auto& f : st->free_) n_free += (int64_t) f.size();
-        if (!st->disp_.usage.empty() && !st->adapt(err, std::max<int64_t>(2048, n_free))) return false;
+        if (!st->disp_.usage.empty() && !st->adapt(err, std::max<int64_t>(2048, n_free), st->opt_.adapt_swaps)) return false;
     }
     return true;
 }
@@ -646,11 +646,14 @@ bool PlainModel::prompt_one(const int32_t* tokens, int64_t n, int64_t pos, int32
         std::fprintf(stderr, "strata plain: the chunks %.1f ms, giving the tier its slots back %.1f ms\n", chunks_ms, since(tc));
     // the tier to the experts the prompt routed most, at once (upstream's q36 engine: up to 2048 slot replacements
     // after a prompt): the rounds between windows move at most adapt_swaps each, so an empty tier (no profile) took
-    // a hundred windows to fill.  The copies run on the copy stream beside the first windows.
+    // a hundred windows to fill.  The copies run on the copy stream beside the first windows.  The free slots take
+    // what the prompt routed; of the experts in VRAM no more are evicted than a round between windows does: GLM-5.3-
+    // Flash's 2,048 evictions after a 1K prompt (17 GB of 8.5 MB experts) took the RAM's and the link's bandwidth from
+    // the decode, 9.5 -> 13.5 tok/s on the B70 and 11.3 -> 12.0 on the RTX 4070 with all of them left out (2026-10-20)
     int64_t n_free = 0;   // and every free slot: those copies displace nothing
     for (const auto& f : free_) n_free += (int64_t) f.size();
     const auto t0 = std::chrono::steady_clock::now();
-    if (ok && !disp_.usage.empty() && !adapt(err, std::max<int64_t>(2048, n_free))) return false;
+    if (ok && !disp_.usage.empty() && !adapt(err, std::max<int64_t>(2048, n_free), opt_.adapt_swaps)) return false;
     if (profile)
         std::fprintf(stderr, "strata plain: the tier after the prompt: %.1f ms\n",
                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());

@@ -1872,7 +1872,7 @@ bool PlainModel::save_profile(const std::string& path, std::string& err) const {
 // XeStrata's adaptive tier (generate.cpp's `adapt`): per MoE layer, a missing expert routed at least twice (decayed
 // counts) replaces the least-routed resident one when it leads by 1.5, or takes a free slot; at most adapt_swaps a
 // round, the largest gains first; then the counts decay.  Runs between windows, so no window reads a slot it changes.
-bool PlainModel::adapt(std::string& err, int64_t max_swaps) {
+bool PlainModel::adapt(std::string& err, int64_t max_swaps, int64_t max_evict) {
     const int64_t L = n_moe_, E = spec_.n_expert;
     if (!settle_swaps(max_swaps > 0, err)) return false;
     if (!pending_.empty()) return true;   // the last round's copies are still landing: no new round yet
@@ -1906,6 +1906,21 @@ bool PlainModel::adapt(std::string& err, int64_t max_swaps) {
         }
     }
     std::sort(swaps.begin(), swaps.end(), [](const Swap& a, const Swap& b) { return a.gain > b.gain; });
+    // with the RAM copy of what VRAM does not hold (complement_), an expert evicted for one the RAM has goes back into
+    // the RAM in its place through an exchange buffer; past the buffers it would be read from the files from then on
+    // while the one that came in is held twice, so such a swap waits for a round with room.  The round after a prompt
+    // (up to 2,048 swaps against 96 buffers) sent most of GLM-5.3-Flash's profiled tier to the drive: decode 9.5 tok/s
+    // against 13.4 without that round (B70, UD-IQ3_XXS, 2026-10-20); all the experts in RAM, nothing is lost.
+    if (complement_ != nullptr) {
+        int64_t room = complement_->exchange_capacity();
+        swaps.erase(std::remove_if(swaps.begin(), swaps.end(), [&](const Swap& w) {
+                        if (w.out < 0 || !complement_->has_resident(w.layer, w.in) ||
+                            complement_->has_resident(w.layer, w.out))
+                            return false;
+                        return room-- <= 0;
+                    }),
+                    swaps.end());
+    }
     // and at most adapt_mib_per_token of copies for each token the windows read since the last round: the copies share
     // the RAM's bandwidth with the missed experts the CPU and PCIe read
     const uint64_t blob = k::cpu::expert_layout().max_blob;
@@ -1914,6 +1929,11 @@ bool PlainModel::adapt(std::string& err, int64_t max_swaps) {
                                : opt_.adapt_swaps;
     tokens_since_adapt_ = 0;
     const int64_t cap = max_swaps > 0 ? max_swaps : std::min<int64_t>(opt_.adapt_swaps, std::max<int64_t>(budget, 1));
+    if (max_evict >= 0) {
+        int64_t evict = max_evict;
+        swaps.erase(std::remove_if(swaps.begin(), swaps.end(), [&](const Swap& w) { return w.out >= 0 && evict-- <= 0; }),
+                    swaps.end());
+    }
     if ((int64_t) swaps.size() > cap) swaps.resize((size_t) cap);
     // the RAM tier of what VRAM does not hold: an evicted expert goes back into the RAM copy, in the place of the one
     // that comes in (FileExpertSource's exchanges), read back from its slot before the slot is written; the copy
