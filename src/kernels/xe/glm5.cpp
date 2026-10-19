@@ -314,11 +314,15 @@ void glm5_kda_step(float* state, const float* q, const float* k, const float* v,
 }
 
 void glm5_kda_scan(float* state, const float* q, const float* k, const float* v, const float* g, const float* beta,
-                   float* out, int64_t n_heads, int64_t n_tokens, void* stream) {
+                   float* out, int64_t n_heads, int64_t n_tokens, void* stream, float* const* snaps, int n_snaps) {
     constexpr int S = 128;
     constexpr int COLS = 4;   // columns (sub-groups) a work-group
     if (n_heads <= 0 || n_heads > 65535) throw core::DeviceError("glm5_kda_scan: " + std::to_string(n_heads) + " heads");
+    if (n_snaps < 0 || n_snaps > kGlm5MaxSnaps) throw core::DeviceError("glm5_kda_scan: too many snapshots");
     if (n_tokens <= 0) return;
+    struct Snaps { float* p[kGlm5MaxSnaps]; } sn{};
+    for (int i = 0; i < n_snaps; ++i) sn.p[i] = snaps[i];
+    const int NS = (int) std::min<int64_t>(n_snaps, n_tokens);
     const int H = (int) n_heads;
     const int64_t T = n_tokens, TS = (int64_t) H * S;
     const float scale = 1.0f / sycl::sqrt((float) S);
@@ -355,6 +359,8 @@ void glm5_kda_scan(float* state, const float* q, const float* k, const float* v,
                 }
                 o = sycl::reduce_over_group(sg, o, sycl::plus<float>());
                 if (lane == 0) out[t * TS + hs + col] = o * scale;
+                if (t < NS)   // the state after this row, to go back to (a speculative window's rows but its last)
+                    for (int r = 0; r < 4; ++r) sn.p[t][((size_t) (r * WARP + lane) * H + head) * S + col] = s[r];
             }
             for (int r = 0; r < 4; ++r) state[((size_t) (r * WARP + lane) * H + head) * S + col] = s[r];
         });
