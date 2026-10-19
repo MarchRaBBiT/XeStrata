@@ -863,6 +863,63 @@ bool PlainModel::open_experts(std::string& err) {
         std::fprintf(stderr, "strata plain: the VRAM tier filled from %s: %lld experts\n", opt_.profile.c_str(),
                      (long long) filled);
     }
+    // the experts that do not all fit in RAM: the ones the VRAM tier does not hold pinned there, as far as the RAM
+    // allows, the rest read in place (generate.cpp's resident RAM mode), so that a model which fits the RAM and the
+    // VRAM together reads none from the drive.  Without a profile each layer's tier takes its first experts, and the
+    // adaptive tier moves them.  On Level Zero the RAM beside them counts half the VRAM: the device's allocations are
+    // made by then, and on the B70 GLM-5.3-Flash ran with 88.5 GiB pinned here and 26 GiB left (2026-10-19).
+    if (!in_ram && !opt_.mmap_experts) {
+        auto* file = static_cast<FileExpertSource*>(src_.get());
+        if (opt_.profile.empty())
+            for (int64_t l = 0; l < L; ++l)
+                for (int32_t e = 0; e < (int32_t) E && !free_[(size_t) l].empty(); ++e)
+                    if (res_[(size_t) (l * E + e)] < 0 && !fill_slot(l, e, err)) return false;
+        std::vector<std::pair<int32_t, int32_t>> held;
+        std::vector<int32_t> slots;
+        for (int64_t l = 0; l < L; ++l)
+            for (int64_t e = 0; e < E; ++e)
+                if (res_[(size_t) (l * E + e)] >= 0) {
+                    held.emplace_back((int32_t) l, (int32_t) e);
+                    slots.push_back(res_[(size_t) (l * E + e)]);
+                }
+        // the slots the prompt path lends for its longest chunk (prompt_borrow): their experts are kept in RAM too
+        int64_t lend_from = -1;
+        if (opt_.prompt_chunk > 0 && prompt_dev_ == nullptr) {
+            uint64_t db = 0, hb = 0;
+            prompt_carve(opt_.prompt_chunk, pb_, nullptr, nullptr, db, hb);
+            const uint64_t* off = cache_.slot_offsets();
+            const int64_t lowest = std::max<int64_t>(n_slots_ / 2, cache_.last_piece_first());
+            lend_from = n_slots_;
+            while (off != nullptr && lend_from > lowest && off[n_slots_] - off[lend_from] < db) --lend_from;
+        }
+        // the order the RAM takes them in: the profile's, else each layer's experts in turn
+        std::vector<std::pair<int32_t, int32_t>> order = prior_;
+        if (order.empty())
+            for (int32_t e = 0; e < (int32_t) E; ++e)
+                for (int32_t l = 0; l < (int32_t) L; ++l) order.emplace_back(l, e);
+        uint64_t headroom = 8ull << 30;
+        if (Runtime::get().device().get_backend() == sycl::backend::ext_oneapi_level_zero) headroom += total_b / 2;
+        // STRATA_RESIDENT_PIN=0: never page-locked, 1: always; else as the RAM allows (#11), as generate.cpp
+        using Pin = FileExpertSource::Pin;
+        const char* pin_env = std::getenv("STRATA_RESIDENT_PIN");
+        const Pin pin = pin_env != nullptr && std::strcmp(pin_env, "0") == 0   ? Pin::off
+                        : pin_env != nullptr && std::strcmp(pin_env, "1") == 0 ? Pin::on
+                                                                               : Pin::automatic;
+        std::string why;
+        if (!file->pin_complement(n_slots_, held, slots, why, pin, {}, lend_from, headroom,
+                                  FileExpertSource::kResidentWhatFits, &order)) {
+            std::fprintf(stderr, "strata plain: the experts outside the VRAM tier do not fit in RAM (%s): read in "
+                                 "place\n", why.c_str());
+        } else {
+            if (opt_.adapt_every > 0 && opt_.adapt_swaps > 0 && !file->reserve_exchanges(opt_.adapt_swaps, why))
+                std::fprintf(stderr, "strata plain: no exchange buffers (%s): an expert the adaptive tier evicts is "
+                                     "read in place after\n", why.c_str());
+            complement_ = file;
+            std::fprintf(stderr, "strata plain: the experts outside the VRAM tier in RAM: %.2f GiB (%lld experts%s)\n",
+                         (double) file->resident_bytes() / 1073741824.0, (long long) file->resident_count(),
+                         file->complement_pinned() ? ", pinned" : "");
+        }
+    }
 
     std::fprintf(stderr, "strata plain: %lld MoE layers x %lld experts, %lld VRAM slots (%lld a layer, %.2f GiB), "
                          "%d CPU workers, %lld MiB free before the tier\n",
@@ -1371,6 +1428,39 @@ bool PlainModel::adapt(std::string& err, int64_t max_swaps) {
     tokens_since_adapt_ = 0;
     const int64_t cap = max_swaps > 0 ? max_swaps : std::min<int64_t>(opt_.adapt_swaps, std::max<int64_t>(budget, 1));
     if ((int64_t) swaps.size() > cap) swaps.resize((size_t) cap);
+    // the RAM tier of what VRAM does not hold: an evicted expert goes back into the RAM copy, in the place of the one
+    // that comes in (FileExpertSource's exchanges), read back from its slot before the slot is written; the copy
+    // keeps it from the exchange buffer until the new one has landed (settle_swaps commits them)
+    if (complement_ != nullptr && complement_->exchange_capacity() > 0) {
+        int64_t q = 0;
+        for (const Swap& w : swaps) {
+            if (w.out < 0 || q >= complement_->exchange_capacity() || !complement_->has_resident(w.layer, w.in) ||
+                complement_->has_resident(w.layer, w.out))
+                continue;
+            const int32_t slot = res_[(size_t) (w.layer * E + w.out)];
+            if (!strata::gpu::copy_async(complement_->exchange_buffer(q, w.layer), cache_.device_slot(slot),
+                                         k::cpu::expert_layout().blob_bytes(w.layer), swap_cs_)) {
+                err = std::string("plain model: the adaptive tier's copy back: ") + strata::gpu::last_error();
+                return false;
+            }
+            ++q;
+        }
+        if (q > 0 && !strata::gpu::stream_sync(swap_cs_)) {
+            err = std::string("plain model: the adaptive tier's copy back: ") + strata::gpu::last_error();
+            return false;
+        }
+        q = 0;
+        for (const Swap& w : swaps) {
+            if (w.out < 0 || q >= complement_->exchange_capacity() || !complement_->has_resident(w.layer, w.in) ||
+                complement_->has_resident(w.layer, w.out))
+                continue;
+            if (!complement_->stage_exchange(w.layer, w.in, w.out, q)) {
+                err = "plain model: the adaptive tier's exchange";
+                return false;
+            }
+            ++q;
+        }
+    }
     for (const Swap& w : swaps) {
         if (w.out < 0) {
             if (free_[(size_t) w.layer].empty()) continue;
@@ -1406,7 +1496,10 @@ bool PlainModel::adapt(std::string& err, int64_t max_swaps) {
 }
 
 bool PlainModel::settle_swaps(bool wait, std::string& err) {
-    if (pending_.empty()) return true;
+    if (pending_.empty()) {   // a round of blocking fills: their copies have landed
+        if (complement_ != nullptr) complement_->commit_exchanges();
+        return true;
+    }
     if (wait ? !strata::gpu::event_sync(swap_ev_) : !strata::gpu::event_query(swap_ev_)) {
         if (!wait) return true;
         err = std::string("plain model: the adaptive tier's copies: ") + strata::gpu::last_error();
@@ -1414,6 +1507,7 @@ bool PlainModel::settle_swaps(bool wait, std::string& err) {
     }
     for (const PendingSwap& p : pending_) res_[(size_t) (p.layer * spec_.n_expert + p.expert)] = p.slot;
     pending_.clear();
+    if (complement_ != nullptr) complement_->commit_exchanges();
     return true;
 }
 

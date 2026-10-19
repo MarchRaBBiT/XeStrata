@@ -381,6 +381,8 @@ private:
 
     // the expert tiers
     std::unique_ptr<ExpertSource> src_;
+    /// The experts read in place, with the ones the VRAM tier does not hold pinned in RAM (pin_complement), or null
+    FileExpertSource* complement_ = nullptr;
     PcieSplitTimes split_;
     std::unique_ptr<strata::kernels::cpu::ExpertPool> pool_;
     ExpertCache cache_;
