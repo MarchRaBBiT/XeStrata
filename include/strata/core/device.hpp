@@ -42,8 +42,9 @@ DeviceInfo device_info(int ordinal = 0);
 /// STRATA_MAX_ALLOC_MIB the largest allocation it assumes.  0 when unset.
 uint64_t vram_limit_bytes();
 uint64_t max_alloc_limit_bytes();
-/// `free` and `total` as the engine sees them under STRATA_VRAM_LIMIT_MIB.
-void apply_vram_limit(uint64_t& free, uint64_t& total);
+/// `free` and `total` as the engine sees them under STRATA_VRAM_LIMIT_MIB.  `held`: the bytes this process holds on the
+/// device, when the device's report may not show them yet.
+void apply_vram_limit(uint64_t& free, uint64_t& total, uint64_t held = 0);
 /// An integrated GPU's free memory: at most what Linux can give back, less STRATA_UMA_HEADROOM_GIB (default 6).
 void apply_uma_limit(uint64_t& free);
 /// The device's largest allocation, under STRATA_MAX_ALLOC_MIB.

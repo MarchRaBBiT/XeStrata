@@ -44,8 +44,9 @@ thread_local std::string g_error;
 // The live alloc_device blocks, so a refusal can say how much this process holds (the refusals seen so far came
 // with ~26 GiB free in the runs that passed, cause unknown: the 2026-09-30-xe-iq3xxs record)
 std::mutex g_live_mu;
-std::map<const void*, size_t> g_live;
+std::map<const void*, std::pair<size_t, int>> g_live;   // the block's bytes and engine device
 size_t g_live_bytes = 0;
+std::map<int, size_t> g_live_on;                        // per engine device
 
 std::string refusal_state() {
     size_t held = 0, n = 0;
@@ -173,8 +174,9 @@ void* alloc_device(size_t bytes) {
             return nullptr;
         }
         std::lock_guard<std::mutex> lock(g_live_mu);
-        g_live[p] = bytes;
+        g_live[p] = {bytes, rt().ordinal()};
         g_live_bytes += bytes;
+        g_live_on[rt().ordinal()] += bytes;
         return p;
     } catch (const std::exception& e) { fail("alloc_device", e); return nullptr; }
 }
@@ -191,7 +193,8 @@ void free(const void* p) {
     {
         std::lock_guard<std::mutex> lock(g_live_mu);
         if (auto it = g_live.find(p); it != g_live.end()) {
-            g_live_bytes -= it->second;
+            g_live_bytes -= it->second.first;
+            g_live_on[it->second.second] -= it->second.first;
             g_live.erase(it);
         }
     }
@@ -345,7 +348,12 @@ bool mem_info(size_t* free_bytes, size_t* total_bytes) {
         uint64_t free = d.get_info<sycl::ext::intel::info::device::free_memory>();
         uint64_t total = d.get_info<sycl::info::device::global_mem_size>();
         if (core::integrated_gpu(d)) core::apply_uma_limit(free);   // its memory is the system RAM
-        core::apply_vram_limit(free, total);
+        size_t held = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_live_mu);
+            if (auto it = g_live_on.find(rt().ordinal()); it != g_live_on.end()) held = it->second;
+        }
+        core::apply_vram_limit(free, total, held);
         if (free_bytes) *free_bytes = (size_t) free;
         if (total_bytes) *total_bytes = (size_t) total;
         return true;
