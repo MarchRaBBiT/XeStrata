@@ -7035,19 +7035,29 @@ MODEL_CARD_SAMPLING = {
     # Qwen3.6-35B-A3B: the general-task sets (the card's precise-coding set is temperature 0.6, presence_penalty 0)
     "qwen35moe": {"thinking": {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "presence_penalty": 1.5},
                   "instruct": {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5}},
+    # Ornith-1.5: the card's set for general tasks (its benchmarks ran at temperature 1.0)
+    "ornith": {"thinking": {"temperature": 0.6, "top_p": 0.95, "top_k": 20},
+               "instruct": {"temperature": 0.6, "top_p": 0.95, "top_k": 20}},
+    # GLM-5.3-Flash: its generation_config.json
+    "glm5": {"thinking": {"temperature": 1.0, "top_p": 0.95}, "instruct": {"temperature": 1.0, "top_p": 0.95}},
 }
 
 
 def card_family(cfg: dict) -> str | None:
     """Which MODEL_CARD_SAMPLING set a config's model takes: Qwen3.8-Flash-Next and its variants (Swift, Gyro: upstream
-    gives every qwen4exp file the set, "qwen4exp"), Qwen3.6-35B-A3B ("qwen35moe"); None for the other models (Ornith,
-    llm-jp: their cards are not in the table), which stay greedy unless the request or the config's `sampling` block
-    says otherwise.  By the model's name, as the architecture alone does not tell Qwen3.6 from Ornith."""
+    gives every qwen4exp file the set, "qwen4exp"), Qwen3.6-35B-A3B ("qwen35moe"), Ornith-1.5 ("ornith"),
+    GLM-5.3-Flash ("glm5"); None for llm-jp (its card names no sampling), which stays greedy unless the request or the
+    config's `sampling` block says otherwise.  By the model's name, as the architecture alone does not tell Qwen3.6
+    from Ornith."""
     name = str(cfg.get("model_name") or "qwen3.8-flash-next").lower()
     if name.startswith(("qwen3.8", "swift")) or "gyro" in name:
         return "qwen4exp"
     if name.startswith("qwen3.6"):
         return "qwen35moe"
+    if name.startswith("ornith"):
+        return "ornith"
+    if name.startswith("glm"):
+        return "glm5"
     return None
 
 

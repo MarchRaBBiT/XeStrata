@@ -999,7 +999,8 @@ B70 の IQ2_XS で、4,996 トークンの会話（INT8 の KV）のファイル
   要求自身の項目がいつも優先します。
   ブロックがなければ、サンプリングの項目のない要求はモデルカードの勧める値で生成します（upstream #2685）。
   思考の有無で選び、Qwen3.8-Flash-Next（Swift・Gyro も）は思考ありで temperature 1.0・top_p 0.95・top_k 20、思考なしで temperature 0.7・top_p 0.8・top_k 20・presence_penalty 1.5、Qwen3.6-35B-A3B は思考ありで 1.0・0.95・20・presence_penalty 1.5、思考なしで 0.7・0.8・20・1.5 です。
-  Ornith と llm-jp は表になく、これまでどおり貪欲に生成します。
+  Ornith-1.5 は model card の一般用途の 0.6・0.95・20（思考の有無によらず）、GLM-5.3-Flash は generation_config の temperature 1.0・top_p 0.95 です。
+  llm-jp は model card に推奨がないので表になく、これまでどおり貪欲に生成します。
   優先は要求、web の画面の共有のチャットの設定、設定の `sampling` のブロック、モデルカードの順です。
   貪欲に生成するのは、要求の `temperature: 0` か、設定の `"sampling": {"temperature": 0}` で頼んだときだけです。
   web の画面は、サンプリングの設定を変えるまで自分の値を送りません（前は 0.6 を出して送っていました）。前に保存した 0.6 と既定の top_p・top_k は、設定していないものとして扱います。

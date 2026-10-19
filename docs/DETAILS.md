@@ -1017,7 +1017,9 @@ The same held on the small configuration (8 GB, no XMX) and with the icpx build.
   A request's own fields always win.
   With no block at all, a request without sampling keys gets the sampling the model card recommends (upstream #2685).
   It is picked by the thinking state: Qwen3.8-Flash-Next (Swift and Gyro too) thinking temperature 1.0, top_p 0.95, top_k 20; not thinking temperature 0.7, top_p 0.8, top_k 20, presence_penalty 1.5; Qwen3.6-35B-A3B thinking 1.0 / 0.95 / 20 with presence_penalty 1.5, not thinking 0.7 / 0.8 / 20 with 1.5.
-  Ornith and llm-jp are not in the table and decode greedy as before.
+  Ornith-1.5 takes its card's set for general tasks, 0.6, 0.95 and 20 (with or without thinking), GLM-5.3-Flash its
+  generation_config's temperature 1.0 and top_p 0.95.
+  llm-jp's card names no sampling, so it is not in the table and decodes greedy as before.
   The order of precedence: the request, the web page's shared Chat settings, the config's `sampling` block, the card.
   Greedy is only for who asks for it: `temperature: 0` in the request, or `"sampling": {"temperature": 0}` in the config.
   The web page sends no sampling of its own until you change its Sampling settings (it showed and sent 0.6 before); an old stored 0.6 with the default top_p and top_k counts as not set.
