@@ -2243,7 +2243,8 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                 standin = d.host_res[(size_t) d.layers * (size_t) d.n_expert + (size_t) e];
             if (standin >= 0) nmiss = 0;
         }
-        const bool pcie_ok = d.pcie_num > 0 && d.src->device_alias(d.layers, 0) != nullptr;
+        // the layer's RAM can be read over PCIe (its first expert may be in VRAM, outside a RAM copy of the others)
+        const bool pcie_ok = d.pcie_num > 0 && d.src->pcie_layer(d.layers);
         // from the times measured at start (pcie_split_m); else the share pcie_num/256
         int m = !pcie_ok ? 0
                 : d.pcie_split != nullptr ? pcie_split_m(*d.pcie_split, d.pcie_overlap, nmiss, std::max(0, nd - nmiss))

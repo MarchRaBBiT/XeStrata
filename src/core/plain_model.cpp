@@ -841,27 +841,42 @@ bool PlainModel::open_experts(std::string& err) {
         const char* v = std::getenv("STRATA_WSL_PCIE_SPLIT");
         return v != nullptr && std::strtol(v, nullptr, 10) != 0;
     }();
-    if (opt_.pcie_split && in_ram && strata::platform::under_wsl() && !wsl_split)
-        std::fprintf(stderr, "strata plain: no PCIe split under WSL 2 (the GPU reading the experts' RAM failed there; "
-                             "STRATA_WSL_PCIE_SPLIT=1 tries it): the CPU takes every missed expert\n");
-    else if (opt_.pcie_split && in_ram) {
-        std::string why;
-        if (measure_pcie_split(disp_, L, split_, why)) {
-            disp_.pcie_split = &split_;
-            disp_.pcie_overlap = false;   // the window reads the PCIe share after its VRAM hits
-            bool any = false;
-            for (int f = 1; f <= 16 && !any; ++f) any = pcie_split_m(split_, false, f, f) > 0;
-            if (any && src_->device_alias(split_.layer, 0) == nullptr && !src_->make_kernel_readable(why)) {
-                std::fprintf(stderr, "strata plain: the experts stay registered for copies (%s): the CPU takes every "
-                                     "missed expert\n", why.c_str());
-                disp_.pcie_split = nullptr;
-            }
-            std::fprintf(stderr, "strata plain: PCIe split: an expert %.3f ms on the CPU, %.3f ms over PCIe, %.3f ms on "
-                                 "the GPU%s\n", split_.c, split_.p, split_.q, any ? "" : " (the CPU takes them all)");
-        } else {
-            std::fprintf(stderr, "strata plain: no PCIe split (%s): the CPU takes every missed expert\n", why.c_str());
+    // (also after the RAM copy of what the VRAM tier does not hold is pinned, below: pinned_split)
+    auto pinned_split = [&]() {
+        if (opt_.pcie_split && strata::platform::under_wsl() && !wsl_split) {
+            std::fprintf(stderr, "strata plain: no PCIe split under WSL 2 (the GPU reading the experts' RAM failed "
+                                 "there; STRATA_WSL_PCIE_SPLIT=1 tries it): the CPU takes every missed expert\n");
+            return;
         }
-    }
+        if (!opt_.pcie_split) return;
+        std::string why;
+        if (!measure_pcie_split(disp_, L, split_, why)) {
+            std::fprintf(stderr, "strata plain: no PCIe split (%s): the CPU takes every missed expert\n", why.c_str());
+            return;
+        }
+        disp_.pcie_split = &split_;
+        // the decode's PCIe share (its size from the times: pcie_split_m): chosen by the first windows (pcie_probe);
+        // STRATA_PLAIN_DECODE_PCIE=1 / 0: on / off
+        if (const char* v = std::getenv("STRATA_PLAIN_DECODE_PCIE")) {
+            disp_.pcie_num = std::strtol(v, nullptr, 10) != 0 ? 256 : 0;
+        } else {
+            disp_.pcie_num = 256;
+            pcie_probe_ = 0;
+        }
+        disp_.pcie_overlap = false;   // the window reads the PCIe share after its VRAM hits
+        bool any = false;
+        for (int f = 1; f <= 16 && !any; ++f) any = pcie_split_m(split_, false, f, f) > 0;
+        if (any && !src_->pcie_layer(split_.layer) && !src_->make_kernel_readable(why)) {
+            std::fprintf(stderr, "strata plain: the experts stay registered for copies (%s): the CPU takes every "
+                                 "missed expert\n", why.c_str());
+            disp_.pcie_split = nullptr;
+            disp_.pcie_num = 0;
+            pcie_probe_ = -1;
+        }
+        std::fprintf(stderr, "strata plain: PCIe split: an expert %.3f ms on the CPU, %.3f ms over PCIe, %.3f ms on "
+                             "the GPU%s\n", split_.c, split_.p, split_.q, any ? "" : " (the CPU takes them all)");
+    };
+    if (in_ram) pinned_split();
     // the adaptive tier's copy stream: its rounds bring experts in beside the windows (adapt)
     swap_cs_ = strata::gpu::stream_create();
     if (swap_cs_ == nullptr || !strata::gpu::event_create(&swap_ev_)) {
@@ -946,6 +961,7 @@ bool PlainModel::open_experts(std::string& err) {
             std::fprintf(stderr, "strata plain: the experts outside the VRAM tier in RAM: %.2f GiB (%lld experts%s)\n",
                          (double) file->resident_bytes() / 1073741824.0, (long long) file->resident_count(),
                          file->complement_pinned() ? ", pinned" : "");
+            if (file->complement_pinned()) pinned_split();   // the GPU reads its share of the misses from there
         }
     }
 
@@ -1270,6 +1286,8 @@ bool PlainModel::forward(const int32_t* tokens, int T, int64_t pos, int32_t* out
     const int64_t L = s.n_moe_layers();
     std::vector<int64_t> layers((size_t) L);
     for (int64_t l = 0; l < L; ++l) layers[(size_t) l] = l;
+    pcie_probe_before();
+    const auto t0 = std::chrono::steady_clock::now();
     if (!launch_serve(exec_[(size_t) T], segs_[(size_t) T], L, layers.data(), T, err)) return false;
     k::SamplerParams sp = sampler_;
     sp.counter = (uint64_t) pos;   // row t's draw: position pos + t
@@ -1278,6 +1296,7 @@ bool PlainModel::forward(const int32_t* tokens, int T, int64_t pos, int32_t* out
         err = std::string("plain model: the window: ") + strata::gpu::last_error();
         return false;
     }
+    pcie_probe_after(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(), T);
     if (disp_.failed) {
         err = std::string("plain model: the CPU experts: ") + (disp_.fail ? disp_.fail : "failed");
         return false;
@@ -1293,6 +1312,34 @@ bool PlainModel::forward(const int32_t* tokens, int T, int64_t pos, int32_t* out
     tokens_since_adapt_ += T;
     if (!disp_.usage.empty() && windows_ % opt_.adapt_every == 0 && !adapt(err)) return false;
     return true;
+}
+
+// The decode's PCIe share, measured: whether the GPU reading a share of the missed experts over PCIe beats the CPU
+// computing them all depends on more than the start's times (pcie_split_m): with llm-jp-4.1 Q4_K_M's 4.6 MB experts at
+// 6 GB on the B70 decode went 35.8 -> 32.9 tok/s with it, with GLM-5.3-Flash UD-IQ3_XXS's 8.5 MB ones 9.16 -> 9.46
+// (2026-10-19).  So the first windows take it on and off in blocks of kBlock, kRounds times each, and the faster time a
+// token stays.
+namespace {
+constexpr int kPcieBlock = 8, kPcieRounds = 3;
+}
+
+void PlainModel::pcie_probe_before() {
+    if (pcie_probe_ < 0) return;
+    disp_.pcie_num = (pcie_probe_ / kPcieBlock) % 2 == 0 ? 256 : 0;
+}
+
+void PlainModel::pcie_probe_after(double ms, int T) {
+    if (pcie_probe_ < 0) return;
+    const int on = (pcie_probe_ / kPcieBlock) % 2 == 0 ? 1 : 0;
+    pcie_probe_ms_[on] += ms;
+    pcie_probe_tok_[on] += T;
+    if (++pcie_probe_ < 2 * kPcieBlock * kPcieRounds) return;
+    const double a = pcie_probe_ms_[1] / (double) std::max<int64_t>(pcie_probe_tok_[1], 1);
+    const double b = pcie_probe_ms_[0] / (double) std::max<int64_t>(pcie_probe_tok_[0], 1);
+    disp_.pcie_num = a <= b ? 256 : 0;
+    pcie_probe_ = -1;
+    std::fprintf(stderr, "strata plain: the decode's PCIe share: %.2f ms a token with it, %.2f without: %s\n", a, b,
+                 a <= b ? "on" : "off");
 }
 
 bool PlainModel::mtp_run(int T, const int32_t* tokens, int64_t pos, int32_t* draft, std::string& err) {

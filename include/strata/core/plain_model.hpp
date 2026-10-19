@@ -415,6 +415,14 @@ private:
     std::vector<std::pair<int32_t, int32_t>> prior_;   ///< the profile the tier was filled from
     int64_t n_slots_ = 0;
     int64_t windows_ = 0, swaps_total_ = 0;
+    // the decode's PCIe share chosen by measurement (pcie_probe): windows in blocks with it on and off, alternating,
+    // their milliseconds and tokens; -1 once chosen (or not to be chosen: no split, or STRATA_PLAIN_DECODE_PCIE given)
+    int pcie_probe_ = -1;
+    double pcie_probe_ms_[2] = {};
+    int64_t pcie_probe_tok_[2] = {};
+    /// Before a window: the PCIe share of the window, while it is being chosen.  After it: its time.
+    void pcie_probe_before();
+    void pcie_probe_after(double ms, int T);
     int64_t tokens_since_adapt_ = 0;   ///< tokens the windows read since the last adaptive round
     uint8_t* fill_tmp_ = nullptr;                 ///< pinned staging for a slot fill
 
