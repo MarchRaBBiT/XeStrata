@@ -275,7 +275,7 @@ bool PlainModel::load(const PlainOptions& opt, std::string& err) {
     {
         using RST = k::RopeScalingType;
         k::RopeScaling rs;
-        rs.freq_base = s.rope_base;
+        rs.freq_base = opt_.rope_freq_base > 0 ? opt_.rope_freq_base : s.rope_base;
         const std::string type = !opt_.rope_scaling.empty() ? opt_.rope_scaling : s.rope_scaling_type;
         rs.type = type == "yarn" ? RST::YaRN : type == "linear" ? RST::Linear : RST::None;
         if (rs.type != RST::None) {
@@ -283,6 +283,10 @@ bool PlainModel::load(const PlainOptions& opt, std::string& err) {
             rs.orig_ctx = opt_.yarn_orig_ctx > 0 ? opt_.yarn_orig_ctx
                           : s.rope_scaling_orig_ctx >= 1 ? s.rope_scaling_orig_ctx : (double) s.context_length;
             rs.ext_factor = rs.type == RST::YaRN ? 1.0 : 0.0;
+        }
+        if (opt_.rope_freq_scale > 0 && rs.type == RST::None) {   // llama.cpp: a linear scaling of 1 / scale
+            rs.type = RST::Linear;
+            rs.factor = 1.0 / opt_.rope_freq_scale;
         }
         if (const char* why = k::rope_scaling_invalid(rs)) {
             err = std::string("plain model: the rope scaling: ") + why;
@@ -715,6 +719,7 @@ bool PlainModel::open_experts(std::string& err) {
         free_b = f;
         total_b = t;
         apply_vram_limit(free_b, total_b);
+        if (opt_.vram_free_mib >= 0) free_b = std::min<uint64_t>(free_b, (uint64_t) opt_.vram_free_mib << 20);
     }
     // the prompt path's host buffers, for its longest chunk; the device ones are borrowed from the tier a prompt at a
     // time (prompt_borrow), so the tier is sized from all the free memory
@@ -752,6 +757,7 @@ bool PlainModel::open_experts(std::string& err) {
     for (int64_t l = 0; l < L; ++l) per_layer_b += lay.bytes[(size_t) l];
     int64_t q = per_layer_b > 0 ? (int64_t) (room / per_layer_b) : 0;
     q = std::min<int64_t>(q, E);
+    if (opt_.expert_slots >= 0) q = std::min<int64_t>(q, opt_.expert_slots / std::max<int64_t>(L, 1));
     if (q < 1) {
         err = "plain model: no VRAM is left for the expert tier (" + std::to_string(free_b >> 20) + " MiB free)";
         return false;

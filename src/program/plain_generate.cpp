@@ -312,6 +312,10 @@ static void plain_usage(const std::string& arch) {
                  "  --adapt-swaps N      the most experts one round moves into the VRAM tier (default 96)\n"
                  "  --adapt-mib-per-token N   and at most N MiB of them for each token read since the last round\n"
                  "                       (default 48; 0: no such bound)\n"
+                 "  --adapt-decay F      the routing counts are multiplied by F after each round (default 0.7)\n"
+                 "  --expert-cache N|auto   the VRAM tier's most expert slots, over all the layers (default auto)\n"
+                 "  --vram-free-mib N    size the VRAM tier from at most N MiB free\n"
+                 "  --vram-reserve-mib N leave N MiB of VRAM free beside the tier (default a 32nd of the memory)\n"
                  "  --mmap-experts       read the experts from the GGUF through mmap instead of pinned RAM\n"
                  "  --no-pcie-split      the CPU computes every expert the VRAM tier misses\n"
                  "  --prompt-chunk N     the prompt's most tokens a chunk through the batched products (default\n"
@@ -321,6 +325,7 @@ static void plain_usage(const std::string& arch) {
                  "                       the last one and N - 1 drafts (default 3; 0: off; greedy only)\n"
                  "  --draft-vocab PATH   the drafts over this token subset (int32 ids, data/draft_vocab*.bin)\n"
                  "  --rope-scaling none|linear|yarn, --rope-scale F, --yarn-orig-ctx N   context extension\n"
+                 "  --rope-freq-base F, --rope-freq-scale F   the rotation's base and frequency scale\n"
                  "  --dump-logits PATH   each generated token's logits, FP32 rows\n"
                  "  --serve              stay resident and take requests on stdin (server.py's protocol, text requests)\n"
                  "  --gpu PCI            the GPU (its PCI address)\n",
@@ -391,6 +396,17 @@ int plain_main(int argc, char** argv) {
         else if (a == "--rope-scaling") opt.rope_scaling = next("--rope-scaling");
         else if (a == "--rope-scale") opt.rope_scale = std::strtod(next("--rope-scale"), nullptr);
         else if (a == "--yarn-orig-ctx") opt.yarn_orig_ctx = std::strtod(next("--yarn-orig-ctx"), nullptr);
+        else if (a == "--vram-reserve-mib")
+            opt.reserve_mib = std::max<int64_t>(0, std::strtoll(next("--vram-reserve-mib"), nullptr, 10));
+        else if (a == "--vram-free-mib")
+            opt.vram_free_mib = std::max<int64_t>(0, std::strtoll(next("--vram-free-mib"), nullptr, 10));
+        else if (a == "--expert-cache") {
+            const std::string v = next("--expert-cache");
+            opt.expert_slots = v == "auto" ? -1 : std::max<int64_t>(0, std::strtoll(v.c_str(), nullptr, 10));
+        }
+        else if (a == "--adapt-decay") opt.adapt_decay = std::strtof(next("--adapt-decay"), nullptr);
+        else if (a == "--rope-freq-base") opt.rope_freq_base = std::strtod(next("--rope-freq-base"), nullptr);
+        else if (a == "--rope-freq-scale") opt.rope_freq_scale = std::strtod(next("--rope-freq-scale"), nullptr);
         else if (a == "--expert-profile-save") profile_save = next("--expert-profile-save");
         else if (a == "--expert-profile-save-every") save_min = std::strtod(next("--expert-profile-save-every"), nullptr);
         else {

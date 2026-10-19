@@ -54,6 +54,8 @@ struct PlainOptions {
     int max_t = 8;                  ///< the largest window
     int pool_workers = 0;           ///< CPU pool workers (0: every physical core but the first)
     int64_t reserve_mib = -1;       ///< VRAM left free after the expert slots (-1: from the device's memory)
+    int64_t vram_free_mib = -1;     ///< the free VRAM the tier is sized from at most (-1: what the device reports)
+    int64_t expert_slots = -1;      ///< the VRAM tier's slots at most, over all the layers (-1: what fits)
     int adapt_every = 4;            ///< windows between adaptive rounds (0: off)
     int adapt_swaps = 96;           ///< the most experts one round moves into the VRAM tier
     /// ... and at most this many MiB of experts for each token the windows read since the last round: the copies share
@@ -79,6 +81,8 @@ struct PlainOptions {
     std::string rope_scaling;
     double rope_scale = 0;
     double yarn_orig_ctx = 0;
+    double rope_freq_base = 0;      ///< the rotation's base (0: the file's)
+    double rope_freq_scale = 0;     ///< ... and its frequency scale, as llama.cpp's --rope-freq-scale (0: none)
     /// The most tokens a prompt chunk takes through the batched products (`prompt`; a shorter prompt, one chunk of its
     /// length); 0: the prompt runs in windows.
     int64_t prompt_chunk = 4096;
