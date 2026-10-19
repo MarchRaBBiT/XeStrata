@@ -755,7 +755,23 @@ bool FileExpertSource::copy_from_files(int64_t layer, int64_t expert, uint8_t* d
         for (int r = 0; r < 3; ++r) {
             const size_t i = (size_t) (3 * layer + r);
             const uint64_t per = role_bytes_[i];
-            std::memcpy(dst + at, role_ptr_[i] + (size_t) ((uint64_t) expert * per), (size_t) per);
+            const uint8_t* src = role_ptr_[i] + (size_t) ((uint64_t) expert * per);
+#if !defined(_WIN32)
+            // read, not copied from the mapping: a slice of megabytes in one request instead of a fault a page (the
+            // resident copy of GLM-5.3-Flash's 88 GiB from the drive: 0.65 GB/s through the mapping, 2026-10-19)
+            const Map& m = maps_[(size_t) role_file_[i]];
+            if (m.fd >= 0) {
+                uint64_t done = 0;
+                while (done < per) {
+                    const ssize_t n = ::pread(m.fd, dst + at + done, (size_t) (per - done),
+                                              (off_t) ((uint64_t) (src - m.base) + done));
+                    if (n <= 0) break;
+                    done += (uint64_t) n;
+                }
+                if (done == per) { at += per; continue; }
+            }
+#endif
+            std::memcpy(dst + at, src, (size_t) per);
             at += per;
         }
         return true;
