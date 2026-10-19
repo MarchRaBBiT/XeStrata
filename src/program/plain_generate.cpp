@@ -13,6 +13,7 @@
 #include "strata/program/option_scope.hpp"
 
 #include "strata/artifact/gguf_reader.hpp"
+#include "strata/core/conversation_memory.hpp"
 #include "strata/core/plain_model.hpp"
 #include "strata/kernels/sampler.hpp"
 #include "strata/prefill/gemm.hpp"
@@ -30,6 +31,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -127,11 +129,95 @@ void linkless_gpu_adapter() {
 // `--serve` for these models: generate.cpp's --serve protocol (server.py's StrataEngine) for text requests.  READY
 // <context> stop; then `GEN <max_new> [temperature=F top_p=F top_k=N min_p=F seed=N] <ids>` -> RESUME <reused>,
 // one `T <id>` a token, DONE (generate.cpp's fields; the RAM, file and offload ones zero); STOP ends a request,
-// QUIT the engine.  The commands of Qwen3.8-Flash-Next's engine this one has no part for (VRAM, SAVE, RESTORE,
-// GENI, BGEN) answer ERR.  The conversation's tokens stay read between requests: a request that starts with them
-// reads only what follows (a model with a recurrent state only when it extends them all; else it starts over).
+// QUIT the engine; SAVE / RESTORE <path> a session file.  The commands of Qwen3.8-Flash-Next's engine this one has no
+// part for (VRAM, GENI, BGEN) answer ERR.  The conversation's tokens stay read between requests: a request that starts
+// with them reads only what follows (a model with a recurrent state only when it extends them all; else it starts
+// over, or from the conversation cache).
+namespace {
+
+// The conversation cache (--conversation-cache-mib, off by default as Qwen3.8-Flash-Next's): conversations set aside
+// in RAM, each its tokens and the state they left (PlainModel::save_state), so a client that comes back to one reads
+// only what it added.  A request takes the live state or a parked one, whichever holds the longer start of it (with a
+// recurrent state, all of the conversation's tokens); the live one is parked before another takes its place, the
+// least recently used one dropped past the slots or the budget, or when the RAM left would fall under the floor.
+struct ConversationCache {
+    int64_t budget = 0;           // bytes; 0: off
+    int slots = 4;
+    int64_t min_free = 2560ll << 20;
+    struct Entry {
+        std::vector<int32_t> ids;
+        strata::core::PlainModel::Snapshot snap;
+    };
+    std::list<Entry> parked;      // most recent first
+    int64_t used() const {
+        int64_t n = 0;
+        for (const Entry& e : parked) n += (int64_t) e.snap.bytes();
+        return n;
+    }
+};
+
+// A session file (SAVE / RESTORE <path>): a conversation's tokens and state, for this model file and context only
+constexpr char kSessionMagic[8] = {'X', 'S', 'P', 'L', 'A', 'I', 'N', '1'};
+
+bool session_write(const std::string& path, const std::string& model_id, const std::vector<int32_t>& ids,
+                   const strata::core::PlainModel::Snapshot& snap, size_t& bytes, std::string& err) {
+    const std::string tmp = path + ".part";
+    std::FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (f == nullptr) { err = "cannot write " + tmp; return false; }
+    auto put = [&](const void* p, size_t n) { return std::fwrite(p, 1, n, f) == n; };
+    const uint64_t idn = model_id.size(), nt = ids.size(), np = snap.parts.size(), tok = (uint64_t) snap.tokens;
+    bool ok = put(kSessionMagic, 8) && put(&idn, 8) && put(model_id.data(), idn) && put(&tok, 8) && put(&nt, 8) &&
+              put(ids.data(), nt * 4) && put(&np, 8);
+    bytes = 8 + 8 + idn + 8 + 8 + nt * 4 + 8;
+    for (const auto& part : snap.parts) {
+        const uint64_t n = part.size();
+        ok = ok && put(&n, 8) && put(part.data(), n);
+        bytes += 8 + n;
+    }
+    ok = std::fflush(f) == 0 && ok;
+    ok = std::fclose(f) == 0 && ok;
+    if (!ok || std::rename(tmp.c_str(), path.c_str()) != 0) {
+        std::remove(tmp.c_str());
+        err = "writing " + path + " failed";
+        return false;
+    }
+    return true;
+}
+
+bool session_read(const std::string& path, const std::string& model_id, std::vector<int32_t>& ids,
+                  strata::core::PlainModel::Snapshot& snap, size_t& bytes, std::string& err) {
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (f == nullptr) { err = "cannot read " + path; return false; }
+    auto get = [&](void* p, size_t n) { return std::fread(p, 1, n, f) == n; };
+    char magic[8];
+    uint64_t idn = 0, tok = 0, nt = 0, np = 0;
+    std::string id;
+    bool ok = get(magic, 8) && std::memcmp(magic, kSessionMagic, 8) == 0 && get(&idn, 8) && idn < 4096;
+    if (ok) { id.resize(idn); ok = get(id.data(), idn) && id == model_id; }
+    if (!ok) { std::fclose(f); err = "not a session file of this model and context"; return false; }
+    ok = get(&tok, 8) && get(&nt, 8) && nt == tok && nt < (1ull << 31);
+    if (ok) { ids.resize(nt); ok = get(ids.data(), nt * 4) && get(&np, 8) && np < 4096; }
+    snap.tokens = (int64_t) tok;
+    snap.parts.assign(ok ? np : 0, {});
+    bytes = 8 + 8 + idn + 8 + 8 + nt * 4 + 8;
+    for (auto& part : snap.parts) {
+        uint64_t n = 0;
+        ok = ok && get(&n, 8) && n < (1ull << 40);
+        if (!ok) break;
+        part.resize(n);
+        ok = get(part.data(), n);
+        bytes += 8 + n;
+    }
+    std::fclose(f);
+    if (!ok) err = "a short or damaged session file";
+    return ok;
+}
+
+}  // namespace
+
 static int plain_serve(strata::core::PlainModel& model, const strata::core::PlainOptions& opt, const std::string& arch,
-                       const std::vector<int32_t>& eos, const std::string& profile_save, double save_min) {
+                       const std::vector<int32_t>& eos, const std::string& profile_save, double save_min,
+                       ConversationCache& cache) {
     std::atomic<bool> stop_req{false};
     std::mutex in_mu;
     std::condition_variable in_cv;
@@ -160,6 +246,13 @@ static int plain_serve(strata::core::PlainModel& model, const strata::core::Plai
     };
     const int64_t ctx = model.max_cells(), V = model.vocab();
     std::vector<int32_t> live;   // the tokens the state holds, positions 0 .. live.size() - 1
+    // a session file's identity: the model file (its name and size) and the context, which fix the state's shape
+    std::string model_id;
+    {
+        std::ifstream f(opt.gguf, std::ios::binary | std::ios::ate);
+        model_id = opt.gguf.substr(opt.gguf.find_last_of("/\\") + 1) + " " + std::to_string((long long) f.tellg()) +
+                   " " + std::to_string((long long) ctx);
+    }
     std::vector<int32_t> out((size_t) opt.max_t);
     std::string err;
     std::printf("INFO context=%lld expert_slots=%lld\n", (long long) ctx, (long long) model.slots());
@@ -179,6 +272,35 @@ static int plain_serve(strata::core::PlainModel& model, const strata::core::Plai
         }
         if (line.empty()) continue;
         stop_req.store(false);   // a STOP between requests ends nothing
+        // SAVE / RESTORE <path>: the live conversation to a file and back (server.py's session_file)
+        if (line.rfind("SAVE ", 0) == 0 || line.rfind("RESTORE ", 0) == 0) {
+            const bool save = line[0] == 'S';
+            const std::string path = line.substr(save ? 5 : 8);
+            const auto t0 = Clock::now();
+            auto ms = [&] { return std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); };
+            auto refuse = [&](const char* kind, const std::string& why) {
+                std::string one = why;
+                for (char& c : one) if (c == '\n' || c == '\r') c = ' ';
+                std::printf("SERR %s 0 %s\n", kind, one.c_str());
+                std::fflush(stdout);
+            };
+            strata::core::PlainModel::Snapshot snap;
+            size_t bytes = 0;
+            if (save) {
+                if (live.empty()) { refuse("invalid", "no conversation to save"); continue; }
+                if (!model.save_state((int64_t) live.size(), snap, err)) { refuse("io", err); continue; }
+                if (!session_write(path, model_id, live, snap, bytes, err)) { refuse("storage", err); continue; }
+                std::printf("SAVED %zu %zu %.1f\n", live.size(), bytes, ms());
+            } else {
+                std::vector<int32_t> ids;
+                if (!session_read(path, model_id, ids, snap, bytes, err)) { refuse("invalid", err); continue; }
+                if (!model.restore_state(snap, err)) { refuse("invalid", err); continue; }
+                live = std::move(ids);
+                std::printf("RESTORED %zu %zu %.1f\n", live.size(), bytes, ms());
+            }
+            std::fflush(stdout);
+            continue;
+        }
         if (line.rfind("GEN ", 0) != 0) {
             const std::string head = line.substr(0, line.find(' '));
             std::printf("ERR %s is not available for %s (this engine takes GEN, STOP and QUIT)\n", head.c_str(),
@@ -228,10 +350,55 @@ static int plain_serve(strata::core::PlainModel& model, const strata::core::Plai
         }
         // what of the conversation to keep: the common prefix, at least the last prompt token read again (its
         // logits pick the first token); with a recurrent state, all of it or nothing
-        size_t common = 0;
-        while (common < live.size() && common < (size_t) n && live[common] == ids[common]) ++common;
-        int64_t resume = std::min<int64_t>((int64_t) common, n - 1);
-        if (model.recurrent() && resume != (int64_t) live.size()) resume = 0;
+        auto takes = [&](const std::vector<int32_t>& have) -> int64_t {   // how much of the request a state serves
+            size_t common = 0;
+            while (common < have.size() && common < (size_t) n && have[common] == ids[common]) ++common;
+            int64_t r = std::min<int64_t>((int64_t) common, n - 1);
+            if (model.recurrent() && r != (int64_t) have.size()) r = 0;
+            return r;
+        };
+        int64_t resume = takes(live);
+        // the live conversation set aside before a request that does not continue it overwrites it, as far as the
+        // budget, the slots and the RAM let it (the least recently used ones dropped first)
+        auto park_live = [&](std::list<ConversationCache::Entry>::iterator keep) {
+            if (live.empty()) return;
+            const int64_t need = (int64_t) model.state_bytes((int64_t) live.size());
+            const auto avail = strata::core::available_host_bytes();
+            if (need > cache.budget || !avail || (int64_t) *avail - need <= cache.min_free) return;
+            while (!cache.parked.empty() &&
+                   ((int) cache.parked.size() >= cache.slots || cache.used() + need > cache.budget)) {
+                if (std::prev(cache.parked.end()) == keep) break;
+                cache.parked.pop_back();
+            }
+            if ((int) cache.parked.size() >= cache.slots || cache.used() + need > cache.budget) return;
+            ConversationCache::Entry e;
+            if (!model.save_state((int64_t) live.size(), e.snap, err)) return;
+            e.ids = live;
+            cache.parked.push_front(std::move(e));
+        };
+        if (cache.budget > 0) {   // a parked conversation that serves more of it takes the live one's place
+            auto best = cache.parked.end();
+            int64_t best_r = resume;
+            for (auto it = cache.parked.begin(); it != cache.parked.end(); ++it)
+                if (const int64_t r = it->ids.size() <= (size_t) n ? takes(it->ids) : 0;
+                    r > best_r && r == (int64_t) it->ids.size()) {
+                    best = it;
+                    best_r = r;
+                }
+            if (best != cache.parked.end()) {
+                park_live(best);   // the live conversation first
+                if (!model.restore_state(best->snap, err)) {
+                    std::printf("FATAL %s\n", err.c_str());
+                    std::fflush(stdout);
+                    return 1;
+                }
+                live = std::move(best->ids);
+                cache.parked.erase(best);
+                resume = best_r;
+            } else if (resume < (int64_t) live.size()) {
+                park_live(cache.parked.end());   // the request starts another conversation: keep this one
+            }
+        }
         if (resume == 0 && !live.empty() && !model.reset(err)) {
             std::printf("FATAL %s\n", err.c_str());
             std::fflush(stdout);
@@ -391,6 +558,7 @@ int plain_main(int argc, char** argv) {
     std::vector<int32_t> eos;
     std::string dump_path, profile_save;
     std::vector<int32_t> follow;   // --spec-follow: the continuation emitted instead of the picks (benchmarks)
+    ConversationCache cache;       // --serve: --conversation-cache-mib and its slots
     double save_min = 10.0;   // --expert-profile-save-every (serve)
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -426,6 +594,13 @@ int plain_main(int argc, char** argv) {
         else if (a == "--pool-workers") opt.pool_workers = (int) std::strtol(next("--pool-workers"), nullptr, 10);
         else if (a == "--dump-logits") dump_path = next("--dump-logits");
         else if (a == "--dump-routing") opt.dump_routing = next("--dump-routing");
+        else if (a == "--conversation-cache-mib")
+            cache.budget = std::max<int64_t>(0, std::strtoll(next("--conversation-cache-mib"), nullptr, 10)) << 20;
+        else if (a == "--conversation-cache-slots")
+            cache.slots = std::max(1, (int) std::strtol(next("--conversation-cache-slots"), nullptr, 10));
+        else if (a == "--conversation-cache-min-free-mib")
+            cache.min_free =
+                std::max<int64_t>(0, std::strtoll(next("--conversation-cache-min-free-mib"), nullptr, 10)) << 20;
         else if (a == "--spec-follow") {
             std::ifstream in(next("--spec-follow"));
             const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -503,7 +678,8 @@ int plain_main(int argc, char** argv) {
                      strata::prefill::Gemm::path(), experts ? "int8 (" : "FP16", experts ? experts : "",
                      experts ? ")" : "");
     }
-    if (serve) return plain_serve(model, opt, arch, eos.empty() ? eos_tokens(gguf) : eos, profile_save, save_min);
+    if (serve)
+        return plain_serve(model, opt, arch, eos.empty() ? eos_tokens(gguf) : eos, profile_save, save_min, cache);
     const double load_s = std::chrono::duration<double>(Clock::now() - t0).count();
     std::unique_ptr<std::FILE, int (*)(std::FILE*)> dump_file(nullptr, &std::fclose);
     if (!dump_path.empty()) {

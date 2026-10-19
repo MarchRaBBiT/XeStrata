@@ -29,8 +29,7 @@ const char* const kQwen38Only[] = {
 const char* const kNotYet[] = {
     "--slots", "--batch", "--batch-cpu-split", "--batch-groups", "--batch-mtp", "--no-batch-mtp",
     "--stream-token", "--check-logits", "--prompt-cache", "--prompt-cache-every", "--prompt-cache-root",
-    "--prompt-cache-tail", "--conversation-cache-mib", "--conversation-cache-min-free-mib",
-    "--conversation-cache-slots", "--conversation-save", "--conversation-save-checkpoints",
+    "--prompt-cache-tail", "--conversation-save", "--conversation-save-checkpoints",
     "--conversation-save-compress", "--conversation-save-hours", "--conversation-save-mib", "--session-min-free-mib",
     "--kv", "--kv-grow", "--no-kv-grow", "--kv-resident", "--vram-reserve-later-mib", "--vram-elastic",
     "--vram-segment-mib", "--adapt-async", "--pcie-frac", "--pcie-mode", "--pool-tasks", "--stats", "--stage-timing", "--spec-min-p",
