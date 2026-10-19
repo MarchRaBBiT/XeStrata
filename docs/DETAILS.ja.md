@@ -243,16 +243,18 @@ Arc Pro B70（32 GB）と i7-14700、RAM 96 GB で、setup の設定のまま、
 
 答えは、どの実行でも同じトークンでした。
 
-### Qwen3.8-Flash-Next 以外のモデル（Ornith-1.5、llm-jp-4.1、Qwen3.6-35B-A3B）
+### Qwen3.8-Flash-Next 以外のモデル（Ornith-1.5、llm-jp-4.1、Qwen3.6-35B-A3B、GLM-5.3-Flash）
 
-setup の最初の質問では、Qwen3.8-Flash-Next とは作りの違う 3 つの MoE モデルも選べます。
-どちらも GGUF のファイル 1 つで、エキスパートを RAM に置き、よく使うものを GPU の VRAM に置きます（VRAM にないものの扱いは Qwen3.8-Flash-Next と同じです）。
+setup の最初の質問では、Qwen3.8-Flash-Next とは作りの違う 4 つの MoE モデルも選べます。
+どれも GGUF のファイル（GLM-5.3-Flash は 3〜4 つに分かれたもの）をそのまま読み、よく使うエキスパートを GPU の VRAM に、残りを RAM に置きます（VRAM にないものの扱いは Qwen3.8-Flash-Next と同じです）。
 
 - **[Ornith-1.5-35B-A3B](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF)**（Ornith AI、MIT）: 35B、1 トークンで使うのは 3B の Qwen3.5 系の MoE です。文脈は 256K まで。
   公式の Q4_K_M〜BF16 と、pfeifferj による GSQ-RCO の 3 ビットと 3.5 ビット（[コミュニティの再現](https://huggingface.co/pfeifferj/Ornith-1.5-35B-A3B-GSQ-RCO-GGUF)で、ISTA-DASLab のものではありません）があります。
 - **[llm-jp-4.1-32b-a3b-thinking](https://huggingface.co/llm-jp/llm-jp-4.1-32b-a3b-thinking-gguf)**（LLM-jp、Apache-2.0）: 32B、1 トークンで使うのは 3B の、日本語と英語の思考するモデルです。文脈は 256K まで。
 - **[Qwen3.6-35B-A3B](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF)**（Qwen、Apache-2.0）: 35B、1 トークンで使うのは 3B の Qwen3.5 系の思考する MoE です。文脈は 256K まで。
   GGUF は Unsloth が MTP の層付きで作った UD-Q4_K_XL・UD-Q6_K_XL・Q8_0 です。
+- **[GLM-5.3-Flash](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF)**（Z.ai、MIT）: 320B、1 トークンで使うのは 18B の思考する MoE です。setup で選べる文脈は 256K まで。
+  注意は KDA（線形の注意）と DSA（選んだトークンだけを見る注意）で、4 本の流れ（mHC）を持ちます。GGUF は Unsloth の UD-IQ1_S・UD-IQ3_XXS です。
 
 | モデル | 大きさ | ダウンロード |
 | --- | --- | ---: |
@@ -268,6 +270,8 @@ setup の最初の質問では、Qwen3.8-Flash-Next とは作りの違う 3 つ�
 | Qwen3.6-35B-A3B | **UD-Q4_K_XL** | 22.9 GB |
 | | **UD-Q6_K_XL** | 32.6 GB |
 | | Q8_0 | 37.8 GB |
+| GLM-5.3-Flash | **UD-IQ1_S** | 93.1 GB |
+| | **UD-IQ3_XXS** | 120.4 GB |
 
 太字は、このリリースで llama.cpp と答えを比べた版です。
 ほかの版も同じ型のテンソルでできていて、その型は太字の版とカーネルの試験で確かめています（setup は「untested」と表示します）。
@@ -276,12 +280,13 @@ setup の最初の質問では、Qwen3.8-Flash-Next とは作りの違う 3 つ�
 ./setup.sh --setup --family ornith --model Q4_K_M
 ./setup.sh --setup --family llmjp
 ./setup.sh --setup --family qwen36 --model UD-Q4_K_XL
+./setup.sh --setup --family glm53 --model UD-IQ3_XXS
 ```
 
 API は、思考と答えの分離、ストリーミング、ツールの呼び出しを含めて使えます。
-Ornith の公式の版（Q4_K_M〜BF16）と Qwen3.6 は、モデルの MTP の層で 2 つ先までの下書きを作り、窓でまとめて確かめます（推測デコード、greedy の要求だけ。GSQ-RCO の版と llm-jp には MTP の層がありません）。
+Ornith の公式の版（Q4_K_M〜BF16）と Qwen3.6 は、モデルの MTP の層で 2 つ先までの下書きを作り、窓でまとめて確かめます（推測デコード、greedy の要求だけ。GSQ-RCO の版と llm-jp には MTP の層がありません。GLM-5.3-Flash の MTP の層はまだ使いません）。
 まだ使えないのは、画像、Intel の CPU 内蔵の GPU、2 枚以上の GPU（setup は最初の GPU を使います）、KV キャッシュの精度や省 RAM モードなど Qwen3.8-Flash-Next のためのオプションです。
-RAM がエキスパートに足りないとき、エンジンはエキスパートを RAM に読み込まず、モデルのファイルから OS のファイルキャッシュ越しに読みます（遅くなります。setup はそのことを警告します）。
+RAM がエキスパートの全体に足りないとき、エンジンは VRAM に置かないエキスパートを RAM の空きの許す限り RAM に置き、残りをモデルのファイルから OS のファイルキャッシュ越しに読みます（遅くなります。setup は RAM と VRAM を合わせても足りないとき警告します）。
 
 エンジンのオプション（設定の `args` に足します）:
 

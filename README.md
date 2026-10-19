@@ -92,9 +92,10 @@ So XeStrata runs only on the GPUs the distribution's rocBLAS has code for.
 | **[Ornith-1.5](#ornith-15-beta)** (BETA) | 35B (3B a token) | 22-80 GB | from 4 GB | a PC with less RAM |
 | **[llm-jp-4.1](#llm-jp-41-beta)** (BETA) | 32B (3B a token) | 30-73 GB | from 4 GB | a thinking model for Japanese and English |
 | **[Qwen3.6-35B-A3B](#qwen36-35b-a3b-beta)** (BETA) | 35B (3B a token) | 31-46 GB | from 4 GB | a thinking model; a PC with less RAM |
+| **[GLM-5.3-Flash](#glm-53-flash-beta)** (BETA) | 320B (18B a token) | 101-128 GB of RAM and VRAM | from 12 GB | a large thinking model; a PC with a lot of RAM |
 
-The three BETA models do not yet take images, two or more GPUs, or Intel's integrated GPUs
-([details](docs/DETAILS.md#or-models-other-than-qwen38-flash-next-ornith-15-llm-jp-41-qwen36-35b-a3b)).
+The four BETA models do not yet take images, two or more GPUs, or Intel's integrated GPUs
+([details](docs/DETAILS.md#or-models-other-than-qwen38-flash-next-ornith-15-llm-jp-41-qwen36-35b-a3b-glm-53-flash)).
 
 Not sure? On a PC with 48 GB of RAM or more, take Qwen3.8-Flash-Next's **IQ2_XS**.
 With less RAM than that, Qwen3.8-Flash-Next's Coder (32 GB) or Ornith-1.5 is the one to choose.
@@ -179,8 +180,19 @@ It drafts tokens with the model's MTP layer, which makes decode faster.
 | UD-Q6_K_XL | 32.6 GB | 41 GB | from 6 GB |
 | Q8_0 | 37.8 GB | 46 GB | from 6 GB |
 
-For the three BETA models, the RAM is about the download plus 8 GB. With less, the experts are read from the model
-file instead of loaded into RAM, which is slower.
+### GLM-5.3-Flash (BETA)
+
+[GLM-5.3-Flash](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF) (Z.ai, MIT; the GGUFs by Unsloth): a large thinking
+MoE, with a context of up to 256K.
+The experts kept in the GPU's VRAM are not copied into RAM, so it runs when the RAM and the VRAM together hold the model.
+
+| Size | Download | RAM and VRAM together (about) | VRAM |
+| --- | ---: | ---: | ---: |
+| UD-IQ1_S | 93.1 GB | 101 GB | from 12 GB |
+| UD-IQ3_XXS | 120.4 GB | 128 GB | from 12 GB |
+
+For the four BETA models, the RAM is about the download plus 8 GB (for GLM-5.3-Flash, the RAM and the VRAM together).
+With less, the experts that neither holds are read from the model file, which is slower.
 
 ## Install
 

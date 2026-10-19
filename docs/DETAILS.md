@@ -253,11 +253,11 @@ every run from a cold OS cache:
 
 The answers were the same tokens in every run.
 
-### Or: models other than Qwen3.8-Flash-Next (Ornith-1.5, llm-jp-4.1, Qwen3.6-35B-A3B)
+### Or: models other than Qwen3.8-Flash-Next (Ornith-1.5, llm-jp-4.1, Qwen3.6-35B-A3B, GLM-5.3-Flash)
 
-setup's first question also offers three MoE models built differently from Qwen3.8-Flash-Next.
-Each is one GGUF file; the experts are kept in RAM and the most used ones in the GPU's VRAM (the ones VRAM does not hold
-are handled as for Qwen3.8-Flash-Next).
+setup's first question also offers four MoE models built differently from Qwen3.8-Flash-Next.
+Each is read from its GGUF file as it is (GLM-5.3-Flash's in three or four parts); the most used experts are kept in the
+GPU's VRAM and the rest in RAM (the ones VRAM does not hold are handled as for Qwen3.8-Flash-Next).
 
 - **[Ornith-1.5-35B-A3B](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF)** (Ornith AI, MIT): a Qwen3.5-family
   MoE of 35B with 3B active per token, context up to 256K. The official Q4_K_M to BF16, and pfeifferj's GSQ-RCO 3 and
@@ -268,6 +268,9 @@ are handled as for Qwen3.8-Flash-Next).
 - **[Qwen3.6-35B-A3B](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF)** (Qwen, Apache-2.0): a thinking
   Qwen3.5-family MoE of 35B with 3B active per token, context up to 256K. The GGUFs are Unsloth's UD-Q4_K_XL,
   UD-Q6_K_XL and Q8_0 with the MTP layer.
+- **[GLM-5.3-Flash](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF)** (Z.ai, MIT): a thinking MoE of 320B with 18B
+  active per token; setup offers contexts up to 256K. Its attention is KDA (linear attention) and DSA (attention over
+  the tokens it selects), with four residual streams (mHC). The GGUFs are Unsloth's UD-IQ1_S and UD-IQ3_XXS.
 
 | Model | Size | Download |
 | --- | --- | ---: |
@@ -283,6 +286,8 @@ are handled as for Qwen3.8-Flash-Next).
 | Qwen3.6-35B-A3B | **UD-Q4_K_XL** | 22.9 GB |
 | | **UD-Q6_K_XL** | 32.6 GB |
 | | Q8_0 | 37.8 GB |
+| GLM-5.3-Flash | **UD-IQ1_S** | 93.1 GB |
+| | **UD-IQ3_XXS** | 120.4 GB |
 
 The sizes in bold are the files whose answers this release compared with llama.cpp's.
 The others are made of the same tensor types, checked on those files and in the kernels' tests (setup marks them
@@ -292,14 +297,16 @@ The others are made of the same tensor types, checked on those files and in the 
 ./setup.sh --setup --family ornith --model Q4_K_M
 ./setup.sh --setup --family llmjp
 ./setup.sh --setup --family qwen36 --model UD-Q4_K_XL
+./setup.sh --setup --family glm53 --model UD-IQ3_XXS
 ```
 
 The API works, with the thinking kept apart from the answer, streaming and tool calls.
-Ornith's official versions (Q4_K_M to BF16) and Qwen3.6 draft up to two tokens ahead with the model's MTP layer and check them in a window (speculative decoding, greedy requests only; the GSQ-RCO versions and llm-jp have no MTP layer).
+Ornith's official versions (Q4_K_M to BF16) and Qwen3.6 draft up to two tokens ahead with the model's MTP layer and check them in a window (speculative decoding, greedy requests only; the GSQ-RCO versions and llm-jp have no MTP layer, and GLM-5.3-Flash's is not used yet).
 Not yet: images, Intel processors' own graphics, more than one GPU (setup uses the
 first), and the options made for Qwen3.8-Flash-Next such as the KV cache's precision and the low-RAM modes.
-When RAM is short for the experts, the engine does not load them and reads them from the model file through the OS
-file cache instead (slower; setup warns of it).
+When RAM is short of all the experts, the engine keeps the ones VRAM does not hold in RAM as far as it has room and
+reads the rest from the model file through the OS file cache (slower; setup warns of it when the RAM and the VRAM
+together are short).
 
 The engine's options (added to the settings' `args`):
 
