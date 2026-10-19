@@ -36,6 +36,10 @@
 #include <thread>
 #include <vector>
 
+#if defined(__linux__)
+#include <dirent.h>
+#endif
+
 namespace strata::program {
 namespace {
 
@@ -83,6 +87,39 @@ std::vector<int32_t> eos_tokens(const std::string& path) {
         return {};   // an unreadable file has no stop ids to add; loading it reports why
     }
     return ids;
+}
+
+// The processor's own graphics through Level Zero: with the Unified Runtime's second Level Zero adapter the UHD 770's
+// driver aborted at the first window graph's launch (its command stream full, linear_stream.h), and a thread of the
+// products' library crashed in it; with the first adapter llm-jp-4.1 Q4_K_M ran and agreed with llama.cpp over 32
+// tokens on five prompts (2026-10-19).  The adapter is chosen as the devices are listed, so before any SYCL call: the
+// first one where the GPU the engine takes has no PCIe link (sysfs reads its link speed "Unknown"), the GPU
+// STRATA_GPU_PCI names, else every display controller there is.  A value the user set stays.
+void linkless_gpu_adapter() {
+#if defined(__linux__)
+    if (std::getenv("SYCL_UR_USE_LEVEL_ZERO_V2") != nullptr) return;
+    auto linkless = [](const std::string& dev) {
+        std::ifstream f("/sys/bus/pci/devices/" + dev + "/current_link_speed");
+        std::string v;
+        return !f || !std::getline(f, v) || v.rfind("Unknown", 0) == 0;
+    };
+    bool all = true, any = false;
+    if (const char* pci = std::getenv("STRATA_GPU_PCI"); pci != nullptr && *pci != '\0') {
+        any = true;
+        all = linkless(pci);
+    } else if (DIR* d = opendir("/sys/bus/pci/devices")) {
+        while (const dirent* e = readdir(d)) {
+            if (e->d_name[0] == '.') continue;
+            std::ifstream c(std::string("/sys/bus/pci/devices/") + e->d_name + "/class");
+            std::string cls;
+            if (!std::getline(c, cls) || cls.rfind("0x03", 0) != 0) continue;   // a display controller
+            any = true;
+            all = all && linkless(e->d_name);
+        }
+        closedir(d);
+    }
+    if (any && all) setenv("SYCL_UR_USE_LEVEL_ZERO_V2", "0", 0);
+#endif
 }
 
 }  // namespace
@@ -340,6 +377,7 @@ int plain_main(int argc, char** argv) {
     if (gguf.empty()) return -1;
     const std::string arch = architecture(gguf);
     if (arch.empty() || arch == "qwen4exp") return -1;
+    linkless_gpu_adapter();
 
     strata::core::PlainOptions opt;
     opt.gguf = gguf;

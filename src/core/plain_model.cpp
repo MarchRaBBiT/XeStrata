@@ -238,12 +238,16 @@ bool PlainModel::load(const PlainOptions& opt, std::string& err) {
         err = "plain model: the window or the context is out of range";
         return false;
     }
-    // not on the processor's own graphics through Level Zero yet: on the UHD 770 the driver aborted (its command stream
-    // full) in the batched prompt and after some hundreds of segmented windows
+    // the processor's own graphics through Level Zero: the first Level Zero adapter only (plain_generate.cpp's
+    // linkless_gpu_adapter chooses it before the devices are listed; a user's SYCL_UR_USE_LEVEL_ZERO_V2=1 is refused)
     if (const sycl::device& dev = Runtime::get().device();
         integrated_gpu(dev) && dev.get_backend() == sycl::backend::ext_oneapi_level_zero) {
-        err = "plain model: this model does not run on the processor's own graphics yet; choose another GPU (--gpu)";
-        return false;
+        const char* v2 = std::getenv("SYCL_UR_USE_LEVEL_ZERO_V2");
+        if (v2 == nullptr || std::strcmp(v2, "0") != 0) {
+            err = "plain model: on the processor's own graphics this model needs SYCL_UR_USE_LEVEL_ZERO_V2=0 (the "
+                  "driver aborts with the other Level Zero adapter)";
+            return false;
+        }
     }
     // On Level Zero (xe) the device's allocations need free RAM beside them, and the file cache does not count as free
     // there: the model's files left in the cache by a program that read them just before refused the VRAM tier's

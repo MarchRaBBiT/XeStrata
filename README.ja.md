@@ -91,7 +91,7 @@ AMD の GPU では、prefill の密な行列積をディストリビューショ
 | **[Qwen3.6-35B-A3B](#qwen36-35b-a3bbeta)**（BETA） | 350 億（1 トークンで 30 億） | 31〜46 GB | 4 GB から | 思考するモデル。RAM の少ない PC 向け |
 | **[GLM-5.3-Flash](#glm-53-flashbeta)**（BETA） | 3,200 億（1 トークンで 180 億） | RAM と VRAM で 101〜128 GB | 12 GB から | 思考する大きなモデル。RAM の多い PC 向け |
 
-BETA の 4 つは、画像、2 枚以上の GPU、Intel の CPU 内蔵の GPU にまだ対応していません（[詳細](docs/DETAILS.ja.md#qwen38-flash-next-以外のモデルornith-15llm-jp-41qwen36-35b-a3bglm-53-flash)）。
+BETA の 4 つは、画像と 2 枚以上の GPU にまだ対応していません（[詳細](docs/DETAILS.ja.md#qwen38-flash-next-以外のモデルornith-15llm-jp-41qwen36-35b-a3bglm-53-flash)）。
 
 迷ったら、RAM が 48 GB 以上の PC では Qwen3.8-Flash-Next の **IQ2_XS** を選んでください。
 RAM がそれより少ない PC では、Qwen3.8-Flash-Next の Coder（32 GB）か Ornith-1.5 が選べます。

@@ -4070,8 +4070,6 @@ def setup_plain(a, family: str, fam: dict, gpu: dict, chosen: list, sel: list, f
     the pinned revision), its tokenizer and chat template written out, and the config: `strata --native` with no pack,
     PLE table or MTP layer.  Images, the layer split and the Qwen3.8-Flash-Next options (KV precision, low-RAM modes,
     the speed projection) do not apply."""
-    if gpu.get("integrated") and gpu.get("vendor") == "intel":   # the engine refuses it (PlainModel::load)
-        fail(f"{fam['title']} does not run on the processor's own graphics yet", "choose another GPU with --gpu")
     models = fam["models"]
     names = list(models)
     if a.model and a.model not in names:
@@ -4724,8 +4722,6 @@ def main() -> int:
                 gb = d["size"] / 1e9
                 verdict = "fits" if ram >= gb + 8 else "fits with the GPU's VRAM" if ram + plain_vram >= gb + 8 \
                     else "slow (the experts that do not fit are read from the SSD)"
-                if gpu.get("integrated") and gpu.get("vendor") == "intel":
-                    verdict = "not on the processor's own graphics yet"
                 say(f"  {fam['title']} {m}: ~{gb + 8:.0f} GB of RAM and VRAM: {verdict}")
         if not any_fits:
             # upstream #977: every size says "does not fit", so the verdict says so too (and the exit code, for

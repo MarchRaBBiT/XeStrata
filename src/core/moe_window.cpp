@@ -6,6 +6,8 @@
 // so a model that uses this window computes its experts exactly as Qwen3.8's verify window does.
 #include "strata/core/moe_window.hpp"
 
+#include "strata/core/device.hpp"
+#include "strata/core/runtime.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
 #include "strata/kernels/elementwise.hpp"
 #include "strata/kernels/iq_kernels.hpp"
@@ -131,8 +133,13 @@ bool MoeWindow::init(const MoeWindowShape& shape, const MoeWindowTier& tier, std
     if (!copy_) { err = "moe window: copy stream create failed"; return false; }
     strata::gpu::Stream probe = strata::gpu::stream_create();
     if (!probe) { err = "moe window: stream create failed"; return false; }
+    // segments also on the processor's own graphics, where the running kernels see the host's writes through the first
+    // Level Zero adapter but wait on them slowly: llm-jp-4.1 Q4_K_M on the UHD 770 decoded 1.7 tok/s waiting, 5.3 in
+    // segments (2026-10-19)
     const char* v = std::getenv("STRATA_VERIFY_SEGMENTED");
-    segmented_ = v != nullptr ? std::strtol(v, nullptr, 10) != 0 : !strata::kernels::doorbell_visible(probe);
+    segmented_ = v != nullptr ? std::strtol(v, nullptr, 10) != 0
+                              : core::integrated_gpu(core::Runtime::get().device()) ||
+                                    !strata::kernels::doorbell_visible(probe);
     strata::gpu::stream_destroy(probe);
     return true;
 }

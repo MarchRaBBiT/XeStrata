@@ -94,7 +94,7 @@ So XeStrata runs only on the GPUs the distribution's rocBLAS has code for.
 | **[Qwen3.6-35B-A3B](#qwen36-35b-a3b-beta)** (BETA) | 35B (3B a token) | 31-46 GB | from 4 GB | a thinking model; a PC with less RAM |
 | **[GLM-5.3-Flash](#glm-53-flash-beta)** (BETA) | 320B (18B a token) | 101-128 GB of RAM and VRAM | from 12 GB | a large thinking model; a PC with a lot of RAM |
 
-The four BETA models do not yet take images, two or more GPUs, or Intel's integrated GPUs
+The four BETA models do not yet take images or two or more GPUs
 ([details](docs/DETAILS.md#or-models-other-than-qwen38-flash-next-ornith-15-llm-jp-41-qwen36-35b-a3b-glm-53-flash)).
 
 Not sure? On a PC with 48 GB of RAM or more, take Qwen3.8-Flash-Next's **IQ2_XS**.

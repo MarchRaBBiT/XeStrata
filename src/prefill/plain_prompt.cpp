@@ -14,6 +14,7 @@
 #include "strata/core/plain_model.hpp"
 
 #include "strata/core/gpu.hpp"
+#include "strata/core/runtime.hpp"
 #include "strata/kernels/bf16_gemv.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
 #include "strata/kernels/cpu/native_expert.hpp"
@@ -62,7 +63,13 @@ PlainModel::PromptGemm& PlainModel::prompt_gemm() {
         prompt_gemm_ = std::unique_ptr<PromptGemm, void (*)(PromptGemm*)>(new PromptGemm, &PlainModel::prompt_gemm_free);
         prompt_gemm_->gemm.init_external(cs_, pb_.gemm_scratch, pb_.gemm_elems);
         PromptGemm& g = *prompt_gemm_;
-        g.xs = strata::gpu::stream_create();
+        // the copies on a stream of their own, but not through the first Level Zero adapter (the processor's own
+        // graphics, plain_generate.cpp): there a product's wait on the copy stream's event hung now and then, about one
+        // prompt in ten on the UHD 770, and none in 15 without it (llm-jp-4.1 Q4_K_M, 2026-10-19)
+        const char* v2 = std::getenv("SYCL_UR_USE_LEVEL_ZERO_V2");
+        if (v2 == nullptr || std::strcmp(v2, "0") != 0 ||
+            strata::core::Runtime::get().device().get_backend() != sycl::backend::ext_oneapi_level_zero)
+            g.xs = strata::gpu::stream_create();
         for (int h = 0; h < 2; ++h) {
             if (!strata::gpu::event_create(&g.ready[h])) g.ready[h] = nullptr;
             if (!strata::gpu::event_create(&g.used[h])) g.used[h] = nullptr;
