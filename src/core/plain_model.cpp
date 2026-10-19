@@ -317,6 +317,8 @@ bool PlainModel::load(const PlainOptions& opt, std::string& err) {
         next_.push_back(std::move(st));
     }
     finish_experts();
+    for (size_t i = 0; i < next_.size(); ++i)   // the rounds in turn, a share of the interval apart
+        next_[i]->adapt_phase_ = (int64_t) (i + 1) * std::max(opt_.adapt_every, 1) / (int64_t) (next_.size() + 1);
     for (PlainModel* st : chain()) {
         const OnDevice on(st->dev_);
         if (!st->reset(err)) return false;
@@ -1006,7 +1008,9 @@ bool PlainModel::open_experts(std::string& err) {
     disp_.plan = win_.sink();
     disp_.pcie_num = 0;
     if (opt_.adapt_every > 0 && opt_.adapt_swaps > 0) disp_.usage.assign((size_t) (L * E), 0.0f);
-    if (in_ram_) pinned_split();   // (also after the RAM copy of what no VRAM tier holds is pinned: finish_experts)
+    // (also after the RAM copy of what no VRAM tier holds is pinned, and on a later stage once the root's RAM is
+    // registered on its GPU: finish_experts)
+    if (in_ram_ && root_ == this) pinned_split();
     // the adaptive tier's copy stream: its rounds bring experts in beside the windows (adapt)
     swap_cs_ = strata::gpu::stream_create();
     if (swap_cs_ == nullptr || !strata::gpu::event_create(&swap_ev_)) {
@@ -1181,12 +1185,25 @@ void PlainModel::finish_experts() {
             std::fprintf(stderr, "strata plain: the experts outside the VRAM tier in RAM: %.2f GiB (%lld experts%s)\n",
                          (double) file->resident_bytes() / 1073741824.0, (long long) file->resident_count(),
                          file->complement_pinned() ? ", pinned" : "");
-            for (PlainModel* st : chain()) {
-                const OnDevice on(st->dev_);
-                st->complement_ = file;
-                if (file->complement_pinned()) st->pinned_split();   // the GPU reads its share of the misses there
-            }
+            for (PlainModel* st : chain()) st->complement_ = file;
         }
+    }
+    // a later stage's GPU copies from the root's RAM copy as from its own pinned memory once it is registered there.
+    // Where it cannot be (one maker's pinned host memory on another's GPU: the B70's on the RTX 4070), each copy is a
+    // pageable one that the host waits for, and that stage's tier keeps what the profile filled: its adaptive rounds
+    // took GLM-5.3-Flash's decode from 14.8 to 12.6 tok/s (B70 + 4070, 2026-10-20)
+    for (auto& st : next_) {
+        std::string why;
+        if (!src_->register_on(st->dev_, why)) {
+            std::fprintf(stderr, "strata plain: %s: %s's copies from RAM are pageable, its VRAM tier stays as the "
+                                 "profile filled it\n", why.c_str(), strata::gpu::device_name(st->dev_).c_str());
+            st->disp_.usage.clear();
+        }
+    }
+    for (PlainModel* st : chain()) {   // the GPU reads its share of the misses from the pinned RAM
+        const OnDevice on(st->dev_);
+        if ((st->complement_ != nullptr && st->complement_->complement_pinned()) || (in_ram_ && st != this))
+            st->pinned_split();
     }
     for (PlainModel* st : chain()) {
         const OnDevice on(st->dev_);
@@ -1687,7 +1704,8 @@ bool PlainModel::stage_forward(const int32_t* tokens, int T, int64_t pos, const 
     }
     ++windows_;
     tokens_since_adapt_ += T;
-    if (!disp_.usage.empty() && windows_ % opt_.adapt_every == 0 && !adapt(err)) return false;
+    // a layer split's stages take their rounds in turn (adapt_phase_), so that one's copies land before the next's
+    if (!disp_.usage.empty() && (windows_ + adapt_phase_) % opt_.adapt_every == 0 && !adapt(err)) return false;
     return true;
 }
 
@@ -1874,6 +1892,13 @@ bool PlainModel::save_profile(const std::string& path, std::string& err) const {
 // round, the largest gains first; then the counts decay.  Runs between windows, so no window reads a slot it changes.
 bool PlainModel::adapt(std::string& err, int64_t max_swaps, int64_t max_evict) {
     const int64_t L = n_moe_, E = spec_.n_expert;
+    // with a layer split the stages share the RAM copy's exchange buffers, and a commit takes every staged exchange:
+    // the other stages' copies land first (their rounds come a few windows apart, so they have as a rule)
+    for (PlainModel* st : root_->chain())
+        if (st != this && !st->pending_.empty()) {
+            const OnDevice on(st->dev_);
+            if (!st->settle_swaps(true, err)) return false;
+        }
     if (!settle_swaps(max_swaps > 0, err)) return false;
     if (!pending_.empty()) return true;   // the last round's copies are still landing: no new round yet
     struct Swap { float gain; int32_t layer, in, out; };   // out < 0: a free slot
@@ -1938,7 +1963,6 @@ bool PlainModel::adapt(std::string& err, int64_t max_swaps, int64_t max_evict) {
     // the RAM tier of what VRAM does not hold: an evicted expert goes back into the RAM copy, in the place of the one
     // that comes in (FileExpertSource's exchanges), read back from its slot before the slot is written; the copy
     // keeps it from the exchange buffer until the new one has landed (settle_swaps commits them)
-    int64_t exchanged = 0;
     if (complement_ != nullptr && complement_->exchange_capacity() > 0) {
         int64_t q = 0;
         for (const Swap& w : swaps) {
@@ -1968,7 +1992,6 @@ bool PlainModel::adapt(std::string& err, int64_t max_swaps, int64_t max_evict) {
             }
             ++q;
         }
-        exchanged = q;
     }
     for (const Swap& w : swaps) {
         if (w.out < 0) {
@@ -1981,7 +2004,7 @@ bool PlainModel::adapt(std::string& err, int64_t max_swaps, int64_t max_evict) {
         // from the pinned RAM copy on the copy stream, beside the next windows: the evicted expert is out of the plan
         // already, and the new one goes in once the copy is done (settle_swaps); else read into a slot and wait
         const uint8_t* hb = src_->transient(w.layer, w.in) ? nullptr : src_->blob(w.layer, w.in);
-        if (hb != nullptr && strata::gpu::is_host_usm(hb)) {
+        if (hb != nullptr && (strata::gpu::is_host_usm(hb) || (dev_ >= 0 && src_->registered_on(dev_)))) {
             auto& f = free_[(size_t) w.layer];
             const int32_t slot = f.back();
             if (!strata::gpu::copy_async(cache_.device_slot(slot), hb, k::cpu::expert_layout().blob_bytes(w.layer),
@@ -2001,9 +2024,6 @@ bool PlainModel::adapt(std::string& err, int64_t max_swaps, int64_t max_evict) {
         return false;
     }
     for (float& v : disp_.usage) v *= opt_.adapt_decay;
-    // with a layer split the stages share the RAM copy's exchange buffers, and a stage's commit takes every staged
-    // exchange: each stage's land before the next stage's round
-    if (exchanged > 0 && !root_->next_.empty()) return settle_swaps(true, err);
     return true;
 }
 

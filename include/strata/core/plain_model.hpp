@@ -504,7 +504,8 @@ private:
     /// Before a window: the PCIe share of the window, while it is being chosen.  After it: its time.
     void pcie_probe_before();
     void pcie_probe_after(double ms, int T);
-    int64_t tokens_since_adapt_ = 0;   ///< tokens the windows read since the last adaptive round
+    int64_t tokens_since_adapt_ = 0;
+    int64_t adapt_phase_ = 0;   ///< a layer split's stage: its rounds this many windows after the root's   ///< tokens the windows read since the last adaptive round
     uint8_t* fill_tmp_ = nullptr;                 ///< pinned staging for a slot fill
 
     // per-sequence device state

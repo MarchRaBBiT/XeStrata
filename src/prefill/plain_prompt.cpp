@@ -150,7 +150,7 @@ bool PlainModel::prompt_return(std::string& err) {
         auto& f = free_[(size_t) l];
         if (f.empty()) break;
         const uint8_t* hb = src_->transient(l, e) ? nullptr : src_->blob(l, e);
-        if (hb != nullptr && strata::gpu::is_host_usm(hb)) {
+        if (hb != nullptr && (strata::gpu::is_host_usm(hb) || (dev_ >= 0 && src_->registered_on(dev_)))) {
             const int32_t slot = f.back();
             if (!strata::gpu::copy_async(cache_.device_slot(slot), hb, lay.blob_bytes(l), cs_)) {
                 err = std::string("plain prompt: ") + strata::gpu::last_error();
