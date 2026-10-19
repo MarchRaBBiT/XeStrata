@@ -180,7 +180,10 @@ bool PlainModel::prompt_chunks_glm5(const int32_t* tokens, int64_t n, int64_t po
                     k::glm5_l2_heads(P.g_qc, H, kL2Eps, T, cs);
                     k::glm5_l2_heads(P.g_kc, H, kL2Eps, T, cs);
                     k::glm5_kda_gate(P.g_f, b.dt, b.a, (float) s.kda_gate_lower_bound, P.g_gate, H, S, T, cs);
-                    k::native_gdn_beta_gate(P.g_beta, (int) (H * T), cs);
+                    // the gate takes at most 65535 values a launch: the chunk's H T in slices (64 heads: a chunk past 1023
+                    // tokens refused every prompt longer than that)
+                    for (int64_t r = 0; r < H * T; r += 65535)
+                        k::native_gdn_beta_gate(P.g_beta + r, (int) std::min<int64_t>(65535, H * T - r), cs);
                     mark(6);
                     k::glm5_kda_scan(state, P.g_qc, P.g_kc, P.g_vc, P.g_gate, P.g_beta, P.g_o, H, T, cs);
                     mark(7);
