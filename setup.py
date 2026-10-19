@@ -4069,12 +4069,14 @@ def setup_plain(a, family: str, fam: dict, gpu: dict, chosen: list, sel: list, f
     """Steps 2-7 for a model of PLAIN_FAMILIES: its size and context, the engine, the GGUF file (size and SHA-256 at
     the pinned revision), its tokenizer and chat template written out, and the config: `strata --native` with no pack,
     PLE table or MTP layer.  Images, the layer split and the Qwen3.8-Flash-Next options (KV precision, low-RAM modes,
-    the speed projection) do not apply."""
+    the speed projection) do not apply; --gpus with several cards splits the layers across them (docs/MULTIGPU.md)."""
     models = fam["models"]
     names = list(models)
     if a.model and a.model not in names:
         fail(f"{fam['title']} has no {a.model} model file", "choose one of: " + ", ".join(names))
-    vram = max(0.0, gpu.get("vram_gb", 0.0) - 5)      # the experts the GPU holds need no copy in RAM
+    # the experts the GPUs hold need no copy in RAM (every card of --gpus: the layer split)
+    vram = sum(max(0.0, gpu_info(i).get("vram_gb", 0.0) - 5) for i in sel) if len(sel) > 1 \
+        else max(0.0, gpu.get("vram_gb", 0.0) - 5)
     for i, m in enumerate(names, 1):
         d = models[m]
         gb = d["size"] / 1e9
@@ -4090,8 +4092,6 @@ def setup_plain(a, family: str, fam: dict, gpu: dict, chosen: list, sel: list, f
              "the engine reads the experts neither holds from the model file through the OS file cache (slower)")
     ok(f"size: {model}")
     tag = fam["tag"] + model
-    if len(sel) > 1:
-        warn(f"{fam['title']} runs on one GPU: the first of --gpus is used")
     if a.vision not in (None, "no", "none"):
         warn(f"images are not available with {fam['title']} yet: off")
     # the context: up to the model's, recommended by the smallest card's memory as for Qwen3.8-Flash-Next
@@ -4166,6 +4166,11 @@ def setup_plain(a, family: str, fam: dict, gpu: dict, chosen: list, sel: list, f
                            "log": str(STATE / f"xestrata-{tag.lower()}.log"), "lib_dirs": lib_dirs, "port": port}
     if gpu_chosen or sum(1 for x in found if gpu_problem(x) is None) > 1:
         cfg["gpu_pci"] = gpu["pci"]                    # the engine takes its GPU by PCI address (STRATA_GPU_PCI)
+    if len(sel) > 1:                                   # --gpus: the layer split's other cards, as Qwen3.8-Flash-Next's
+        cfg["gpu_pci"] = gpu["pci"]
+        cfg["split_pci"] = [gpu_info(i)["pci"] for i in sel[1:]]
+        if a.layer_split:
+            cfg["layer_split"] = str(a.layer_split)
     if a.host:
         cfg["host"] = a.host
     if a.api_key:

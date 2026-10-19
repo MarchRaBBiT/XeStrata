@@ -285,7 +285,8 @@ setup の最初の質問では、Qwen3.8-Flash-Next とは作りの違う 4 つ�
 
 API は、思考と答えの分離、ストリーミング、ツールの呼び出しを含めて使えます。
 Ornith の公式の版（Q4_K_M〜BF16）、Qwen3.6、GLM-5.3-Flash は、モデルの MTP の層で 2 つ先までの下書きを作り、窓でまとめて確かめます（推測デコード、greedy の要求だけ。GSQ-RCO の版と llm-jp には MTP の層がありません）。
-まだ使えないのは、画像、2 枚以上の GPU（setup は最初の GPU を使います）、KV キャッシュの精度や省 RAM モードなど Qwen3.8-Flash-Next のためのオプションです。
+`setup --gpus` で 2 枚以上の GPU を選ぶと、層を GPU に分けて動かします（最初の GPU が前の層、次の GPU がその後の層と head と MTP の層。分割点は各 GPU の空いたメモリの割合から決めます）。VRAM に置けるエキスパートは GPU を合わせた分になります。
+まだ使えないのは、画像、KV キャッシュの精度や省 RAM モードなど Qwen3.8-Flash-Next のためのオプションです。
 RAM がエキスパートの全体に足りないとき、エンジンは VRAM に置かないエキスパートを RAM の空きの許す限り RAM に置き、残りをモデルのファイルから OS のファイルキャッシュ越しに読みます（遅くなります。setup は RAM と VRAM を合わせても足りないとき警告します）。
 
 エンジンのオプション（設定の `args` に足します）:
@@ -305,6 +306,8 @@ RAM がエキスパートの全体に足りないとき、エンジンは VRAM �
 | `--max-t N` | decode の窓の最大のトークン数（既定 8） |
 | `--spec N` | MTP の層の推測デコードの窓の最大のトークン数（既定 3: 下書き 2 個。0 で使わない） |
 | `--draft-vocab PATH` | MTP の層の下書きを、このトークンの部分集合（`data/draft_vocab*.bin`）の中だけで作る。ヘッドを読む量が減ります（setup が Qwen3.6 の設定に、`--draft-vocab` の選択に従って書きます） |
+| `--layer-split K[,K2..]` / `auto` | 層を GPU に分ける。最初の GPU が層 K の前まで、次の GPU が K から、…（`auto`: 各 GPU の空いたメモリの割合で。setup の `--gpus` で書かれます） |
+| `--split-device D[,D2..]` | 2 枚目以降の GPU（エンジンの番号か PCI アドレス。既定はほかの単体の GPU） |
 | `--rope-scaling none\|linear\|yarn`、`--rope-scale F`、`--yarn-orig-ctx N` | 文脈の延長 |
 
 ### RAM がモデルより少ないとき（省 RAM モード）

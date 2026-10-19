@@ -302,8 +302,10 @@ The others are made of the same tensor types, checked on those files and in the 
 
 The API works, with the thinking kept apart from the answer, streaming and tool calls.
 Ornith's official versions (Q4_K_M to BF16), Qwen3.6 and GLM-5.3-Flash draft up to two tokens ahead with the model's MTP layer and check them in a window (speculative decoding, greedy requests only; the GSQ-RCO versions and llm-jp have no MTP layer).
-Not yet: images, more than one GPU (setup uses the first), and the options made for Qwen3.8-Flash-Next such as the
-KV cache's precision and the low-RAM modes.
+With two or more GPUs chosen by `setup --gpus`, the layers are split across them (the first GPU runs the first layers,
+the next the later ones, the head and the MTP layer; the points follow each GPU's share of the free memory), and the
+experts in VRAM are all the GPUs' together.
+Not yet: images, and the options made for Qwen3.8-Flash-Next such as the KV cache's precision and the low-RAM modes.
 When RAM is short of all the experts, the engine keeps the ones VRAM does not hold in RAM as far as it has room and
 reads the rest from the model file through the OS file cache (slower; setup warns of it when the RAM and the VRAM
 together are short).
@@ -325,6 +327,8 @@ The engine's options (added to the settings' `args`):
 | `--max-t N` | the decode window's most tokens (default 8) |
 | `--spec N` | the most tokens of a window checking the MTP layer's drafts (default 3: two drafts; 0: off) |
 | `--draft-vocab PATH` | the MTP layer drafts only tokens of this subset (`data/draft_vocab*.bin`), reading less of the head (setup writes it into Qwen3.6's settings, after its `--draft-vocab` choice) |
+| `--layer-split K[,K2..]` / `auto` | split the layers across the GPUs: the first runs the layers before K, the next those from K on, ... (`auto`: by each GPU's share of the free memory; setup's `--gpus` writes it) |
+| `--split-device D[,D2..]` | the later GPUs (engine numbers or PCI addresses; by default the other discrete GPUs) |
 | `--rope-scaling none\|linear\|yarn`, `--rope-scale F`, `--yarn-orig-ctx N` | context extension |
 
 ### Less RAM than the model: the low-RAM mode
