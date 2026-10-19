@@ -1394,7 +1394,7 @@ bool PlainModel::spec_start(int32_t first, int64_t pos, std::string& err) {
 }
 
 bool PlainModel::spec_step(const std::vector<int32_t>& stop, int64_t limit, int32_t* emitted, int& n_emit, float* logits,
-                           std::string& err) {
+                           std::string& err, const int32_t* follow) {
     n_emit = 0;
     if (cur_ < 0) { err = "plain model: spec_step before spec_start"; return false; }
     // the window: the pending token and the drafts that fit the context and the limit
@@ -1409,6 +1409,8 @@ bool PlainModel::spec_step(const std::vector<int32_t>& stop, int64_t limit, int3
     if (!forward(win, T, cur_pos_, out, logits, err)) return false;
     const auto t1 = std::chrono::steady_clock::now();
     spec_ms_check_ += std::chrono::duration<double, std::milli>(t1 - t0).count();
+    if (follow != nullptr)   // --spec-follow: the continuation in place of the window's picks
+        for (int j = 0; j < T; ++j) out[j] = follow[j];
     // accepted: the drafts the window's own picks agree with, up to the first stop token among the emitted
     int n = 0;
     while (n < nd && out[n] == win[n + 1]) ++n;

@@ -365,6 +365,8 @@ static void plain_usage(const std::string& arch) {
                  "  --rope-freq-base F, --rope-freq-scale F   the rotation's base and frequency scale\n"
                  "  --dump-logits PATH   each generated token's logits, FP32 rows\n"
                  "  --dump-routing PATH  the routed experts of every token and MoE layer (tools/make_profile.py)\n"
+                 "  --spec-follow PATH   benchmarks: emit this continuation (token ids) instead of the picks and\n"
+                 "                       accept the drafts that match it, so settings compare on the same text\n"
                  "  --serve              stay resident and take requests on stdin (server.py's protocol, text requests)\n"
                  "  --gpu PCI            the GPU (its PCI address)\n",
                  arch.c_str());
@@ -388,6 +390,7 @@ int plain_main(int argc, char** argv) {
     bool stop_eos = false, serve = false;
     std::vector<int32_t> eos;
     std::string dump_path, profile_save;
+    std::vector<int32_t> follow;   // --spec-follow: the continuation emitted instead of the picks (benchmarks)
     double save_min = 10.0;   // --expert-profile-save-every (serve)
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -423,6 +426,11 @@ int plain_main(int argc, char** argv) {
         else if (a == "--pool-workers") opt.pool_workers = (int) std::strtol(next("--pool-workers"), nullptr, 10);
         else if (a == "--dump-logits") dump_path = next("--dump-logits");
         else if (a == "--dump-routing") opt.dump_routing = next("--dump-routing");
+        else if (a == "--spec-follow") {
+            std::ifstream in(next("--spec-follow"));
+            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            if (!parse_ids(text, follow)) { std::fprintf(stderr, "--spec-follow: a list of token ids\n"); return 2; }
+        }
         else if (a == "--adapt-every") opt.adapt_every = (int) std::strtol(next("--adapt-every"), nullptr, 10);
         else if (a == "--adapt-swaps") opt.adapt_swaps = (int) std::strtol(next("--adapt-swaps"), nullptr, 10);
         else if (a == "--adapt-mib-per-token")
@@ -466,6 +474,7 @@ int plain_main(int argc, char** argv) {
             return 2;
         }
     }
+    if (!follow.empty()) n_new = std::min<int64_t>(n_new, (int64_t) follow.size());   // the run ends with it
     if (!serve && (prompt.empty() || n_new < 1)) {
         std::fprintf(stderr, "strata (%s): needs --tokens and --max-new >= 1\n", arch.c_str());
         return 2;
@@ -511,7 +520,9 @@ int plain_main(int argc, char** argv) {
     std::vector<float> logits((size_t) T * (size_t) V);
     std::vector<int32_t> produced;
     auto emit = [&](int row) -> bool {
-        produced.push_back(out[(size_t) row]);
+        // --spec-follow: produced[i] is the continuation's token i, whatever the model picked
+        const size_t at = produced.size();
+        produced.push_back(at < follow.size() ? follow[at] : out[(size_t) row]);
         if (dump != nullptr &&
             std::fwrite(logits.data() + (size_t) row * (size_t) V, sizeof(float), (size_t) V, dump) != (size_t) V) {
             std::fprintf(stderr, "cannot write the logits\n");
@@ -553,7 +564,10 @@ int plain_main(int argc, char** argv) {
     while ((int64_t) produced.size() < n_new && !at_eos(produced.back())) {
         if (spec) {
             int n_emit = 0;
-            if (!model.spec_step(stop, n_new - (int64_t) produced.size(), out.data(), n_emit, lg, err)) {
+            const size_t at = produced.size();   // the continuation's tokens after the pending one
+            const bool forced = !follow.empty() && at + (size_t) model.drafts() + 1 <= follow.size();
+            if (!model.spec_step(stop, n_new - (int64_t) produced.size(), out.data(), n_emit, lg, err,
+                                 forced ? follow.data() + at : nullptr)) {
                 std::fprintf(stderr, "strata (%s): %s\n", arch.c_str(), err.c_str());
                 return 1;
             }

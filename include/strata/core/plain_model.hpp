@@ -144,8 +144,10 @@ public:
     /// One window over the pending token and its drafts: `emitted` gets the accepted drafts and the token after them
     /// (`n_emit` of them, at most `limit`), cut after the first token in `stop`; with `logits`, their rows.  The state
     /// then holds every emitted token but the last, which is pending, and the next drafts are made.
+    /// `follow` (--spec-follow): the tokens the window must emit instead of its own picks, from the one after the
+    /// pending token on (at least `limit`): the drafts that match them are accepted.
     bool spec_step(const std::vector<int32_t>& stop, int64_t limit, int32_t* emitted, int& n_emit, float* logits,
-                   std::string& err);
+                   std::string& err, const int32_t* follow = nullptr);
     /// The windows and the drafts they checked and accepted since the load, for the report.
     int64_t spec_windows() const { return spec_windows_; }
     int64_t spec_drafted() const { return spec_drafted_; }
