@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cerrno>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -29,7 +30,6 @@
 #include <deque>
 #include <exception>
 #include <fstream>
-#include <iostream>
 #include <iterator>
 #include <list>
 #include <memory>
@@ -38,6 +38,11 @@
 #include <thread>
 #include <vector>
 
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 #if defined(__linux__)
 #include <dirent.h>
 #endif
@@ -218,30 +223,63 @@ bool session_read(const std::string& path, const std::string& model_id, std::vec
 static int plain_serve(strata::core::PlainModel& model, const strata::core::PlainOptions& opt, const std::string& arch,
                        const std::vector<int32_t>& eos, const std::string& profile_save, double save_min,
                        ConversationCache& cache) {
-    std::atomic<bool> stop_req{false};
-    std::mutex in_mu;
-    std::condition_variable in_cv;
-    std::deque<std::string> in_lines;
-    bool in_eof = false;
-    std::thread([&] {   // stdin: STOP takes effect mid-request, every other line queues
-        std::string l;
-        while (std::getline(std::cin, l)) {
+    // the reader thread outlives this function (it is detached and ends with the process), so what it shares is
+    // owned by both
+    struct StdinShared {
+        std::atomic<bool> stop_req{false};
+        std::mutex mu;
+        std::condition_variable cv;
+        std::deque<std::string> lines;
+        bool eof = false;
+    };
+    const auto in_shared = std::make_shared<StdinShared>();
+    std::atomic<bool>& stop_req = in_shared->stop_req;
+    std::thread([st = in_shared] {   // stdin: STOP takes effect mid-request, every other line queues
+        // read(2) on the descriptor, not std::cin: glibc's exit() flushes every stdio stream and waits for stdin's
+        // lock, which getline holds while it waits for input, so the engine hung in exit() after QUIT while the
+        // server kept its stdin open (as the main engine's serve, generate.cpp)
+        std::string l, buf;
+        char chunk[4096];
+        auto getline_fd = [&](std::string& out) -> bool {
+            for (;;) {
+                const size_t nlpos = buf.find('\n');
+                if (nlpos != std::string::npos) {
+                    out.assign(buf, 0, nlpos);
+                    buf.erase(0, nlpos + 1);
+                    return true;
+                }
+#if defined(_WIN32)
+                const int n = _read(0, chunk, (unsigned) sizeof chunk);
+#else
+                const ssize_t n = ::read(0, chunk, sizeof chunk);
+#endif
+                if (n < 0 && errno == EINTR) continue;
+                if (n <= 0) {
+                    if (buf.empty()) return false;
+                    out.swap(buf);
+                    buf.clear();
+                    return true;
+                }
+                buf.append(chunk, (size_t) n);
+            }
+        };
+        while (getline_fd(l)) {
             if (!l.empty() && l.back() == '\r') l.pop_back();
-            if (l == "STOP") { stop_req.store(true); continue; }
-            std::lock_guard<std::mutex> lk(in_mu);
-            in_lines.push_back(l);
-            in_cv.notify_one();
+            if (l == "STOP") { st->stop_req.store(true); continue; }
+            std::lock_guard<std::mutex> lk(st->mu);
+            st->lines.push_back(l);
+            st->cv.notify_one();
         }
-        std::lock_guard<std::mutex> lk(in_mu);
-        in_eof = true;
-        in_cv.notify_one();
+        std::lock_guard<std::mutex> lk(st->mu);
+        st->eof = true;
+        st->cv.notify_one();
     }).detach();
     auto next_line = [&](std::string& out) {
-        std::unique_lock<std::mutex> lk(in_mu);
-        in_cv.wait(lk, [&] { return !in_lines.empty() || in_eof; });
-        if (in_lines.empty()) return false;
-        out = std::move(in_lines.front());
-        in_lines.pop_front();
+        std::unique_lock<std::mutex> lk(in_shared->mu);
+        in_shared->cv.wait(lk, [&] { return !in_shared->lines.empty() || in_shared->eof; });
+        if (in_shared->lines.empty()) return false;
+        out = std::move(in_shared->lines.front());
+        in_shared->lines.pop_front();
         return true;
     };
     const int64_t ctx = model.max_cells(), V = model.vocab();
