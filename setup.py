@@ -444,7 +444,8 @@ PLAIN_FAMILIES["glm53"] = {
         "UD-IQ3_XXS": {"repo": _GLM53, "file": _GLM53_IQ3[0]["path"], "parts": _GLM53_IQ3,
                        "size": sum(x["size"] for x in _GLM53_IQ3), "about": "3-bit (Unsloth Dynamic)", "tested": True},
         "UD-IQ1_S": {"repo": _GLM53, "file": _GLM53_IQ1[0]["path"], "parts": _GLM53_IQ1,
-                     "size": sum(x["size"] for x in _GLM53_IQ1), "about": "1-bit (Unsloth Dynamic), the smallest"},
+                     "size": sum(x["size"] for x in _GLM53_IQ1), "about": "1-bit (Unsloth Dynamic), the smallest",
+                     "tested": True},
     }}
 FAMILIES.update(PLAIN_FAMILIES)
 
