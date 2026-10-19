@@ -20,6 +20,7 @@
 
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/core/device.hpp"
+#include "strata/core/on_device.hpp"
 #include "strata/core/runtime.hpp"
 #include "strata/kernels/bf16_gemv.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
@@ -85,7 +86,9 @@ k::QsaShapes attn_shapes(const ModelSpec& s, int64_t n_head_kv) {
 PlainModel::PlainModel() = default;
 
 PlainModel::~PlainModel() {
-    if (route_dump_ != nullptr) std::fclose(route_dump_);
+    next_.clear();   // the later stages read the root's experts and pool
+    const OnDevice on(dev_);
+    if (route_dump_ != nullptr && root_ == this) std::fclose(route_dump_);
     if (swap_cs_ != nullptr) strata::gpu::stream_sync(swap_cs_);
     if (cs_ != nullptr) strata::gpu::stream_sync(cs_);
     prompt_gemm_.reset();   // the products' state before the stream
@@ -227,6 +230,12 @@ bool PlainModel::load_block(const GgufModel& m, int64_t l, Block& b, std::string
     return true;
 }
 
+std::vector<PlainModel*> PlainModel::chain() {
+    std::vector<PlainModel*> c{this};
+    for (auto& n : next_) c.push_back(n.get());
+    return c;
+}
+
 bool PlainModel::load(const PlainOptions& opt, std::string& err) {
     opt_ = opt;
     if (!opt_.dump_routing.empty()) {
@@ -263,8 +272,129 @@ bool PlainModel::load(const PlainOptions& opt, std::string& err) {
         return false;
     }
     if (!read_model_spec(model_->meta(), spec_, err)) return false;
+    // the layer split: its points (given, or from the GPUs' memory), each rising inside the trunk, a GPU each
+    const int64_t nl = spec_.n_layer;
+    // the GPUs a split takes, as generate.cpp's: the runtime's first, then the ones --split-device names, else the
+    // other cards (the processor's own graphics only by name: its memory is the RAM, which holds the experts already)
+    if (opt_.split_auto || !opt_.split_at.empty()) {
+        split_devs_.assign(1, 0);
+        if (!opt_.split_devices.empty())
+            split_devs_.insert(split_devs_.end(), opt_.split_devices.begin(), opt_.split_devices.end());
+        else
+            for (int d = 1; d < Runtime::count(); ++d)
+                if (!device_info(d).integrated) split_devs_.push_back(d);
+        for (size_t i = 1; i < split_devs_.size(); ++i)
+            if (split_devs_[i] <= 0 || split_devs_[i] >= Runtime::count() ||
+                std::count(split_devs_.begin(), split_devs_.end(), split_devs_[i]) > 1) {
+                err = "plain model: --split-device names GPU " + std::to_string(split_devs_[i]) +
+                      ", not another usable one";
+                return false;
+            }
+    }
+    if (opt_.split_auto && !split_auto_points(err)) return false;
+    const std::vector<int64_t>& at = opt_.split_at;
+    for (size_t i = 0; i < at.size(); ++i)
+        if (at[i] < 1 || at[i] >= nl || (i > 0 && at[i] <= at[i - 1])) {
+            err = "plain model: --layer-split takes rising blocks from 1 to " + std::to_string(nl - 1);
+            return false;
+        }
+    if (!at.empty() && at.size() + 1 > split_devs_.size()) {
+        err = "plain model: --layer-split needs " + std::to_string(at.size() + 1) + " GPUs, " +
+              std::to_string(split_devs_.size()) + " are there for it";
+        return false;
+    }
+    lb_ = 0;
+    le_ = at.empty() ? nl : at[0];
+    dev_ = at.empty() ? -1 : split_devs_[0];
+    {
+        const OnDevice on(dev_);
+        if (!load_arch(err)) return false;
+    }
+    for (size_t i = 0; i < at.size(); ++i) {
+        auto st = std::make_unique<PlainModel>();
+        const int64_t lb = at[i], le = i + 1 < at.size() ? at[i + 1] : nl;
+        if (!st->load_stage(opt_, this, lb, le, split_devs_[i + 1], err)) return false;
+        next_.push_back(std::move(st));
+    }
+    finish_experts();
+    for (PlainModel* st : chain()) {
+        const OnDevice on(st->dev_);
+        if (!st->reset(err)) return false;
+    }
+    if (!next_.empty()) {
+        std::string where;
+        for (PlainModel* st : chain())
+            where += (where.empty() ? "" : ", ") + strata::gpu::device_name(st->dev_) + " blocks " +
+                     std::to_string(st->lb_) + ".." + std::to_string(st->le_ - 1);
+        std::fprintf(stderr, "strata plain: a layer split: %s\n", where.c_str());
+    }
+    return true;
+}
+
+bool PlainModel::load_stage(const PlainOptions& opt, PlainModel* root, int64_t lb, int64_t le, int dev,
+                            std::string& err) {
+    opt_ = opt;
+    root_ = root;
+    lb_ = lb;
+    le_ = le;
+    dev_ = dev;
+    route_dump_ = root->route_dump_;
+    const OnDevice on(dev_);
+    try {
+        model_ = std::make_unique<GgufModel>(GgufModel::open(opt_.gguf));
+    } catch (const std::exception& e) {
+        err = std::string("plain model: ") + e.what();
+        return false;
+    }
+    if (!read_model_spec(model_->meta(), spec_, err)) return false;
+    return load_arch(err);
+}
+
+bool PlainModel::load_arch(std::string& err) {
+    return spec_.arch == ModelArch::Glm5Next ? load_glm5(err) : load_qwen(err);
+}
+
+// The points from the GPUs' memory: each GPU's share of the MoE layers in proportion to the memory it has for them
+// (its free memory, less its reserve, and the head on the last), so that each GPU's tier holds about the same part of
+// its layers' experts
+bool PlainModel::split_auto_points(std::string& err) {
+    opt_.split_at.clear();
+    const int n = (int) split_devs_.size();
+    if (n < 2) return true;
+    uint64_t head = 0;
+    if (size_t at = 0; const TensorInfo* t = model_->find("output.weight", &at)) head = tensor_payload_bytes(*t);
+    std::vector<double> room((size_t) n, 0.0);
+    double sum = 0;
+    for (int d = 0; d < n; ++d) {
+        const OnDevice on(split_devs_[(size_t) d]);
+        size_t f = 0, t = 0;
+        if (!strata::gpu::mem_info(&f, &t)) { err = "plain model: a GPU's memory is unknown"; return false; }
+        uint64_t free_b = f, total_b = t;
+        apply_vram_limit(free_b, total_b);
+        const uint64_t reserve = std::clamp<uint64_t>(total_b / 32, 192ull << 20, 768ull << 20) + (1ull << 30) +
+                                 (d == n - 1 ? head : 0);
+        room[(size_t) d] = free_b > reserve ? (double) (free_b - reserve) : 0.0;
+        sum += room[(size_t) d];
+    }
     const ModelSpec& s = spec_;
-    if (s.arch == ModelArch::Glm5Next) return load_glm5(err);
+    const int64_t M = s.n_moe_layers();
+    if (sum <= 0 || M < n) return true;
+    double acc = 0;
+    int64_t seen = 0, l = 0;
+    for (int d = 0; d + 1 < n; ++d) {
+        acc += room[(size_t) d];
+        const int64_t want = std::clamp<int64_t>((int64_t) std::llround((double) M * acc / sum), seen + 1,
+                                                 M - (n - 1 - d));
+        while (l < s.n_layer && seen < want) seen += s.layer_routes(l++) ? 1 : 0;
+        if (l >= s.n_layer) break;
+        opt_.split_at.push_back(l);
+    }
+    if ((int) opt_.split_at.size() != n - 1) opt_.split_at.clear();
+    return true;
+}
+
+bool PlainModel::load_qwen(std::string& err) {
+    const ModelSpec& s = spec_;
     if (s.arch != ModelArch::Qwen35Moe && s.arch != ModelArch::Qwen3Moe) {
         err = "plain model: " + s.arch_name + " is not run by this engine yet";
         return false;
@@ -325,25 +455,32 @@ bool PlainModel::load(const PlainOptions& opt, std::string& err) {
         if (emb_row_ == 0) { err = "plain model: token_embd.weight's type has no host dequantizer"; return false; }
         emb_ = m.shard(at).tensor_data(*t);
     }
-    if (!upload(m, "output.weight", head_, err) ||
-        !upload_f32(m, "output_norm.weight", (uint64_t) s.n_embd, out_norm_, err))
-        return false;
-    if (head_.n_in != s.n_embd || head_.n_out != n_vocab_) { err = "plain model: output.weight's shape"; return false; }
+    if (last()) {   // the head: the last stage's
+        if (!upload(m, "output.weight", head_, err) ||
+            !upload_f32(m, "output_norm.weight", (uint64_t) s.n_embd, out_norm_, err))
+            return false;
+        if (head_.n_in != s.n_embd || head_.n_out != n_vocab_) { err = "plain model: output.weight's shape"; return false; }
+    }
 
     const uint64_t N = (uint64_t) s.n_embd, E = (uint64_t) s.n_expert;
     blocks_.resize((size_t) s.n_layer);
+    // the attention's K/V heads, the same in every block (checked as the blocks load)
+    for (int64_t l = 0; l < s.n_layer && nkv_ == 0; ++l)
+        if (!s.recurrent[(size_t) l]) nkv_ = s.n_head_kv[(size_t) l];
     int64_t n_gdn = 0, n_attn = 0;
-    for (int64_t l = 0; l < s.n_layer; ++l) {
+    for (int64_t l = 0; l < s.n_layer; ++l) {   // the indices count every block; this stage loads its own
         Block& b = blocks_[(size_t) l];
         b.recurrent = s.recurrent[(size_t) l];
         if (b.recurrent) b.gdn = n_gdn++;
         else b.attn = n_attn++;
-        if (!load_block(m, l, b, err)) return false;
+        if (l >= lb_ && l < le_ && !load_block(m, l, b, err)) return false;
     }
-    // the MTP layer, when the window checks drafts and the file has it (its K/V the last attention block's)
+    // the MTP layer, when the window checks drafts and the file has it (its K/V the last attention block's): the last
+    // stage's
     {
         const std::string p = "blk." + std::to_string(s.n_layer) + ".nextn.";
-        has_mtp_ = opt_.spec >= 2 && q35 && s.n_nextn == 1 && m.find(p + "eh_proj.weight") != nullptr;
+        model_mtp_ = opt_.spec >= 2 && q35 && s.n_nextn == 1 && m.find(p + "eh_proj.weight") != nullptr;
+        has_mtp_ = model_mtp_ && last();
     }
     if (has_mtp_) {
         const std::string p = "blk." + std::to_string(s.n_layer) + ".nextn.";
@@ -371,7 +508,7 @@ bool PlainModel::load(const PlainOptions& opt, std::string& err) {
                                &b.sh_down})
                 if (w->type == kBF16) k::bf16_gemv_fp32_mmvf_multi_tune(w->n_in, w->n_out, cs_);
         };
-        for (const Block& b : blocks_) tune(b);
+        for (int64_t l = lb_; l < le_; ++l) tune(blocks_[(size_t) l]);
         if (has_mtp_) {
             tune(mtp_);
             if (mtp_eh_.type == kBF16) k::bf16_gemv_fp32_mmvf_multi_tune(mtp_eh_.n_in, mtp_eh_.n_out, cs_);
@@ -385,7 +522,10 @@ bool PlainModel::load(const PlainOptions& opt, std::string& err) {
     state_bytes_ = (size_t) (s.ssm_d_state * s.ssm_dt_rank * s.ssm_d_state) * 4;
     conv_bytes_ = (size_t) (C * (s.ssm_d_conv - 1)) * 4;
     const k::QsaShapes qs = attn_shapes(s, nkv_);
-    for (const Block& b : blocks_) {
+    gdn_state_.assign((size_t) n_gdn, nullptr);
+    gdn_conv_.assign((size_t) n_gdn, nullptr);
+    for (int64_t l = lb_; l < le_; ++l) {
+        const Block& b = blocks_[(size_t) l];
         if (b.recurrent) {
             float *st = nullptr, *cv = nullptr;
             if (!strata::gpu::alloc_device(&st, (size_t) (s.ssm_d_state * s.ssm_dt_rank * s.ssm_d_state) * 4) ||
@@ -395,19 +535,19 @@ bool PlainModel::load(const PlainOptions& opt, std::string& err) {
             }
             allocs_.push_back(st);
             allocs_.push_back(cv);
-            gdn_state_.push_back(st);
-            gdn_conv_.push_back(cv);
+            gdn_state_[(size_t) b.gdn] = st;
+            gdn_conv_[(size_t) b.gdn] = cv;
         }
     }
     // the states after a window's rows but its last, for going back to the last accepted draft: a window checks up to
-    // spec - 1 drafts (at most the window kernel's snapshots)
-    if (has_mtp_) {
+    // spec - 1 drafts (at most the window kernel's snapshots); every stage's recurrent blocks
+    if (model_mtp_) {
         opt_.spec = std::min({opt_.spec, opt_.max_t, k::kNativeGdnMaxSnaps + 1});
         n_snap_ = opt_.spec - 1;
         gdn_snap_.assign(gdn_state_.size(), {});
         conv_snap_.assign(gdn_state_.size(), {});
         for (size_t g = 0; g < gdn_state_.size(); ++g)
-            for (int t = 0; t < n_snap_; ++t) {
+            for (int t = 0; t < n_snap_ && gdn_state_[g] != nullptr; ++t) {
                 float *st = nullptr, *cv = nullptr;
                 if (!strata::gpu::alloc_device(&st, (size_t) (s.ssm_d_state * s.ssm_dt_rank * s.ssm_d_state) * 4) ||
                     !strata::gpu::alloc_device(&cv, (size_t) (C * (s.ssm_d_conv - 1)) * 4)) {
@@ -464,7 +604,12 @@ bool PlainModel::load(const PlainOptions& opt, std::string& err) {
     opt_.max_cells = n_pages_ * qs.page_size;
     {
         const size_t pool = (size_t) (n_pages_ * qs.n_head_kv * qs.page_size * qs.head_dim) * 2;
-        for (int64_t i = 0; i < n_attn; ++i) {   // the trunk's attention blocks, then the MTP layer
+        k_pool_.assign((size_t) n_attn, nullptr);
+        v_pool_.assign((size_t) n_attn, nullptr);
+        for (int64_t i = 0; i < n_attn; ++i) {   // this stage's attention blocks, the MTP layer on the last
+            bool mine = has_mtp_ && i == mtp_.attn;
+            for (int64_t l = lb_; l < le_ && !mine; ++l) mine = blocks_[(size_t) l].attn == i;
+            if (!mine) continue;
             uint16_t *kp = nullptr, *vp = nullptr;
             if (!strata::gpu::alloc_device(&kp, pool) || !strata::gpu::alloc_device(&vp, pool)) {
                 err = "plain model: no VRAM for the K/V cache (" + std::to_string(opt_.max_cells) + " cells)";
@@ -472,8 +617,8 @@ bool PlainModel::load(const PlainOptions& opt, std::string& err) {
             }
             allocs_.push_back(kp);
             allocs_.push_back(vp);
-            k_pool_.push_back(kp);
-            v_pool_.push_back(vp);
+            k_pool_[(size_t) i] = kp;
+            v_pool_[(size_t) i] = vp;
         }
         std::vector<int32_t> table((size_t) n_pages_);
         for (int64_t i = 0; i < n_pages_; ++i) table[(size_t) i] = (int32_t) i;
@@ -489,10 +634,13 @@ bool PlainModel::load(const PlainOptions& opt, std::string& err) {
     const uint64_t T = (uint64_t) opt_.max_t, NH = (uint64_t) s.n_head, HD = (uint64_t) s.key_length;
     const uint64_t NKV = (uint64_t) qs.n_head_kv, HV = (uint64_t) s.ssm_dt_rank, ZV = (uint64_t) s.ssm_d_inner;
     const uint64_t K = (uint64_t) s.n_expert_used, FS = (uint64_t) s.n_ff_shexp;
+    hand_w_ = s.n_embd;
     if (!mapped(T * N * 4, (void**) &h_emb_, (void**) &m_emb_) ||
         !mapped(T * k::kStepCount * 4, (void**) &h_step_, (void**) &m_step_) ||
         !mapped(T * (NH + NKV) * 4, (void**) &h_pos_, (void**) &m_pos_) ||
-        !mapped(T * 4 + 16, (void**) &h_out_, (void**) &m_out_)) {
+        !mapped(T * 4 + 16, (void**) &h_out_, (void**) &m_out_) ||
+        (!first() && !mapped(T * N * 4, (void**) &h_in_, (void**) &m_in_)) ||
+        (!last() && !mapped(T * N * 4, (void**) &h_hand_, (void**) &m_hand_))) {
         err = "plain model: mapped staging allocation failed";
         return false;
     }
@@ -525,7 +673,7 @@ bool PlainModel::load(const PlainOptions& opt, std::string& err) {
     segs_.assign((size_t) opt_.max_t + 1, {});
     mexec_.assign((size_t) opt_.max_t + 1, nullptr);
     msegs_.assign((size_t) opt_.max_t + 1, {});
-    return reset(err);
+    return true;
 }
 
 bool PlainModel::prompt_int8() const {
@@ -663,20 +811,31 @@ void PlainModel::prompt_carve(int64_t T, PromptBufs& b, uint8_t* dev, uint8_t* h
     hold(b.h_hn, U * N * 4); hold(b.h_cpu, (uint64_t) b.cpu_cap * N * 4); hold(b.h_cpu_row, (uint64_t) b.cpu_cap * 4);
     hold(b.h_nact, U * k::cpu::kNativeActBytes); hold(b.h_dense_bounds, 2 * sizeof(int32_t));
     hold(b.h_stage, 2 * (uint64_t) PromptBufs::kGroup * lay.max_blob);
+    hold(b.h_hand, first() && last() ? 0 : U * (uint64_t) hand_w_ * 4);   // a layer split's rows in and out
     host_bytes = at;
 }
 
 bool PlainModel::open_experts(std::string& err) {
     const ModelSpec& s = spec_;
-    n_moe_ = s.n_moe_layers() + (has_mtp_ ? 1 : 0);
+    n_moe_ = s.n_moe_layers() + (model_mtp_ ? 1 : 0);
     const int64_t L = n_moe_, E = s.n_expert;
-    std::vector<int64_t> blocks;
-    for (int64_t l = 0; l < s.n_layer; ++l)
-        if (s.layer_routes(l)) blocks.push_back(l);
-    if (has_mtp_) blocks.push_back(s.n_layer);   // the MTP layer's experts: the tiers' last MoE layer
-    if (!expert_layout_from_gguf(opt_.gguf, blocks, E, s.n_embd, s.n_ff_exp, err)) return false;
+    // this stage's MoE layers: its blocks', then the MTP layer's (the tiers' last MoE layer)
+    moe_local_.clear();
+    for (int64_t l = lb_; l < le_; ++l)
+        if (s.layer_routes(l)) moe_local_.push_back(s.moe_index(l));
+    moe_trunk_ = (int64_t) moe_local_.size();
+    if (has_mtp_) moe_local_.push_back(L - 1);
+    const int64_t LS = (int64_t) moe_local_.size();
+    level_zero_ = Runtime::get().device().get_backend() == sycl::backend::ext_oneapi_level_zero;
+    if (root_ == this) {
+        std::vector<int64_t> blocks;
+        for (int64_t l = 0; l < s.n_layer; ++l)
+            if (s.layer_routes(l)) blocks.push_back(l);
+        if (model_mtp_) blocks.push_back(s.n_layer);   // the MTP layer's experts: the tiers' last MoE layer
+        if (!expert_layout_from_gguf(opt_.gguf, blocks, E, s.n_embd, s.n_ff_exp, err)) return false;
+    }
     const auto& lay = k::cpu::expert_layout();
-    for (int64_t l = 0; l < L; ++l)
+    for (int64_t l : moe_local_)
         if (!k::native_expert_supported(lay.fmt[(size_t) l].gu_type, lay.fmt[(size_t) l].d_type, s.n_embd, s.n_ff_exp,
                                         lay.fmt[(size_t) l].up_type)) {
             err = "plain model: the GPU has no expert kernel for MoE layer " + std::to_string(l) + "'s types";
@@ -687,52 +846,65 @@ bool PlainModel::open_experts(std::string& err) {
     // resident_pin_fits): the pinned experts and 8 GiB beside them
     // On Level Zero the device's own allocations also need RAM beside the pinned experts: on the B70 (xe, 32 GiB) with
     // 100 GiB of host memory registered and 14 GiB left, 2 GiB device allocations were refused or the device was lost;
-    // with 85 GiB and 29 GiB left, 24 GiB of them ran (2026-10-19).  So the room there counts the VRAM as well.
-    const bool level_zero = Runtime::get().device().get_backend() == sycl::backend::ext_oneapi_level_zero;
-    bool in_ram = !opt_.mmap_experts;
-    if (in_ram) {
-        detail::HostMemory hm;
-        const uint64_t need = lay.total + lay.max_blob;
-        uint64_t beside = 8ull << 30;
-        if (level_zero) {
-            size_t f = 0, t = 0;
-            if (strata::gpu::mem_info(&f, &t)) beside += (uint64_t) t;
+    // with 85 GiB and 29 GiB left, 24 GiB of them ran (2026-10-19).  So the room there counts the VRAM as well (every
+    // Level Zero GPU's, with a layer split).  The root opens the tier; the later stages read from it.
+    if (root_ == this) {
+        in_ram_ = !opt_.mmap_experts;
+        if (in_ram_) {
+            detail::HostMemory hm;
+            const uint64_t need = lay.total + lay.max_blob;
+            uint64_t beside = 8ull << 30;
+            const int n_dev = opt_.split_at.empty() ? 1 : (int) opt_.split_at.size() + 1;
+            for (int d = 0; d < n_dev; ++d) {
+                const OnDevice on(opt_.split_at.empty() ? -1 : split_devs_[(size_t) d]);
+                size_t f = 0, t = 0;
+                if (Runtime::get().device().get_backend() == sycl::backend::ext_oneapi_level_zero &&
+                    strata::gpu::mem_info(&f, &t))
+                    beside += (uint64_t) t;
+            }
+            std::string why;
+            if (detail::host_available_memory(hm) &&
+                !detail::resident_pin_fits(need, 0, beside, std::min(hm.available, hm.cgroup_limit), why)) {
+                std::fprintf(stderr, "strata plain: the experts need %.1f GiB of RAM and %.1f GiB beside them, %.1f GiB "
+                                     "is available: read in place\n",
+                             (double) need / 1073741824.0, (double) beside / 1073741824.0,
+                             (double) std::min(hm.available, hm.cgroup_limit) / 1073741824.0);
+                in_ram_ = false;
+            }
         }
-        std::string why;
-        if (detail::host_available_memory(hm) &&
-            !detail::resident_pin_fits(need, 0, beside, std::min(hm.available, hm.cgroup_limit), why)) {
-            std::fprintf(stderr, "strata plain: the experts need %.1f GiB of RAM and %.1f GiB beside them, %.1f GiB is "
-                                 "available: read in place\n",
-                         (double) need / 1073741824.0, (double) beside / 1073741824.0,
-                         (double) std::min(hm.available, hm.cgroup_limit) / 1073741824.0);
-            in_ram = false;
+        if (in_ram_) {
+            auto arena = std::make_unique<ArenaExpertSource>();
+            arena->set_gguf(opt_.gguf);
+            if (!arena->open(std::string(), L, E, /*threads=*/6, err)) return false;
+            if (!arena->ram_warning().empty())
+                std::fprintf(stderr, "strata plain: WARNING: %s\n", arena->ram_warning().c_str());
+            std::fprintf(stderr, "strata plain: experts in RAM, %.2f GiB at %.2f GiB/s\n",
+                         (double) lay.total / 1073741824.0, arena->load_gib_per_second());
+            src_own_ = std::move(arena);
+        } else {
+            auto file = std::make_unique<FileExpertSource>();
+            file->set_gguf(opt_.gguf);
+            if (!file->open(std::string(), L, E, err)) return false;
+            src_own_ = std::move(file);
         }
-    }
-    if (in_ram) {
-        auto arena = std::make_unique<ArenaExpertSource>();
-        arena->set_gguf(opt_.gguf);
-        if (!arena->open(std::string(), L, E, /*threads=*/6, err)) return false;
-        if (!arena->ram_warning().empty()) std::fprintf(stderr, "strata plain: WARNING: %s\n", arena->ram_warning().c_str());
-        std::fprintf(stderr, "strata plain: experts in RAM, %.2f GiB at %.2f GiB/s\n", (double) lay.total / 1073741824.0,
-                     arena->load_gib_per_second());
-        src_ = std::move(arena);
+        src_ = src_own_.get();
+        pool_own_ = std::make_unique<k::cpu::ExpertPool>(opt_.pool_workers);
+        pool_ = pool_own_.get();
     } else {
-        auto file = std::make_unique<FileExpertSource>();
-        file->set_gguf(opt_.gguf);
-        if (!file->open(std::string(), L, E, err)) return false;
-        src_ = std::move(file);
+        in_ram_ = root_->in_ram_;
+        src_ = root_->src_;
+        pool_ = root_->pool_;
     }
-    pool_ = std::make_unique<k::cpu::ExpertPool>(opt_.pool_workers);
 
     // the VRAM tier: what the device has left, less the window's arena and a reserve, in slots of each layer's blob,
-    // the same number for every layer
-    uint64_t free_b = 0, total_b = 0;
+    // the same number for every layer of this stage
+    uint64_t free_b = 0;
     {
         size_t f = 0, t = 0;
         if (!strata::gpu::mem_info(&f, &t)) { err = "plain model: the device's memory is unknown"; return false; }
         free_b = f;
-        total_b = t;
-        apply_vram_limit(free_b, total_b);
+        total_b_ = t;
+        apply_vram_limit(free_b, total_b_);
         if (opt_.vram_free_mib >= 0) free_b = std::min<uint64_t>(free_b, (uint64_t) opt_.vram_free_mib << 20);
     }
     // the prompt path's host buffers, for its longest chunk; the device ones are borrowed from the tier a prompt at a
@@ -765,31 +937,31 @@ bool PlainModel::open_experts(std::string& err) {
     // 128 MiB (llm-jp Q4_K_M, Ornith Q4_K_M and GSQ-RCO 3bit, 2026-10-12), where the 768 MiB of before left 700 MiB
     // of the card unused; 768 stays above 24 GiB.
     const uint64_t reserve = opt_.reserve_mib >= 0 ? (uint64_t) opt_.reserve_mib << 20
-                                                   : std::clamp<uint64_t>(total_b / 32, 192ull << 20, 768ull << 20);
+                                                   : std::clamp<uint64_t>(total_b_ / 32, 192ull << 20, 768ull << 20);
     const uint64_t room = free_b > window_b + reserve ? free_b - window_b - reserve : 0;
     uint64_t per_layer_b = 0;
-    for (int64_t l = 0; l < L; ++l) per_layer_b += lay.bytes[(size_t) l];
+    for (int64_t l : moe_local_) per_layer_b += lay.bytes[(size_t) l];
     int64_t q = per_layer_b > 0 ? (int64_t) (room / per_layer_b) : 0;
     q = std::min<int64_t>(q, E);
     if (opt_.expert_slots >= 0) q = std::min<int64_t>(q, opt_.expert_slots / std::max<int64_t>(L, 1));
-    if (q < 1) {
+    if (q < 1 && LS > 0) {
         err = "plain model: no VRAM is left for the expert tier (" + std::to_string(free_b >> 20) + " MiB free)";
         return false;
     }
     // the xe driver gives VRAM only with as much RAM free beside it, and the file cache does not count as free there
     // (78 GiB of pinned experts, a model file in the cache: the tier's 24 GiB refused with 17 GiB free, B70,
     // 2026-10-19): the OS is made to give the cache back first
-    if (level_zero) strata::platform::make_free_ram(per_layer_b * (uint64_t) q + (2ull << 30));
+    if (level_zero_) strata::platform::make_free_ram(per_layer_b * (uint64_t) q + (2ull << 30));
     std::vector<int64_t> slot_bytes;
     free_.assign((size_t) L, {});
-    for (int64_t i = 0; i < q; ++i)   // the layers in turn: slot s is layer s % L's (prompt_borrow takes the last ones)
-        for (int64_t l = 0; l < L; ++l) {
+    for (int64_t i = 0; i < q; ++i)   // the layers in turn: slot s is moe_local_[s % LS]'s (prompt_borrow takes the last)
+        for (int64_t l : moe_local_) {
             free_[(size_t) l].push_back((int32_t) slot_bytes.size());
             slot_bytes.push_back((int64_t) lay.bytes[(size_t) l]);
         }
     for (auto& f : free_) std::reverse(f.begin(), f.end());   // taken from the back: the lowest slot first
     cache_.set_max_piece(max_alloc_bytes());   // in pieces where the tier passes the device's largest allocation
-    if (!cache_.open_sized(slot_bytes, L, E, err)) return false;
+    if (!slot_bytes.empty() && !cache_.open_sized(slot_bytes, L, E, err)) return false;
     n_slots_ = (int64_t) slot_bytes.size();
     // every expert has its slot and VRAM is left beside the tier: the prompt's buffers there, for the longest chunk
     // they fit (prompt_borrow then lends no slot, so the prompt reads no expert from RAM)
@@ -818,67 +990,23 @@ bool PlainModel::open_experts(std::string& err) {
     ws.k = s.n_expert_used;
     ws.max_t = opt_.max_t;
     MoeWindowTier tier;
-    tier.cache_base = cache_.device_slot(0);
+    tier.cache_base = n_slots_ > 0 ? cache_.device_slot(0) : nullptr;
     tier.blob = (int64_t) lay.max_blob;
     if (!win_.init(ws, tier, err)) return false;
     win_.sink()->pcie_mode = 2;   // the PCIe share staged by the copy kernel inside the window (the split's timing)
 
-    disp_.pool = pool_.get();
-    disp_.src = src_.get();
+    disp_.pool = pool_;
+    disp_.src = src_;
     disp_.n_expert = E;
     disp_.cache = &cache_;
-    disp_.cache_base = cache_.device_slot(0);
+    disp_.cache_base = tier.cache_base;
     disp_.cache_blob = (int64_t) lay.max_blob;
-    disp_.cache_slot_off = cache_.slot_offsets();
+    disp_.cache_slot_off = n_slots_ > 0 ? cache_.slot_offsets() : nullptr;
     disp_.host_res = res_.data();
     disp_.plan = win_.sink();
     disp_.pcie_num = 0;
     if (opt_.adapt_every > 0 && opt_.adapt_swaps > 0) disp_.usage.assign((size_t) (L * E), 0.0f);
-    // the split of the missed experts between the CPU and PCIe (after Project Maya's CPU lane): the times measured now,
-    // while no expert is in VRAM; only from pinned RAM
-    // WSL 2: an RTX 2050 there failed at this point with CUDA error 700 (an illegal address) while the experts' RAM
-    // was read by the GPU's kernels; --no-pcie-split started and answered.  The cause is not known, so under WSL 2 the
-    // split is off unless STRATA_WSL_PCIE_SPLIT=1 asks for it.
-    static const bool wsl_split = [] {
-        const char* v = std::getenv("STRATA_WSL_PCIE_SPLIT");
-        return v != nullptr && std::strtol(v, nullptr, 10) != 0;
-    }();
-    // (also after the RAM copy of what the VRAM tier does not hold is pinned, below: pinned_split)
-    auto pinned_split = [&]() {
-        if (opt_.pcie_split && strata::platform::under_wsl() && !wsl_split) {
-            std::fprintf(stderr, "strata plain: no PCIe split under WSL 2 (the GPU reading the experts' RAM failed "
-                                 "there; STRATA_WSL_PCIE_SPLIT=1 tries it): the CPU takes every missed expert\n");
-            return;
-        }
-        if (!opt_.pcie_split) return;
-        std::string why;
-        if (!measure_pcie_split(disp_, L, split_, why)) {
-            std::fprintf(stderr, "strata plain: no PCIe split (%s): the CPU takes every missed expert\n", why.c_str());
-            return;
-        }
-        disp_.pcie_split = &split_;
-        // the decode's PCIe share (its size from the times: pcie_split_m): chosen by the first windows (pcie_probe);
-        // STRATA_PLAIN_DECODE_PCIE=1 / 0: on / off
-        if (const char* v = std::getenv("STRATA_PLAIN_DECODE_PCIE")) {
-            disp_.pcie_num = std::strtol(v, nullptr, 10) != 0 ? 256 : 0;
-        } else {
-            disp_.pcie_num = 256;
-            pcie_probe_ = 0;
-        }
-        disp_.pcie_overlap = false;   // the window reads the PCIe share after its VRAM hits
-        bool any = false;
-        for (int f = 1; f <= 16 && !any; ++f) any = pcie_split_m(split_, false, f, f) > 0;
-        if (any && !src_->pcie_layer(split_.layer) && !src_->make_kernel_readable(why)) {
-            std::fprintf(stderr, "strata plain: the experts stay registered for copies (%s): the CPU takes every "
-                                 "missed expert\n", why.c_str());
-            disp_.pcie_split = nullptr;
-            disp_.pcie_num = 0;
-            pcie_probe_ = -1;
-        }
-        std::fprintf(stderr, "strata plain: PCIe split: an expert %.3f ms on the CPU, %.3f ms over PCIe, %.3f ms on "
-                             "the GPU%s\n", split_.c, split_.p, split_.q, any ? "" : " (the CPU takes them all)");
-    };
-    if (in_ram) pinned_split();
+    if (in_ram_) pinned_split();   // (also after the RAM copy of what no VRAM tier holds is pinned: finish_experts)
     // the adaptive tier's copy stream: its rounds bring experts in beside the windows (adapt)
     swap_cs_ = strata::gpu::stream_create();
     if (swap_cs_ == nullptr || !strata::gpu::event_create(&swap_ev_)) {
@@ -886,14 +1014,14 @@ bool PlainModel::open_experts(std::string& err) {
         return false;
     }
     // the tier from a profile, after the split's timing (which needs experts in RAM outside the VRAM): its ranking,
-    // each layer up to its slots
+    // each of this stage's layers up to its slots
     if (!opt_.profile.empty()) {
         // a profile of the trunk's layers serves a load with the MTP layer as well (its experts left to the
         // adaptive rule), and one with the MTP layer a load without it (its pairs dropped)
         int64_t ranked_slots = 0;
         std::string err2;
         if (!read_expert_profile(opt_.profile, L, E, prior_, ranked_slots, err)) {
-            const int64_t other = has_mtp_ ? L - 1 : L + 1;
+            const int64_t other = model_mtp_ ? L - 1 : L + 1;
             if (!read_expert_profile(opt_.profile, other, E, prior_, ranked_slots, err2)) return false;
             prior_.erase(std::remove_if(prior_.begin(), prior_.end(), [&](const auto& p) { return p.first >= L; }),
                          prior_.end());
@@ -911,6 +1039,7 @@ bool PlainModel::open_experts(std::string& err) {
         std::atomic<size_t> next{0};
         std::atomic<bool> bad{false};
         auto work = [&]() {
+            const OnDevice on(dev_);   // a thread's GPU is the first until it says otherwise
             uint8_t* buf = nullptr;
             if (!strata::gpu::alloc_host(&buf, (size_t) lay.max_blob)) { bad = true; return; }
             for (size_t i; !bad && (i = next.fetch_add(1)) < todo.size();) {
@@ -937,42 +1066,103 @@ bool PlainModel::open_experts(std::string& err) {
         std::fprintf(stderr, "strata plain: the VRAM tier filled from %s: %lld experts\n", opt_.profile.c_str(),
                      (long long) filled);
     }
-    // the experts that do not all fit in RAM: the ones the VRAM tier does not hold pinned there, as far as the RAM
-    // allows, the rest read in place (generate.cpp's resident RAM mode), so that a model which fits the RAM and the
-    // VRAM together reads none from the drive.  Without a profile each layer's tier takes its first experts, and the
-    // adaptive tier moves them.  On Level Zero the RAM beside them counts half the VRAM: the device's allocations are
-    // made by then, and on the B70 GLM-5.3-Flash ran with 88.5 GiB pinned here and 26 GiB left (2026-10-19).
-    if (!in_ram && !opt_.mmap_experts) {
-        auto* file = static_cast<FileExpertSource*>(src_.get());
-        if (opt_.profile.empty())
-            for (int64_t l = 0; l < L; ++l)
-                for (int32_t e = 0; e < (int32_t) E && !free_[(size_t) l].empty(); ++e)
-                    if (res_[(size_t) (l * E + e)] < 0 && !fill_slot(l, e, err)) return false;
-        std::vector<std::pair<int32_t, int32_t>> held;
+    // without a profile each layer's tier takes its first experts (the adaptive tier moves them), so that the RAM copy
+    // below leaves out what VRAM holds
+    if (!in_ram_ && !opt_.mmap_experts && opt_.profile.empty())
+        for (int64_t l : moe_local_)
+            for (int32_t e = 0; e < (int32_t) E && !free_[(size_t) l].empty(); ++e)
+                if (res_[(size_t) (l * E + e)] < 0 && !fill_slot(l, e, err)) return false;
+    // the slots the prompt path lends for its longest chunk (prompt_borrow): their experts are kept in RAM too
+    lend_from_ = -1;
+    if (opt_.prompt_chunk > 0 && prompt_dev_ == nullptr && n_slots_ > 1) {
+        uint64_t db = 0, hb = 0;
+        prompt_carve(opt_.prompt_chunk, pb_, nullptr, nullptr, db, hb);
+        const uint64_t* off = cache_.slot_offsets();
+        const int64_t lowest = std::max<int64_t>(n_slots_ / 2, cache_.last_piece_first());
+        lend_from_ = n_slots_;
+        while (off != nullptr && lend_from_ > lowest && off[n_slots_] - off[lend_from_] < db) --lend_from_;
+    }
+    if (prompt_dev_ != nullptr)
+        std::fprintf(stderr, "strata plain: the prompt's buffers beside the tier, chunks of up to %lld tokens\n",
+                     (long long) prompt_dev_T_);
+    free_b_ = free_b;
+    return true;
+}
+
+// The PCIe split of the missed experts between the CPU and PCIe (after Project Maya's CPU lane): the times measured
+// now, while no expert is in VRAM; only from pinned RAM.
+void PlainModel::pinned_split() {
+    // WSL 2: an RTX 2050 there failed at this point with CUDA error 700 (an illegal address) while the experts' RAM
+    // was read by the GPU's kernels; --no-pcie-split started and answered.  The cause is not known, so under WSL 2 the
+    // split is off unless STRATA_WSL_PCIE_SPLIT=1 asks for it.
+    static const bool wsl_split = [] {
+        const char* v = std::getenv("STRATA_WSL_PCIE_SPLIT");
+        return v != nullptr && std::strtol(v, nullptr, 10) != 0;
+    }();
+    if (opt_.pcie_split && strata::platform::under_wsl() && !wsl_split) {
+        std::fprintf(stderr, "strata plain: no PCIe split under WSL 2 (the GPU reading the experts' RAM failed "
+                             "there; STRATA_WSL_PCIE_SPLIT=1 tries it): the CPU takes every missed expert\n");
+        return;
+    }
+    if (!opt_.pcie_split || moe_local_.empty()) return;
+    std::string why;
+    if (!measure_pcie_split(disp_, n_moe_, split_, why)) {
+        std::fprintf(stderr, "strata plain: no PCIe split (%s): the CPU takes every missed expert\n", why.c_str());
+        return;
+    }
+    disp_.pcie_split = &split_;
+    // the decode's PCIe share (its size from the times: pcie_split_m): chosen by the first windows (pcie_probe);
+    // STRATA_PLAIN_DECODE_PCIE=1 / 0: on / off
+    if (const char* v = std::getenv("STRATA_PLAIN_DECODE_PCIE")) {
+        disp_.pcie_num = std::strtol(v, nullptr, 10) != 0 ? 256 : 0;
+    } else {
+        disp_.pcie_num = 256;
+        pcie_probe_ = 0;
+    }
+    disp_.pcie_overlap = false;   // the window reads the PCIe share after its VRAM hits
+    bool any = false;
+    for (int f = 1; f <= 16 && !any; ++f) any = pcie_split_m(split_, false, f, f) > 0;
+    if (any && !src_->pcie_layer(split_.layer) && !src_->make_kernel_readable(why)) {
+        std::fprintf(stderr, "strata plain: the experts stay registered for copies (%s): the CPU takes every "
+                             "missed expert\n", why.c_str());
+        disp_.pcie_split = nullptr;
+        disp_.pcie_num = 0;
+        pcie_probe_ = -1;
+    }
+    std::fprintf(stderr, "strata plain: PCIe split: an expert %.3f ms on the CPU, %.3f ms over PCIe, %.3f ms on "
+                         "the GPU%s\n", split_.c, split_.p, split_.q, any ? "" : " (the CPU takes them all)");
+}
+
+// After every stage's tier: the experts that do not all fit in RAM, the ones no VRAM tier holds pinned there, as far
+// as the RAM allows, the rest read in place (generate.cpp's resident RAM mode), so that a model which fits the RAM and
+// the VRAM together reads none from the drive.  On Level Zero the RAM beside them counts half the VRAM: the devices'
+// allocations are made by then, and on the B70 GLM-5.3-Flash ran with 88.5 GiB pinned here and 26 GiB left
+// (2026-10-19).
+void PlainModel::finish_experts() {
+    const int64_t E = spec_.n_expert;
+    if (!in_ram_ && !opt_.mmap_experts) {
+        auto* file = static_cast<FileExpertSource*>(src_);
+        std::vector<std::pair<int32_t, int32_t>> held, others;
         std::vector<int32_t> slots;
-        for (int64_t l = 0; l < L; ++l)
-            for (int64_t e = 0; e < E; ++e)
-                if (res_[(size_t) (l * E + e)] >= 0) {
-                    held.emplace_back((int32_t) l, (int32_t) e);
-                    slots.push_back(res_[(size_t) (l * E + e)]);
-                }
-        // the slots the prompt path lends for its longest chunk (prompt_borrow): their experts are kept in RAM too
-        int64_t lend_from = -1;
-        if (opt_.prompt_chunk > 0 && prompt_dev_ == nullptr) {
-            uint64_t db = 0, hb = 0;
-            prompt_carve(opt_.prompt_chunk, pb_, nullptr, nullptr, db, hb);
-            const uint64_t* off = cache_.slot_offsets();
-            const int64_t lowest = std::max<int64_t>(n_slots_ / 2, cache_.last_piece_first());
-            lend_from = n_slots_;
-            while (off != nullptr && lend_from > lowest && off[n_slots_] - off[lend_from] < db) --lend_from;
+        uint64_t headroom = 8ull << 30;
+        for (PlainModel* st : chain()) {
+            for (int64_t l : st->moe_local_)
+                for (int64_t e = 0; e < E; ++e)
+                    if (const int32_t r = st->res_[(size_t) (l * E + e)]; r >= 0) {
+                        if (st == this) {
+                            held.emplace_back((int32_t) l, (int32_t) e);
+                            slots.push_back(r);
+                        } else {
+                            others.emplace_back((int32_t) l, (int32_t) e);
+                        }
+                    }
+            if (st->level_zero_) headroom += st->total_b_ / 2;
         }
         // the order the RAM takes them in: the profile's, else each layer's experts in turn
         std::vector<std::pair<int32_t, int32_t>> order = prior_;
         if (order.empty())
             for (int32_t e = 0; e < (int32_t) E; ++e)
-                for (int32_t l = 0; l < (int32_t) L; ++l) order.emplace_back(l, e);
-        uint64_t headroom = 8ull << 30;
-        if (level_zero) headroom += total_b / 2;
+                for (int32_t l = 0; l < (int32_t) n_moe_; ++l) order.emplace_back(l, e);
         // STRATA_RESIDENT_PIN=0: never page-locked, 1: always; else as the RAM allows (#11), as generate.cpp
         using Pin = FileExpertSource::Pin;
         const char* pin_env = std::getenv("STRATA_RESIDENT_PIN");
@@ -980,7 +1170,7 @@ bool PlainModel::open_experts(std::string& err) {
                         : pin_env != nullptr && std::strcmp(pin_env, "1") == 0 ? Pin::on
                                                                                : Pin::automatic;
         std::string why;
-        if (!file->pin_complement(n_slots_, held, slots, why, pin, {}, lend_from, headroom,
+        if (!file->pin_complement(n_slots_, held, slots, why, pin, others, lend_from_, headroom,
                                   FileExpertSource::kResidentWhatFits, &order)) {
             std::fprintf(stderr, "strata plain: the experts outside the VRAM tier do not fit in RAM (%s): read in "
                                  "place\n", why.c_str());
@@ -988,28 +1178,66 @@ bool PlainModel::open_experts(std::string& err) {
             if (opt_.adapt_every > 0 && opt_.adapt_swaps > 0 && !file->reserve_exchanges(opt_.adapt_swaps, why))
                 std::fprintf(stderr, "strata plain: no exchange buffers (%s): an expert the adaptive tier evicts is "
                                      "read in place after\n", why.c_str());
-            complement_ = file;
             std::fprintf(stderr, "strata plain: the experts outside the VRAM tier in RAM: %.2f GiB (%lld experts%s)\n",
                          (double) file->resident_bytes() / 1073741824.0, (long long) file->resident_count(),
                          file->complement_pinned() ? ", pinned" : "");
-            if (file->complement_pinned()) pinned_split();   // the GPU reads its share of the misses from there
+            for (PlainModel* st : chain()) {
+                const OnDevice on(st->dev_);
+                st->complement_ = file;
+                if (file->complement_pinned()) st->pinned_split();   // the GPU reads its share of the misses there
+            }
         }
     }
-
-    std::fprintf(stderr, "strata plain: %lld MoE layers x %lld experts, %lld VRAM slots (%lld a layer, %.2f GiB), "
-                         "%d CPU workers, %lld MiB free before the tier\n",
-                 (long long) L, (long long) E, (long long) n_slots_, (long long) q, (double) cache_.bytes() / 1073741824.0,
-                 pool_->workers(), (long long) (free_b >> 20));
-    if (prompt_dev_ != nullptr)
-        std::fprintf(stderr, "strata plain: the prompt's buffers beside the tier, chunks of up to %lld tokens\n",
-                     (long long) prompt_dev_T_);
-    return true;
+    for (PlainModel* st : chain()) {
+        const OnDevice on(st->dev_);
+        std::fprintf(stderr, "strata plain: %lld MoE layers x %lld experts, %lld VRAM slots (%lld a layer, %.2f GiB), "
+                             "%d CPU workers, %lld MiB free before the tier\n",
+                     (long long) st->moe_local_.size(), (long long) E, (long long) st->n_slots_,
+                     (long long) (st->moe_local_.empty() ? 0 : st->n_slots_ / (int64_t) st->moe_local_.size()),
+                     (double) st->cache_.bytes() / 1073741824.0, st->pool_->workers(), (long long) (st->free_b_ >> 20));
+    }
 }
 
 int64_t PlainModel::resident() const {
     int64_t n = 0;
     for (int32_t r : res_) n += r >= 0;
+    for (const auto& st : next_) n += st->resident();
     return n;
+}
+
+int64_t PlainModel::slots() const {
+    int64_t n = n_slots_;
+    for (const auto& st : next_) n += st->slots();
+    return n;
+}
+
+int64_t PlainModel::hits() const {
+    int64_t n = disp_.cache_hits;
+    for (const auto& st : next_) n += st->hits();
+    return n;
+}
+
+int64_t PlainModel::misses() const {
+    int64_t n = disp_.cache_refused;
+    for (const auto& st : next_) n += st->misses();
+    return n;
+}
+
+int64_t PlainModel::swaps() const {
+    int64_t n = swaps_total_;
+    for (const auto& st : next_) n += st->swaps();
+    return n;
+}
+
+std::vector<int64_t> PlainModel::split_points() const {
+    std::vector<int64_t> at(next_.size());
+    for (size_t i = 0; i < next_.size(); ++i) at[i] = next_[i]->lb_;
+    return at;
+}
+
+void PlainModel::set_sampler(const strata::kernels::SamplerParams& sp) {
+    sampler_ = sp;
+    for (auto& st : next_) st->sampler_ = sp;
 }
 
 void PlainModel::dump_routes(int64_t layer, const int32_t* ids, int64_t n, int64_t k) {
@@ -1027,7 +1255,8 @@ std::vector<PlainModel::StatePart> PlainModel::state_parts(int64_t tokens) const
     std::vector<StatePart> parts;
     const ModelSpec& s = spec_;
     tokens = std::clamp<int64_t>(tokens, 0, opt_.max_cells);
-    for (size_t g = 0; g < gdn_state_.size(); ++g) {   // the recurrent layers: whole
+    for (size_t g = 0; g < gdn_state_.size(); ++g) {   // the recurrent layers: whole (this stage's)
+        if (gdn_state_[g] == nullptr) continue;
         parts.push_back({gdn_state_[g], state_bytes_});
         parts.push_back({gdn_conv_[g], conv_bytes_});
     }
@@ -1035,6 +1264,7 @@ std::vector<PlainModel::StatePart> PlainModel::state_parts(int64_t tokens) const
         const int64_t KVR = s.kv_lora_rank, ID = s.idx_key_length;
         const int64_t pools = std::min<int64_t>(g_max_blocks_, tokens / s.idx_kpool + 1);
         for (size_t d = 0; d < g_latent_.size(); ++d) {
+            if (g_latent_[d] == nullptr) continue;
             parts.push_back({g_latent_[d], (size_t) (tokens * KVR) * 2});
             parts.push_back({g_idx_cache_[d], (size_t) (tokens * 2 * ID) * 4});
             parts.push_back({g_pooled_[d], (size_t) (pools * ID) * 4});
@@ -1047,6 +1277,7 @@ std::vector<PlainModel::StatePart> PlainModel::state_parts(int64_t tokens) const
     const int64_t pages = std::min<int64_t>(n_pages_, (tokens + qs.page_size - 1) / qs.page_size);
     const size_t page = (size_t) (qs.n_head_kv * qs.page_size * qs.head_dim) * 2;
     for (size_t a = 0; a < k_pool_.size(); ++a) {
+        if (k_pool_[a] == nullptr) continue;
         parts.push_back({k_pool_[a], (size_t) pages * page});
         parts.push_back({v_pool_[a], (size_t) pages * page});
     }
@@ -1062,59 +1293,76 @@ size_t PlainModel::Snapshot::bytes() const {
 size_t PlainModel::state_bytes(int64_t tokens) const {
     size_t n = 0;
     for (const StatePart& p : state_parts(tokens)) n += p.bytes;
+    for (const auto& st : next_) n += st->state_bytes(tokens);
     return n;
 }
 
+// Every stage's parts in order, each copied on its own GPU
 bool PlainModel::save_state(int64_t tokens, Snapshot& snap, std::string& err) {
-    if (!settle_swaps(true, err)) return false;
-    if (!strata::gpu::stream_sync(cs_)) {
-        err = std::string("plain model: ") + strata::gpu::last_error();
-        return false;
-    }
-    const std::vector<StatePart> parts = state_parts(tokens);
     snap.tokens = tokens;
-    snap.parts.resize(parts.size());
-    for (size_t i = 0; i < parts.size(); ++i) {
-        snap.parts[i].resize(parts[i].bytes);
-        if (parts[i].bytes > 0 && !strata::gpu::copy(snap.parts[i].data(), parts[i].dev, parts[i].bytes)) {
-            err = std::string("plain model: saving the state: ") + strata::gpu::last_error();
+    snap.parts.clear();
+    for (PlainModel* st : chain()) {
+        const OnDevice on(st->dev_);
+        if (!st->settle_swaps(true, err)) return false;
+        if (!strata::gpu::stream_sync(st->cs_)) {
+            err = std::string("plain model: ") + strata::gpu::last_error();
             return false;
+        }
+        for (const StatePart& p : st->state_parts(tokens)) {
+            snap.parts.emplace_back(p.bytes);
+            if (p.bytes > 0 && !strata::gpu::copy(snap.parts.back().data(), p.dev, p.bytes)) {
+                err = std::string("plain model: saving the state: ") + strata::gpu::last_error();
+                return false;
+            }
         }
     }
     return true;
 }
 
 bool PlainModel::restore_state(const Snapshot& snap, std::string& err) {
-    if (!settle_swaps(true, err)) return false;
-    const std::vector<StatePart> parts = state_parts(snap.tokens);
-    if (parts.size() != snap.parts.size()) { err = "plain model: a state of another model"; return false; }
-    for (size_t i = 0; i < parts.size(); ++i)
-        if (parts[i].bytes != snap.parts[i].size()) { err = "plain model: a state of another shape"; return false; }
-    if (!strata::gpu::stream_sync(cs_)) {
-        err = std::string("plain model: ") + strata::gpu::last_error();
-        return false;
-    }
-    for (size_t i = 0; i < parts.size(); ++i)
-        if (parts[i].bytes > 0 && !strata::gpu::copy(parts[i].dev, snap.parts[i].data(), parts[i].bytes)) {
-            err = std::string("plain model: restoring the state: ") + strata::gpu::last_error();
+    size_t i = 0, n = 0;
+    for (PlainModel* st : chain()) n += st->state_parts(snap.tokens).size();
+    if (n != snap.parts.size()) { err = "plain model: a state of another model"; return false; }
+    for (PlainModel* st : chain())
+        for (const StatePart& p : st->state_parts(snap.tokens))
+            if (p.bytes != snap.parts[i++].size()) { err = "plain model: a state of another shape"; return false; }
+    i = 0;
+    for (PlainModel* st : chain()) {
+        const OnDevice on(st->dev_);
+        if (!st->settle_swaps(true, err)) return false;
+        if (!strata::gpu::stream_sync(st->cs_)) {
+            err = std::string("plain model: ") + strata::gpu::last_error();
             return false;
         }
-    cur_ = -1;
-    drafts_.clear();
-    mtp_h_set_ = false;
+        for (const StatePart& p : st->state_parts(snap.tokens)) {
+            if (p.bytes > 0 && !strata::gpu::copy(p.dev, snap.parts[i].data(), p.bytes)) {
+                err = std::string("plain model: restoring the state: ") + strata::gpu::last_error();
+                return false;
+            }
+            ++i;
+        }
+        st->cur_ = -1;
+        st->drafts_.clear();
+        st->mtp_h_set_ = false;
+    }
     return true;
 }
 
 bool PlainModel::reset(std::string& err) {
+    for (auto& st : next_) {
+        const OnDevice on(st->dev_);
+        if (!st->reset(err)) return false;
+    }
     if (glm_) return reset_glm5(err);
     const ModelSpec& s = spec_;
     bool ok = true;
-    for (float* p : gdn_state_) ok = ok && strata::gpu::memset(p, 0, state_bytes_);
-    for (float* p : gdn_conv_) ok = ok && strata::gpu::memset(p, 0, conv_bytes_);
+    for (float* p : gdn_state_) ok = ok && (p == nullptr || strata::gpu::memset(p, 0, state_bytes_));
+    for (float* p : gdn_conv_) ok = ok && (p == nullptr || strata::gpu::memset(p, 0, conv_bytes_));
     const k::QsaShapes qs = attn_shapes(s, nkv_);
     const size_t pool = (size_t) (n_pages_ * qs.n_head_kv * qs.page_size * qs.head_dim) * 2;
     for (size_t i = 0; i < k_pool_.size(); ++i)
-        ok = ok && strata::gpu::memset(k_pool_[i], 0, pool) && strata::gpu::memset(v_pool_[i], 0, pool);
+        ok = ok && (k_pool_[i] == nullptr ||
+                    (strata::gpu::memset(k_pool_[i], 0, pool) && strata::gpu::memset(v_pool_[i], 0, pool)));
     cur_ = -1;
     drafts_.clear();
     if (!ok) err = "plain model: resetting the state failed";
@@ -1267,12 +1515,16 @@ bool PlainModel::record_window(int T, strata::gpu::Stream cs, std::string& err) 
     const int64_t N = s.n_embd, NH = s.n_head;
     const float eps = (float) s.rms_eps;
     const int64_t NKV = attn_shapes(s, nkv_).n_head_kv;
-    k::copy_from_mapped(x_, m_emb_, (int64_t) T * N, cs);
+    k::copy_from_mapped(x_, first() ? m_emb_ : m_in_, (int64_t) T * N, cs);   // the embeddings, or the rows handed on
     k::copy_i32_from_mapped(step_, m_step_, (int64_t) T * k::kStepCount, cs);
     k::copy_i32_from_mapped(pos_, m_pos_, (int64_t) opt_.max_t * (NH + NKV), cs);
     uint32_t ring = 0;
-    for (int64_t l = 0; l < s.n_layer; ++l)
+    for (int64_t l = lb_; l < le_; ++l)
         if (!record_block(blocks_[(size_t) l], s.moe_index(l), T, ring, segs_[(size_t) T], cs, err)) return false;
+    if (!last()) {   // the rows to the next stage
+        k::copy_from_mapped(m_hand_, x_, (int64_t) T * N, cs);
+        return true;
+    }
     k::native_qsa_rms_norm_weighted(x_, out_norm_, hn_, (int) N, T, eps, cs);
     head_logits(hn_, T, cs);   // the tokens are picked after the graph (forward), with the run's sampler
     return true;
@@ -1357,13 +1609,14 @@ bool PlainModel::record(int T, bool mtp, std::string& err) {
 }
 
 // The window's inputs in the mapped staging: the tokens' embedding rows, their step records and rotary positions.
-bool PlainModel::stage(const int32_t* tokens, int T, int64_t pos, std::string& err) {
+bool PlainModel::stage(const int32_t* tokens, int T, int64_t pos, std::string& err, bool emb) {
     const ModelSpec& s = spec_;
     const int64_t N = s.n_embd, NH = s.n_head;
     const k::QsaShapes qs = attn_shapes(s, nkv_);
     for (int t = 0; t < T; ++t) {
         if (tokens[t] < 0 || tokens[t] >= n_vocab_) { err = "plain model: a token is out of the vocabulary"; return false; }
-        if (!k::cpu::native_row_to_float(emb_type_, emb_ + (size_t) tokens[t] * emb_row_, h_emb_ + (size_t) t * N, N)) {
+        if (emb &&
+            !k::cpu::native_row_to_float(emb_type_, emb_ + (size_t) tokens[t] * emb_row_, h_emb_ + (size_t) t * N, N)) {
             err = "plain model: the embedding row could not be dequantized";
             return false;
         }
@@ -1390,21 +1643,39 @@ bool PlainModel::launch_serve(strata::gpu::Graph* g, std::vector<strata::gpu::Gr
 }
 
 bool PlainModel::forward(const int32_t* tokens, int T, int64_t pos, int32_t* out, float* logits, std::string& err) {
-    const ModelSpec& s = spec_;
     if (T < 1 || T > opt_.max_t || pos < 0 || pos + T > opt_.max_cells) {
         err = "plain model: the window is out of range";
         return false;
     }
-    if (!record(T, false, err) || !settle_swaps(false, err) || !stage(tokens, T, pos, err)) return false;
-    const int64_t L = s.n_moe_layers();
-    std::vector<int64_t> layers((size_t) L);
-    for (int64_t l = 0; l < L; ++l) layers[(size_t) l] = l;
+    const float* hand = nullptr;   // each stage's rows to the next
+    for (PlainModel* st : chain()) {
+        const OnDevice on(st->dev_);
+        if (!st->stage_forward(tokens, T, pos, hand, err)) return false;
+        hand = st->h_hand_;
+    }
+    PlainModel& t = tail();
+    const OnDevice on(t.dev_);
+    for (int i = 0; i < T; ++i) out[i] = ((volatile int32_t*) t.h_out_)[i];
+    if (logits != nullptr && !strata::gpu::copy(logits, t.logits_, (size_t) T * (size_t) n_vocab_ * 4)) {
+        err = "plain model: reading the logits failed";
+        return false;
+    }
+    t.last_T_ = T;
+    t.mtp_h_set_ = false;
+    return true;
+}
+
+bool PlainModel::stage_forward(const int32_t* tokens, int T, int64_t pos, const float* hand_in, std::string& err) {
+    if (!record(T, false, err) || !settle_swaps(false, err) || !stage(tokens, T, pos, err, first())) return false;
+    if (hand_in != nullptr) std::memcpy(h_in_, hand_in, (size_t) T * (size_t) hand_w_ * 4);
     pcie_probe_before();
     const auto t0 = std::chrono::steady_clock::now();
-    if (!launch_serve(exec_[(size_t) T], segs_[(size_t) T], L, layers.data(), T, err)) return false;
-    k::SamplerParams sp = sampler_;
-    sp.counter = (uint64_t) pos;   // row t's draw: position pos + t
-    k::sample_tokens(logits_, T, (int) n_vocab_, nullptr, 0, sp, m_out_, cs_);
+    if (!launch_serve(exec_[(size_t) T], segs_[(size_t) T], moe_trunk_, moe_local_.data(), T, err)) return false;
+    if (last()) {
+        k::SamplerParams sp = sampler_;
+        sp.counter = (uint64_t) pos;   // row t's draw: position pos + t
+        k::sample_tokens(logits_, T, (int) n_vocab_, nullptr, 0, sp, m_out_, cs_);
+    }
     if (!strata::gpu::stream_sync(cs_)) {
         err = std::string("plain model: the window: ") + strata::gpu::last_error();
         return false;
@@ -1414,13 +1685,6 @@ bool PlainModel::forward(const int32_t* tokens, int T, int64_t pos, int32_t* out
         err = std::string("plain model: the CPU experts: ") + (disp_.fail ? disp_.fail : "failed");
         return false;
     }
-    for (int t = 0; t < T; ++t) out[t] = ((volatile int32_t*) h_out_)[t];
-    if (logits != nullptr && !strata::gpu::copy(logits, logits_, (size_t) T * (size_t) n_vocab_ * 4)) {
-        err = "plain model: reading the logits failed";
-        return false;
-    }
-    last_T_ = T;
-    mtp_h_set_ = false;
     ++windows_;
     tokens_since_adapt_ += T;
     if (!disp_.usage.empty() && windows_ % opt_.adapt_every == 0 && !adapt(err)) return false;
@@ -1489,6 +1753,10 @@ bool PlainModel::mtp_chain(int want, int64_t pos, std::string& err) {
 }
 
 bool PlainModel::spec_start(int32_t first, int64_t pos, std::string& err) {
+    if (!next_.empty()) {   // the MTP layer is the last stage's
+        const OnDevice on(tail().dev_);
+        return tail().spec_start(first, pos, err);
+    }
     drafts_.clear();
     cur_ = first;
     cur_pos_ = pos;
@@ -1508,6 +1776,10 @@ bool PlainModel::spec_start(int32_t first, int64_t pos, std::string& err) {
 
 bool PlainModel::spec_step(const std::vector<int32_t>& stop, int64_t limit, int32_t* emitted, int& n_emit, float* logits,
                            std::string& err, const int32_t* follow) {
+    if (!next_.empty()) {   // the drafts are the last stage's; its window goes through every stage (root_->forward)
+        const OnDevice on(tail().dev_);
+        return tail().spec_step(stop, limit, emitted, n_emit, logits, err, follow);
+    }
     n_emit = 0;
     if (cur_ < 0) { err = "plain model: spec_step before spec_start"; return false; }
     // the window: the pending token and the drafts that fit the context and the limit
@@ -1519,7 +1791,7 @@ bool PlainModel::spec_step(const std::vector<int32_t>& stop, int64_t limit, int3
     for (int i = 0; i < nd; ++i) win[i + 1] = drafts_[(size_t) i];
     const int T = nd + 1;
     const auto t0 = std::chrono::steady_clock::now();
-    if (!forward(win, T, cur_pos_, out, logits, err)) return false;
+    if (!root_->forward(win, T, cur_pos_, out, logits, err)) return false;
     const auto t1 = std::chrono::steady_clock::now();
     spec_ms_check_ += std::chrono::duration<double, std::milli>(t1 - t0).count();
     if (follow != nullptr)   // --spec-follow: the continuation in place of the window's picks
@@ -1535,14 +1807,7 @@ bool PlainModel::spec_step(const std::vector<int32_t>& stop, int64_t limit, int3
     for (int j = 0; j <= n; ++j) emitted[j] = out[j];
     n_emit = n + 1;
     // the recurrent states back to the last accepted row's (the attention's later cells are rewritten in turn)
-    if (n < T - 1) {
-        for (size_t g = 0; g < gdn_state_.size(); ++g)
-            if (!strata::gpu::copy_async(gdn_state_[g], gdn_snap_[g][(size_t) n], state_bytes_, cs_) ||
-                !strata::gpu::copy_async(gdn_conv_[g], conv_snap_[g][(size_t) n], conv_bytes_, cs_)) {
-                err = std::string("plain model: restoring the recurrent states: ") + strata::gpu::last_error();
-                return false;
-            }
-    }
+    if (n < T - 1 && !root_->rollback(n, err)) return false;
     // the MTP layer catches up over the accepted rows (row t: the window's trunk row t and the token after it), whose
     // last row drafts the token after the new pending one; then the chain
     const int64_t pos = cur_pos_;
@@ -1560,6 +1825,20 @@ bool PlainModel::spec_step(const std::vector<int32_t>& stop, int64_t limit, int3
     const bool ok = mtp_chain(n_snap_, cur_pos_ + 1, err);
     spec_ms_draft_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
     return ok;
+}
+
+bool PlainModel::rollback(int n, std::string& err) {
+    for (PlainModel* st : chain()) {
+        const OnDevice on(st->dev_);
+        for (size_t g = 0; g < st->gdn_state_.size(); ++g)
+            if (st->gdn_state_[g] != nullptr &&
+                (!strata::gpu::copy_async(st->gdn_state_[g], st->gdn_snap_[g][(size_t) n], st->state_bytes_, st->cs_) ||
+                 !strata::gpu::copy_async(st->gdn_conv_[g], st->conv_snap_[g][(size_t) n], st->conv_bytes_, st->cs_))) {
+                err = std::string("plain model: restoring the recurrent states: ") + strata::gpu::last_error();
+                return false;
+            }
+    }
+    return true;
 }
 
 // One of `layer`'s free slots takes `expert`, read from the expert source (blocking: between windows, or at load).
@@ -1580,8 +1859,14 @@ bool PlainModel::fill_slot(int64_t layer, int32_t expert, std::string& err) {
 bool PlainModel::save_profile(const std::string& path, std::string& err) const {
     const int64_t L = n_moe_, E = spec_.n_expert;
     std::vector<uint8_t> resident((size_t) (L * E), 0);
+    std::vector<double> heat = heat_;
     for (size_t i = 0; i < res_.size(); ++i) resident[i] = res_[i] >= 0;
-    return write_expert_profile(path, L, E, rank_learned_profile(L, E, resident, heat_, prior_), err);
+    for (const auto& st : next_)   // every stage's tier and counts (each counts its own layers)
+        for (size_t i = 0; i < resident.size(); ++i) {
+            resident[i] = resident[i] || st->res_[i] >= 0;
+            heat[i] += st->heat_[i];
+        }
+    return write_expert_profile(path, L, E, rank_learned_profile(L, E, resident, heat, prior_), err);
 }
 
 // XeStrata's adaptive tier (generate.cpp's `adapt`): per MoE layer, a missing expert routed at least twice (decayed
@@ -1633,6 +1918,7 @@ bool PlainModel::adapt(std::string& err, int64_t max_swaps) {
     // the RAM tier of what VRAM does not hold: an evicted expert goes back into the RAM copy, in the place of the one
     // that comes in (FileExpertSource's exchanges), read back from its slot before the slot is written; the copy
     // keeps it from the exchange buffer until the new one has landed (settle_swaps commits them)
+    int64_t exchanged = 0;
     if (complement_ != nullptr && complement_->exchange_capacity() > 0) {
         int64_t q = 0;
         for (const Swap& w : swaps) {
@@ -1662,6 +1948,7 @@ bool PlainModel::adapt(std::string& err, int64_t max_swaps) {
             }
             ++q;
         }
+        exchanged = q;
     }
     for (const Swap& w : swaps) {
         if (w.out < 0) {
@@ -1694,6 +1981,9 @@ bool PlainModel::adapt(std::string& err, int64_t max_swaps) {
         return false;
     }
     for (float& v : disp_.usage) v *= opt_.adapt_decay;
+    // with a layer split the stages share the RAM copy's exchange buffers, and a stage's commit takes every staged
+    // exchange: each stage's land before the next stage's round
+    if (exchanged > 0 && !root_->next_.empty()) return settle_swaps(true, err);
     return true;
 }
 

@@ -33,6 +33,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <stdexcept>
 #include <vector>
@@ -48,7 +49,7 @@ int file_type(int t) { return t == k::kNativeQ6KRows ? 14 : t == k::kNativeQ8Row
 }  // namespace
 
 bool PlainModel::prompt_chunks_glm5(const int32_t* tokens, int64_t n, int64_t pos, int32_t* out, float* logits,
-                                    std::string& err) {
+                                    std::string& err, int64_t c_begin, int64_t c_end, const float* hand_in) {
     PromptBufs& P = pb_;
     const ModelSpec& s = spec_;
     const int64_t N = s.n_embd, H = s.n_head, S = s.kda_head_dim, C = H * S, E = s.n_expert, K = s.n_expert_used;
@@ -119,12 +120,12 @@ bool PlainModel::prompt_chunks_glm5(const int32_t* tokens, int64_t n, int64_t po
     try {
         const int64_t L = n_moe_;
         std::vector<int32_t> routes(disp_.usage.empty() ? 0 : (size_t) (L * P.T * K));
-        for (int64_t c0 = 0; c0 < n; c0 += P.T) {
+        for (int64_t c0 = c_begin; c0 < std::min(n, c_end); c0 += P.T) {
             const int64_t T = std::min<int64_t>(P.T, n - c0), p0 = pos + c0;
             for (int64_t t = 0; t < T; ++t) {
                 const int32_t tok = tokens[c0 + t];
                 if (tok < 0 || tok >= n_vocab_ ||
-                    !k::cpu::native_row_to_float(emb_type_, emb_ + (size_t) tok * emb_row_, P.emb + t * N, N)) {
+                    (first() && !k::cpu::native_row_to_float(emb_type_, emb_ + (size_t) tok * emb_row_, P.emb + t * N, N))) {
                     err = "plain prompt: a token is out of the vocabulary";
                     return false;
                 }
@@ -132,14 +133,17 @@ bool PlainModel::prompt_chunks_glm5(const int32_t* tokens, int64_t n, int64_t po
             }
             P.h_dense_bounds[0] = 0;
             P.h_dense_bounds[1] = (int32_t) T;
-            if (!strata::gpu::copy_async(P.x, P.emb, (size_t) (T * N) * 4, cs) ||
+            // the four streams from the embeddings, or as the stage before left them
+            if (!first()) std::memcpy(P.h_hand, hand_in, (size_t) (T * kHC * N) * 4);
+            if (!(first() ? strata::gpu::copy_async(P.x, P.emb, (size_t) (T * N) * 4, cs)
+                          : strata::gpu::copy_async(P.g_hs, P.h_hand, (size_t) (T * kHC * N) * 4, cs)) ||
                 !strata::gpu::copy_async(P.steps, P.h_steps, (size_t) (T * k::kStepCount) * 4, cs) ||
                 !strata::gpu::copy_async(P.dense_bounds, P.h_dense_bounds, 2 * sizeof(int32_t), cs)) {
                 err = std::string("plain prompt: staging: ") + strata::gpu::last_error();
                 return false;
             }
             k::glm5_idx_steps(P.steps, T, (int) s.idx_kpool, (int) s.idx_top_k, P.g_steps, cs);
-            k::glm5_hc_init(P.x, P.g_hs, N, T, cs);
+            if (first()) k::glm5_hc_init(P.x, P.g_hs, N, T, cs);
             mark(9);
             // hc_pre: the four streams' mixes, then the block's row, RMS-normed with `norm` into hn
             auto hc_read = [&](const W& fn, const float* scale, const float* base, const float* norm) {
@@ -154,7 +158,7 @@ bool PlainModel::prompt_chunks_glm5(const int32_t* tokens, int64_t n, int64_t po
                 k::glm5_swiglu_clamp(P.g_ffg, P.g_ffu, P.g_ffg, T * FW, b.clamp, cs);
                 dense(b.ffn_down, P.g_ffg, dst, T);
             };
-            for (int64_t l = 0; l < s.n_layer; ++l) {
+            for (int64_t l = lb_; l < le_; ++l) {
                 const GBlock& b = gblocks_[(size_t) l];
                 hc_read(b.hc_attn_fn, b.hc_attn_scale, b.hc_attn_base, b.attn_norm);
                 if (b.kda) {
@@ -251,13 +255,17 @@ bool PlainModel::prompt_chunks_glm5(const int32_t* tokens, int64_t n, int64_t po
             // the MTP layer after the trunk, its caches a cell ahead: row t pairs the trunk's normed row t with the
             // token after it (the prompt's last row with a stand-in, rewritten by spec_start once the token is picked).
             // Only its caches are wanted here, so of its block only the latent and the indexer's keys are made.
+            if (!last() && !strata::gpu::copy_async(P.h_hand, P.g_hs, (size_t) (T * kHC * N) * 4, cs)) {
+                err = std::string("plain prompt: the rows to the next GPU: ") + strata::gpu::last_error();
+                return false;
+            }
             const bool mtp_chunk = has_mtp_ && p0 + T < opt_.max_cells;
             const int64_t rows = mtp_chunk ? T : 1;   // the trunk's normed rows: every row for the MTP layer
-            if (mtp_chunk || c0 + T >= n) {
+            if (last() && (mtp_chunk || c0 + T >= n)) {
                 k::glm5_hc_mean(P.g_hs + (T - rows) * kHC * N, P.x, N, rows, cs);
                 k::native_qsa_rms_norm_weighted(P.x, out_norm_, P.hn, (int) N, (int) rows, eps, cs);
             }
-            if (c0 + T >= n) {   // the last token's logits, by the decode's head
+            if (last() && c0 + T >= n) {   // the last token's logits, by the decode's head
                 const float* last = P.hn + (rows - 1) * N;
                 k::native_quantize_q8_1(last, xq_, head_.n_in, 1, cs);
                 k::native_mmvq(head_.type, head_.data, xq_, logits_, head_.n_in, head_.n_out, 1, cs);
@@ -313,7 +321,7 @@ bool PlainModel::prompt_chunks_glm5(const int32_t* tokens, int64_t n, int64_t po
                     const int64_t win = (c0 + t0) / W;
                     const int64_t rounds = (windows_ + last + 1) / opt_.adapt_every - (windows_ + win) / opt_.adapt_every;
                     const float wgt = std::pow(opt_.adapt_decay, (float) rounds);
-                    for (int64_t ml = 0; ml < L; ++ml)
+                    for (int64_t ml : moe_local_)   // this stage's layers' routes
                         for (int64_t i = t0 * K; i < std::min(T, t0 + W) * K; ++i)
                             disp_.usage[(size_t) (ml * E + routes[(size_t) (ml * P.T * K + i)])] += wgt;
                 }
@@ -328,6 +336,7 @@ bool PlainModel::prompt_chunks_glm5(const int32_t* tokens, int64_t n, int64_t po
         err = std::string("plain prompt: ") + strata::gpu::last_error();
         return false;
     }
+    if (c_end < n) return true;   // a layer split's chunk: the stage's part of the prompt goes on with the next
     windows_ += (n + opt_.max_t - 1) / opt_.max_t;
     if (profile)
         std::fprintf(stderr, "strata plain: GLM prompt of %lld tokens: KDA %.1f ms (projections %.1f, convolutions and "
@@ -338,6 +347,7 @@ bool PlainModel::prompt_chunks_glm5(const int32_t* tokens, int64_t n, int64_t po
                      stage_ms[7], stage_ms[8], stage_ms[1], stage_ms[2], stage_ms[3], stage_ms[4], stage_ms[9], stage_ms[10], stage_ms[11],
                      (long long) rst.miss_n, (long long) rst.cpu_n, (long long) rst.cpu_rows);
     mtp_h_set_ = has_mtp_ && pos + n < opt_.max_cells;   // the trunk's last row is in mtp_h_ for spec_start
+    if (!last()) return true;
     *out = ((volatile int32_t*) h_out_)[0];
     if (logits != nullptr && !strata::gpu::copy(logits, logits_, (size_t) n_vocab_ * 4)) {
         err = "plain prompt: reading the logits failed";

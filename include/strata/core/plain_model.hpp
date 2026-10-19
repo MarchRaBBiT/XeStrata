@@ -95,6 +95,13 @@ struct PlainOptions {
     /// drafts were the fastest of one to three on the RX 9060 XT (16 and 8 GB), the B70 and the RTX 4070 (Ornith Q6_K
     /// and Q4_K_M, 2026-10-12).
     int spec = 3;
+    /// A layer split across the engine's GPUs (--layer-split): GPU 0 runs the blocks before split_at[0], GPU 1 those
+    /// from there to split_at[1], and so on, the last GPU the rest, the head and the MTP layer; `split_auto`: the points
+    /// chosen at load from each GPU's free memory.  Empty and false: one GPU, the current one.
+    std::vector<int64_t> split_at;
+    bool split_auto = false;
+    /// The engine's GPUs the later stages take (--split-device), in order; empty: the other cards
+    std::vector<int> split_devices;
 };
 
 // NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding): one object, its members grouped by what they serve
@@ -142,7 +149,7 @@ public:
     bool prompt(const int32_t* tokens, int64_t n, int64_t pos, int32_t* out, float* logits, std::string& err);
     /// How forward and prompt pick their tokens (greedy by default): each row's draw counted from its position, so a
     /// seed repeats a run.
-    void set_sampler(const strata::kernels::SamplerParams& sp) { sampler_ = sp; }
+    void set_sampler(const strata::kernels::SamplerParams& sp);
     /// Runs each dense product the prompt takes once, so the products' library has loaded its kernels before the
     /// first prompt (plain_prompt.cpp); nothing when the prompt runs in windows.
     bool prompt_warm(std::string& err);
@@ -150,7 +157,7 @@ public:
     bool prompt_int8() const;
 
     /// Drafts a window can check (0: no speculative decoding): spec - 1 when the model has its MTP layer.
-    int drafts() const { return has_mtp_ ? n_snap_ : 0; }
+    int drafts() const { return tail().has_mtp_ ? tail().n_snap_ : 0; }
     /// After prompt() (or the windows of a prompt): `first`, the token picked after it, at position `pos`, the next
     /// window's first token; the MTP layer reads it and drafts the tokens after it.
     bool spec_start(int32_t first, int64_t pos, std::string& err);
@@ -162,24 +169,69 @@ public:
     bool spec_step(const std::vector<int32_t>& stop, int64_t limit, int32_t* emitted, int& n_emit, float* logits,
                    std::string& err, const int32_t* follow = nullptr);
     /// The windows and the drafts they checked and accepted since the load, for the report.
-    int64_t spec_windows() const { return spec_windows_; }
-    int64_t spec_drafted() const { return spec_drafted_; }
-    int64_t spec_accepted() const { return spec_accepted_; }
+    int64_t spec_windows() const { return tail().spec_windows_; }
+    int64_t spec_drafted() const { return tail().spec_drafted_; }
+    int64_t spec_accepted() const { return tail().spec_accepted_; }
     /// The time spent in the windows that checked drafts, and in making the drafts (ms, since the load).
-    double spec_ms_check() const { return spec_ms_check_; }
-    double spec_ms_draft() const { return spec_ms_draft_; }
+    double spec_ms_check() const { return tail().spec_ms_check_; }
+    double spec_ms_draft() const { return tail().spec_ms_draft_; }
 
-    /// The VRAM tier, for the report: slots, slots holding an expert, and the routed entries it served so far.
-    int64_t slots() const { return n_slots_; }
+    /// The VRAM tier, for the report: slots, slots holding an expert, and the routed entries it served so far (every
+    /// GPU's, with a layer split).
+    int64_t slots() const;
     int64_t resident() const;
-    int64_t hits() const { return disp_.cache_hits; }
-    int64_t misses() const { return disp_.cache_refused; }
-    int64_t swaps() const { return swaps_total_; }
+    int64_t hits() const;
+    int64_t misses() const;
+    int64_t swaps() const;
+    /// The layer split's first blocks after GPU 0's (empty: one GPU).
+    std::vector<int64_t> split_points() const;
     /// Writes what this run learned as a profile (rank_learned_profile: the experts in VRAM now, then by the routing
     /// counted since the load, then by the profile it started from), for the next load's `profile`.
     bool save_profile(const std::string& path, std::string& err) const;
 
 private:
+    // The layer split: this stage runs blocks [lb_, le_) on the engine's GPU dev_ (-1: the current one).  The first
+    // stage (root_) owns the later ones (next_), the experts' RAM tier and the CPU pool, which they share; the public
+    // calls go through it.  A stage hands its rows to the next through mapped memory: x (n_embd a row), or GLM's four
+    // streams.
+    int64_t lb_ = 0, le_ = 0;
+    int dev_ = -1;
+    std::vector<int> split_devs_;   ///< the root's: the engine's GPUs the stages take, in order
+    PlainModel* root_ = this;
+    std::vector<std::unique_ptr<PlainModel>> next_;
+    bool first() const { return lb_ == 0; }
+    bool last() const { return le_ == spec_.n_layer; }
+    PlainModel& tail() { return next_.empty() ? *this : *next_.back(); }
+    const PlainModel& tail() const { return next_.empty() ? *this : *next_.back(); }
+    std::vector<PlainModel*> chain();
+    /// A later stage: blocks [lb, le) on GPU `dev`, the experts from root's tiers
+    bool load_stage(const PlainOptions& opt, PlainModel* root, int64_t lb, int64_t le, int dev, std::string& err);
+    /// The split's points from each GPU's free memory (split_auto)
+    bool split_auto_points(std::string& err);
+    /// The architecture's part of the load (the blocks of this stage), and after every stage's: the RAM copy of the
+    /// experts no GPU holds, each stage's PCIe split, the report
+    bool load_arch(std::string& err);
+    bool load_qwen(std::string& err);
+    void finish_experts();
+    void pinned_split();
+    /// One stage's part of a window: its blocks over the T rows (from `hand_in`, the previous stage's rows, after the
+    /// first), the last stage's picks into h_out_
+    bool stage_forward(const int32_t* tokens, int T, int64_t pos, const float* hand_in, std::string& err);
+    /// The recurrent states back to the state after row n (spec_step), every stage's
+    bool rollback(int n, std::string& err);
+    /// The file's MTP layer is run: by the last stage (has_mtp_); the rest keep the recurrent states' copies for it
+    bool model_mtp_ = false;
+    std::vector<int64_t> moe_local_;   ///< the MoE layers of this stage's blocks, the MTP layer's last
+    int64_t moe_trunk_ = 0;            ///< of them the trunk's: the window's rings
+    int64_t hand_w_ = 0;               ///< the hand-off's floats a row
+    float *h_in_ = nullptr, *m_in_ = nullptr;       ///< mapped: a later stage's input rows
+    float *h_hand_ = nullptr, *m_hand_ = nullptr;   ///< mapped: an earlier stage's output rows
+    bool in_ram_ = false;              ///< the experts in pinned RAM (an arena), else read in place
+    bool level_zero_ = false;
+    uint64_t total_b_ = 0;             ///< the GPU's memory
+    int64_t lend_from_ = -1;           ///< the slots the prompt path lends, for the RAM copy (finish_experts)
+    uint64_t free_b_ = 0;              ///< the free memory the tier was sized from, for the report
+
     struct W {   // one 2-D projection in VRAM, in its GGUF blocks (or the engine's row order for Q6_K)
         const void* data = nullptr;
         int type = -1;
@@ -209,8 +261,9 @@ private:
     bool upload_f32(const GgufModel& m, const std::string& name, uint64_t elements, const float*& out, std::string& err);
     bool open_experts(std::string& err);
     bool record(int T, bool mtp, std::string& err);
-    /// The window's inputs (embeddings, steps, positions) for `tokens` at pos .. pos + T - 1 into the mapped staging.
-    bool stage(const int32_t* tokens, int T, int64_t pos, std::string& err);
+    /// The window's inputs (embeddings, steps, positions) for `tokens` at pos .. pos + T - 1 into the mapped staging;
+    /// `emb` false: no embeddings (a later stage's window, which reads the rows handed on).
+    bool stage(const int32_t* tokens, int T, int64_t pos, std::string& err, bool emb = true);
     bool record_window(int T, strata::gpu::Stream cs, std::string& err);
     /// The head over T normed rows `x` into logits_.
     void head_logits(const float* x, int T, strata::gpu::Stream cs);
@@ -280,6 +333,7 @@ private:
         int32_t* h_dense_bounds = nullptr;
         uint8_t* h_nact = nullptr;         ///< the CPU's activations: a token's in the layer's native format
         int32_t* h_rbounds = nullptr;
+        float* h_hand = nullptr;           ///< a layer split's rows in and out (T rows of hand_w_)
         // GLM-5.3-Flash's (plain_prompt_glm5.cpp): the four streams, the mHC's mixes, the window's selection steps, the
         // KDA and DSA intermediates, the dense FFN's gate and up
         float *g_hs = nullptr, *g_mixes = nullptr, *g_post = nullptr, *g_comb = nullptr, *g_y = nullptr;
@@ -307,9 +361,15 @@ private:
     /// after it (prompt_return), with the experts that were in them put back: the tier keeps that memory between
     /// prompts.  The slots go to the layers in turn (slot s is layer s % L's), so the last ones are every layer's.
     bool prompt_borrow(int64_t T, std::string& err);
-    bool prompt_chunks(const int32_t* tokens, int64_t n, int64_t pos, int32_t* out, float* logits, std::string& err);
+    /// The chunks from c_begin before c_end (a layer split: one at a time, each through every stage), the rows of a
+    /// later stage's from `hand_in`
+    bool prompt_chunks(const int32_t* tokens, int64_t n, int64_t pos, int32_t* out, float* logits, std::string& err,
+                       int64_t c_begin, int64_t c_end, const float* hand_in);
     bool prompt_chunks_glm5(const int32_t* tokens, int64_t n, int64_t pos, int32_t* out, float* logits,
-                            std::string& err);
+                            std::string& err, int64_t c_begin, int64_t c_end, const float* hand_in);
+    /// prompt() of one stage; with a split, the chunks' agreed length first (prompt_split)
+    bool prompt_one(const int32_t* tokens, int64_t n, int64_t pos, int32_t* out, float* logits, std::string& err);
+    bool prompt_split(const int32_t* tokens, int64_t n, int64_t pos, int32_t* out, float* logits, std::string& err);
     bool prompt_warm_products(std::string& err);
     /// The chunk's routed experts of MoE layer `ml`: pb_.hn its T normed rows (and pb_.x16 their FP16 copy for the FP16
     /// path), pb_.ids their routes; writes pb_.parts in routing order, the routes into `routes` (null: not kept).
@@ -412,12 +472,14 @@ private:
     int64_t n_moe_ = 0;   ///< MoE layers of the tiers: the trunk's, then the MTP layer's
     std::vector<void*> allocs_;      ///< every device allocation, freed in the destructor
 
-    // the expert tiers
-    std::unique_ptr<ExpertSource> src_;
+    // the expert tiers (src_ and pool_ the root's, shared by every stage)
+    std::unique_ptr<ExpertSource> src_own_;
+    ExpertSource* src_ = nullptr;
     /// The experts read in place, with the ones the VRAM tier does not hold pinned in RAM (pin_complement), or null
     FileExpertSource* complement_ = nullptr;
     PcieSplitTimes split_;
-    std::unique_ptr<strata::kernels::cpu::ExpertPool> pool_;
+    std::unique_ptr<strata::kernels::cpu::ExpertPool> pool_own_;
+    strata::kernels::cpu::ExpertPool* pool_ = nullptr;
     ExpertCache cache_;
     ExpertDispatch disp_;
     MoeWindow win_;

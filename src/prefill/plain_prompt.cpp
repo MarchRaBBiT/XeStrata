@@ -14,6 +14,7 @@
 #include "strata/core/plain_model.hpp"
 
 #include "strata/core/gpu.hpp"
+#include "strata/core/on_device.hpp"
 #include "strata/core/runtime.hpp"
 #include "strata/kernels/bf16_gemv.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
@@ -138,11 +139,11 @@ bool PlainModel::prompt_borrow(int64_t T, std::string& err) {
 }
 
 bool PlainModel::prompt_return(std::string& err) {
-    const int64_t L = n_moe_, n = n_slots_;
-    if (borrow_first_ < 0 || L <= 0) return true;   // a borrow needs slots, and slots need MoE layers
+    const int64_t LS = (int64_t) moe_local_.size(), n = n_slots_;
+    if (borrow_first_ < 0 || LS <= 0) return true;   // a borrow needs slots, and slots need MoE layers
     const auto& lay = k::cpu::expert_layout();
     if (!strata::gpu::stream_sync(cs_)) { err = std::string("plain prompt: ") + strata::gpu::last_error(); return false; }
-    for (int64_t s = borrow_first_; s < n; ++s) free_[(size_t) (s % L)].push_back((int32_t) s);
+    for (int64_t s = borrow_first_; s < n; ++s) free_[(size_t) moe_local_[(size_t) (s % LS)]].push_back((int32_t) s);
     borrow_first_ = -1;
     // the experts the prompt displaced, back into the slots: straight from pinned RAM, else through fill_slot
     for (const auto& [l, e] : borrowed_res_) {
@@ -210,6 +211,10 @@ bool PlainModel::prompt_cpu_experts(int64_t ml, const std::vector<int32_t>& expe
 }
 
 bool PlainModel::prompt_warm(std::string& err) {
+    for (auto& st : next_) {   // every GPU's products
+        const OnDevice on(st->dev_);
+        if (!st->prompt_warm(err)) return false;
+    }
     if (opt_.prompt_chunk <= 0 || prompt_host_ == nullptr) return true;
     if (!prompt_borrow(std::min<int64_t>(opt_.prompt_chunk, 512), err)) return false;
     const bool ok = prompt_warm_products(err);
@@ -538,6 +543,77 @@ bool PlainModel::prompt_routed(int64_t ml, int64_t T, bool cpu_share, int32_t* r
 }
 
 bool PlainModel::prompt(const int32_t* tokens, int64_t n, int64_t pos, int32_t* out, float* logits, std::string& err) {
+    return next_.empty() ? prompt_one(tokens, n, pos, out, logits, err) : prompt_split(tokens, n, pos, out, logits, err);
+}
+
+// A layer split's prompt: every stage's buffers for chunks of one length (each GPU's tier lends what it can), then
+// each chunk through the stages in turn, the rows handed on through pinned memory
+bool PlainModel::prompt_split(const int32_t* tokens, int64_t n, int64_t pos, int32_t* out, float* logits,
+                              std::string& err) {
+    const std::vector<PlainModel*> c = chain();
+    int64_t T = n;
+    for (PlainModel* st : c) {
+        if (st->opt_.prompt_chunk <= 0 || n <= 0 || st->prompt_host_ == nullptr) { err.clear(); return false; }
+        T = std::min(T, st->opt_.prompt_chunk);
+    }
+    if (pos < 0 || pos + n > opt_.max_cells) { err = "plain prompt: past the context"; return false; }
+    auto give_back = [&](size_t upto) {
+        std::string e2;
+        for (size_t i = 0; i < upto; ++i) {
+            const OnDevice on(c[i]->dev_);
+            (void) c[i]->prompt_return(e2);
+        }
+    };
+    for (int round = 0;; ++round) {
+        int64_t least = T;
+        for (size_t i = 0; i < c.size(); ++i) {
+            const OnDevice on(c[i]->dev_);
+            if (!c[i]->prompt_borrow(T, err)) {
+                give_back(i);
+                if (c[i]->borrow_short_) {   // as prompt_one: the windows read the prompt
+                    static bool said = false;
+                    if (!said) std::fprintf(stderr, "strata plain: %s: prompts are read through the decode windows\n", err.c_str());
+                    said = true;
+                    err.clear();
+                }
+                return false;
+            }
+            least = std::min(least, c[i]->pb_.T);
+        }
+        bool same = true;
+        for (PlainModel* st : c) same = same && st->pb_.T == least;
+        if (same) break;
+        give_back(c.size());
+        if (round == 4) { err = "plain prompt: the GPUs' prompt buffers agree on no chunk"; return false; }
+        T = least;
+    }
+    T = c[0]->pb_.T;
+    bool ok = true;
+    for (int64_t c0 = 0; ok && c0 < n; c0 += T) {
+        const float* hand = nullptr;
+        for (PlainModel* st : c) {
+            const OnDevice on(st->dev_);
+            if (!st->prompt_chunks(tokens, n, pos, out, logits, err, c0, c0 + T, hand)) { ok = false; break; }
+            hand = st->pb_.h_hand;
+        }
+    }
+    std::string err2;
+    for (PlainModel* st : c) {
+        const OnDevice on(st->dev_);
+        if (!st->prompt_return(err2) && ok) { err = err2; ok = false; }
+    }
+    if (!ok) return false;
+    for (PlainModel* st : c) {   // each tier to the experts its layers routed most (prompt_one)
+        const OnDevice on(st->dev_);
+        int64_t n_free = 0;
+        for (const auto& f : st->free_) n_free += (int64_t) f.size();
+        if (!st->disp_.usage.empty() && !st->adapt(err, std::max<int64_t>(2048, n_free))) return false;
+    }
+    return true;
+}
+
+bool PlainModel::prompt_one(const int32_t* tokens, int64_t n, int64_t pos, int32_t* out, float* logits,
+                            std::string& err) {
     if (opt_.prompt_chunk <= 0 || n <= 0 || prompt_host_ == nullptr) { err.clear(); return false; }
     if (pos < 0 || pos + n > opt_.max_cells) { err = "plain prompt: past the context"; return false; }
     const auto tb = std::chrono::steady_clock::now();
@@ -561,7 +637,7 @@ bool PlainModel::prompt(const int32_t* tokens, int64_t n, int64_t pos, int32_t* 
         return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
     };
     auto tc = std::chrono::steady_clock::now();
-    const bool ok = prompt_chunks(tokens, n, pos, out, logits, err);
+    const bool ok = prompt_chunks(tokens, n, pos, out, logits, err, 0, n, nullptr);
     const double chunks_ms = since(tc);
     tc = std::chrono::steady_clock::now();
     std::string err2;
@@ -582,8 +658,8 @@ bool PlainModel::prompt(const int32_t* tokens, int64_t n, int64_t pos, int32_t* 
 }
 
 bool PlainModel::prompt_chunks(const int32_t* tokens, int64_t n, int64_t pos, int32_t* out, float* logits,
-                               std::string& err) {
-    if (glm_) return prompt_chunks_glm5(tokens, n, pos, out, logits, err);
+                               std::string& err, int64_t c_begin, int64_t c_end, const float* hand_in) {
+    if (glm_) return prompt_chunks_glm5(tokens, n, pos, out, logits, err, c_begin, c_end, hand_in);
     PromptBufs& P = pb_;
     const ModelSpec& s = spec_;
     const int64_t N = s.n_embd, NH = s.n_head, HD = s.key_length, NKV = nkv_, HV = s.ssm_dt_rank, HK = s.ssm_n_group;
@@ -658,13 +734,14 @@ bool PlainModel::prompt_chunks(const int32_t* tokens, int64_t n, int64_t pos, in
         // the chunk's routes, every MoE layer's, for the adaptive tier's counts (below, after the chunk)
         const int64_t L = n_moe_;
         std::vector<int32_t> routes(disp_.usage.empty() ? 0 : (size_t) (L * P.T * K));
-        for (int64_t c0 = 0; c0 < n; c0 += P.T) {
+        for (int64_t c0 = c_begin; c0 < std::min(n, c_end); c0 += P.T) {
             const int64_t T = std::min<int64_t>(P.T, n - c0), p0 = pos + c0;
-            // the chunk's inputs: embedding rows, per-token step counts and rotary positions
+            // the chunk's inputs: embedding rows (a later stage: the rows handed on), per-token step counts and rotary
+            // positions
             for (int64_t t = 0; t < T; ++t) {
                 const int32_t tok = tokens[c0 + t];
                 if (tok < 0 || tok >= n_vocab_ ||
-                    !k::cpu::native_row_to_float(emb_type_, emb_ + (size_t) tok * emb_row_, P.emb + t * N, N)) {
+                    (first() && !k::cpu::native_row_to_float(emb_type_, emb_ + (size_t) tok * emb_row_, P.emb + t * N, N))) {
                     err = "plain prompt: a token is out of the vocabulary";
                     return false;
                 }
@@ -672,7 +749,8 @@ bool PlainModel::prompt_chunks(const int32_t* tokens, int64_t n, int64_t pos, in
                 for (int64_t hd = 0; hd < NH; ++hd) P.h_pos[t * NH + hd] = (int32_t) (p0 + t);
                 for (int64_t hd = 0; hd < NKV; ++hd) P.h_pos[T * NH + t * NKV + hd] = (int32_t) (p0 + t);
             }
-            if (!strata::gpu::copy_async(P.x, P.emb, (size_t) (T * N) * 4, cs) ||
+            if (!first()) std::memcpy(P.h_hand, hand_in, (size_t) (T * N) * 4);
+            if (!strata::gpu::copy_async(P.x, first() ? P.emb : P.h_hand, (size_t) (T * N) * 4, cs) ||
                 !strata::gpu::copy_async(P.steps, P.h_steps, (size_t) (T * k::kStepCount) * 4, cs) ||
                 !strata::gpu::copy_async(P.pos_q, P.h_pos, (size_t) (T * NH) * 4, cs) ||
                 !strata::gpu::copy_async(P.pos_k, P.h_pos + T * NH, (size_t) (T * NKV) * 4, cs)) {
@@ -711,7 +789,7 @@ bool PlainModel::prompt_chunks(const int32_t* tokens, int64_t n, int64_t pos, in
             // the MTP layer after the trunk, its K/V a cell ahead: row t pairs the trunk's normed row t with the token
             // after it (the prompt's last row with a stand-in, rewritten by spec_start once the token is picked)
             const bool mtp_chunk = has_mtp_ && p0 + T < opt_.max_cells;
-            for (int64_t l = 0; l < s.n_layer + (mtp_chunk ? 1 : 0); ++l) {
+            for (int64_t l = lb_; l < le_ + (mtp_chunk ? 1 : 0); ++l) {
                 const bool is_mtp = l == s.n_layer;
                 if (is_mtp) {
                     last_logits();
@@ -855,7 +933,14 @@ bool PlainModel::prompt_chunks(const int32_t* tokens, int64_t n, int64_t pos, in
                 k::add_inplace(P.x, P.moe_out, T * N, cs);
                 mark(3, t_mark);
             }
-            if (!mtp_chunk) last_logits();
+            if (!last()) {   // the rows to the next stage
+                if (!strata::gpu::copy_async(P.h_hand, P.x, (size_t) (T * N) * 4, cs)) {
+                    err = std::string("plain prompt: the rows to the next GPU: ") + strata::gpu::last_error();
+                    return false;
+                }
+            } else if (!mtp_chunk) {
+                last_logits();
+            }
             if (!routes.empty()) {
                 // each window's counts as the windows would leave them at the prompt's end: times the decay of every
                 // round that would come after it; the rounds themselves are left to the decode (their swaps would
@@ -866,7 +951,7 @@ bool PlainModel::prompt_chunks(const int32_t* tokens, int64_t n, int64_t pos, in
                     // the adaptive rounds after this window: whole rounds, so integer divisions
                     const int64_t rounds = (windows_ + last + 1) / opt_.adapt_every - (windows_ + win) / opt_.adapt_every;
                     const float wgt = std::pow(opt_.adapt_decay, (float) rounds);
-                    for (int64_t ml = 0; ml < L; ++ml)
+                    for (int64_t ml : moe_local_)   // this stage's layers' routes
                         for (int64_t i = t0 * K; i < std::min(T, t0 + W) * K; ++i)
                             disp_.usage[(size_t) (ml * E + routes[(size_t) (ml * P.T * K + i)])] += wgt;
                 }
@@ -880,6 +965,7 @@ bool PlainModel::prompt_chunks(const int32_t* tokens, int64_t n, int64_t pos, in
         err = std::string("plain prompt: ") + strata::gpu::last_error();
         return false;
     }
+    if (c_end < n) return true;   // a layer split's chunk: the stage's part of the prompt goes on with the next
     windows_ += (n + opt_.max_t - 1) / opt_.max_t;
     mtp_h_set_ = has_mtp_ && pos + n < opt_.max_cells;   // the trunk's last row is in mtp_h_ for spec_start
     if (profile)
@@ -893,6 +979,7 @@ bool PlainModel::prompt_chunks(const int32_t* tokens, int64_t n, int64_t pos, in
     if (profile)
         std::fprintf(stderr, "strata plain: prompt experts not in VRAM %lld, of them on the CPU %lld (%lld rows)\n",
                      (long long) miss_n, (long long) cpu_n, (long long) cpu_rows);
+    if (!last()) return true;
     *out = ((volatile int32_t*) h_out_)[0];
     if (logits != nullptr && !strata::gpu::copy(logits, logits_, (size_t) n_vocab_ * 4)) {
         err = "plain prompt: reading the logits failed";

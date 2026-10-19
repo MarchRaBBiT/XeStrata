@@ -14,13 +14,16 @@
 
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/core/conversation_memory.hpp"
+#include "strata/core/device.hpp"
 #include "strata/core/plain_model.hpp"
+#include "strata/core/runtime.hpp"
 #include "strata/kernels/sampler.hpp"
 #include "strata/prefill/gemm.hpp"
 #include "strata/prefill/moe_mmq.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cerrno>
 #include <condition_variable>
@@ -573,7 +576,10 @@ static void plain_usage(const std::string& arch) {
                  "  --spec-follow PATH   benchmarks: emit this continuation (token ids) instead of the picks and\n"
                  "                       accept the drafts that match it, so settings compare on the same text\n"
                  "  --serve              stay resident and take requests on stdin (server.py's protocol, text requests)\n"
-                 "  --gpu PCI            the GPU (its PCI address)\n",
+                 "  --gpu PCI            the GPU (its PCI address)\n"
+                 "  --layer-split K[,K2..]|auto  the blocks across the GPUs: the first runs the blocks before K, the\n"
+                 "                       next those from K on, ..; auto: in proportion to each GPU's free memory\n"
+                 "  --split-device D[,D2..]  the later GPUs (engine numbers or PCI addresses; default the other cards)\n",
                  arch.c_str());
 }
 
@@ -657,6 +663,48 @@ int plain_main(int argc, char** argv) {
         else if (a == "--rope-scaling") opt.rope_scaling = next("--rope-scaling");
         else if (a == "--rope-scale") opt.rope_scale = std::strtod(next("--rope-scale"), nullptr);
         else if (a == "--yarn-orig-ctx") opt.yarn_orig_ctx = std::strtod(next("--yarn-orig-ctx"), nullptr);
+        else if (a == "--layer-split") {
+            const std::string v = next("--layer-split");
+            opt.split_auto = v == "auto";
+            opt.split_at.clear();
+            for (size_t at = 0; !opt.split_auto && at < v.size();) {
+                const size_t comma = v.find(',', at);
+                const std::string part = v.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+                char* end = nullptr;
+                const long long k = std::strtoll(part.c_str(), &end, 10);
+                if (part.empty() || end == nullptr || *end != '\0') {
+                    std::fprintf(stderr, "strata (%s): --layer-split takes K[,K2..] or auto, not \"%s\"\n", arch.c_str(),
+                                 v.c_str());
+                    return 2;
+                }
+                opt.split_at.push_back(k);
+                if (comma == std::string::npos) break;
+                at = comma + 1;
+            }
+        }
+        else if (a == "--split-device") {   // engine numbers, or PCI addresses (setup writes those), as generate.cpp
+            const std::string v = next("--split-device");
+            opt.split_devices.clear();
+            for (size_t at = 0; at <= v.size();) {
+                const size_t comma = std::min(v.find(',', at), v.size());
+                std::string t = v.substr(at, comma - at);
+                int found = -1;
+                if (!t.empty() && t.find_first_not_of("0123456789") == std::string::npos) {
+                    found = (int) std::strtol(t.c_str(), nullptr, 10);
+                } else {
+                    for (auto& c : t) c = (char) std::tolower((unsigned char) c);
+                    for (int d = 0; d < strata::core::Runtime::count() && found < 0; ++d)
+                        if (strata::core::device_info(d).pci == t) found = d;
+                }
+                if (found < 0) {
+                    std::fprintf(stderr, "strata (%s): --split-device: no usable GPU at \"%s\"\n", arch.c_str(), t.c_str());
+                    return 2;
+                }
+                opt.split_devices.push_back(found);
+                at = comma + 1;
+            }
+        }
+        else if (a == "--split-order") (void) next("--split-order");   // the stages take the GPUs as given
         else if (a == "--vram-reserve-mib")
             opt.reserve_mib = std::max<int64_t>(0, std::strtoll(next("--vram-reserve-mib"), nullptr, 10));
         else if (a == "--vram-free-mib")

@@ -168,9 +168,11 @@ bool PlainModel::load_glm5(std::string& err) {
         err = "plain model: a GLM-5.3-Flash shape this engine's kernels are not built for";
         return false;
     }
-    // the MTP layer (blk.<n_layer>, nextn.*): drafts for speculative windows, as the Qwen-family files'
-    has_mtp_ = opt_.spec >= 2 && s.n_nextn == 1 &&
-               model_->find("blk." + std::to_string(s.n_layer) + ".nextn.eh_proj.weight") != nullptr;
+    // the MTP layer (blk.<n_layer>, nextn.*): drafts for speculative windows, as the Qwen-family files'; the last
+    // stage's
+    model_mtp_ = opt_.spec >= 2 && s.n_nextn == 1 &&
+                 model_->find("blk." + std::to_string(s.n_layer) + ".nextn.eh_proj.weight") != nullptr;
+    has_mtp_ = model_mtp_ && last();
     opt_.max_cells = (opt_.max_cells + s.idx_kpool - 1) / s.idx_kpool * s.idx_kpool;
     cs_ = strata::gpu::stream_create();
     if (cs_ == nullptr) { err = "plain model: stream create failed"; return false; }
@@ -201,20 +203,22 @@ bool PlainModel::load_glm5(std::string& err) {
         if (emb_row_ == 0) { err = "plain model: token_embd.weight's type has no host dequantizer"; return false; }
         emb_ = m.shard(at).tensor_data(*t);
     }
-    if (!upload(m, "output.weight", head_, err) ||
-        !upload_f32(m, "output_norm.weight", (uint64_t) s.n_embd, out_norm_, err))
-        return false;
-    if (head_.n_in != s.n_embd || head_.n_out != n_vocab_ || head_.type == kBF16) {
-        err = "plain model: output.weight's shape or type";
-        return false;
+    if (last()) {   // the head: the last stage's
+        if (!upload(m, "output.weight", head_, err) ||
+            !upload_f32(m, "output_norm.weight", (uint64_t) s.n_embd, out_norm_, err))
+            return false;
+        if (head_.n_in != s.n_embd || head_.n_out != n_vocab_ || head_.type == kBF16) {
+            err = "plain model: output.weight's shape or type";
+            return false;
+        }
     }
     gblocks_.resize((size_t) s.n_layer);
     int64_t n_kda = 0, n_dsa = 0;
-    for (int64_t l = 0; l < s.n_layer; ++l) {
+    for (int64_t l = 0; l < s.n_layer; ++l) {   // the indices count every block; this stage loads its own
         GBlock& b = gblocks_[(size_t) l];
         b.kda = s.recurrent[(size_t) l];
         b.idx = b.kda ? n_kda++ : n_dsa++;
-        if (!load_gblock(m, l, b, err)) return false;
+        if (l >= lb_ && l < le_ && !load_gblock(m, l, b, err)) return false;
     }
     if (n_dsa == 0) { err = "plain model: the model has no DSA block"; return false; }
     if (has_mtp_) {   // a DSA block of its own caches, after the trunk's
@@ -240,7 +244,16 @@ bool PlainModel::load_glm5(std::string& err) {
     state_bytes_ = (size_t) (H * S * S) * 4;
     conv_bytes_ = (size_t) (3 * C * (s.ssm_d_conv - 1)) * 4;
     g_max_blocks_ = cells / s.idx_kpool + 1;
+    auto mine = [&](bool kda, int64_t idx) {   // a KDA or DSA block of this stage's (the MTP layer's on the last)
+        if (!kda && has_mtp_ && idx == gmtp_.idx) return true;
+        for (int64_t l = lb_; l < le_; ++l)
+            if (gblocks_[(size_t) l].kda == kda && gblocks_[(size_t) l].idx == idx) return true;
+        return false;
+    };
+    gdn_state_.assign((size_t) n_kda, nullptr);
+    gdn_conv_.assign((size_t) n_kda, nullptr);
     for (int64_t i = 0; i < n_kda; ++i) {
+        if (!mine(true, i)) continue;
         float *st = nullptr, *cv = nullptr;
         if (!strata::gpu::alloc_device(&st, state_bytes_) || !strata::gpu::alloc_device(&cv, conv_bytes_)) {
             err = "plain model: no VRAM for the KDA states";
@@ -248,17 +261,17 @@ bool PlainModel::load_glm5(std::string& err) {
         }
         allocs_.push_back(st);
         allocs_.push_back(cv);
-        gdn_state_.push_back(st);
-        gdn_conv_.push_back(cv);
+        gdn_state_[(size_t) i] = st;
+        gdn_conv_[(size_t) i] = cv;
     }
-    // the KDA states after a window's rows but its last, for going back to the last accepted draft
-    if (has_mtp_) {
+    // the KDA states after a window's rows but its last, for going back to the last accepted draft (every stage's)
+    if (model_mtp_) {
         opt_.spec = std::min({opt_.spec, opt_.max_t, k::kGlm5MaxSnaps + 1});
         n_snap_ = opt_.spec - 1;
         gdn_snap_.assign(gdn_state_.size(), {});
         conv_snap_.assign(gdn_state_.size(), {});
         for (size_t g = 0; g < gdn_state_.size(); ++g)
-            for (int t = 0; t < n_snap_; ++t) {
+            for (int t = 0; t < n_snap_ && gdn_state_[g] != nullptr; ++t) {
                 float *st = nullptr, *cv = nullptr;
                 if (!strata::gpu::alloc_device(&st, state_bytes_) || !strata::gpu::alloc_device(&cv, conv_bytes_)) {
                     err = "plain model: no VRAM for the KDA states' copies (--spec)";
@@ -270,7 +283,11 @@ bool PlainModel::load_glm5(std::string& err) {
                 conv_snap_[g].push_back(cv);
             }
     }
+    g_idx_cache_.assign((size_t) n_dsa, nullptr);
+    g_pooled_.assign((size_t) n_dsa, nullptr);
+    g_latent_.assign((size_t) n_dsa, nullptr);
     for (int64_t i = 0; i < n_dsa; ++i) {
+        if (!mine(false, i)) continue;
         float *ic = nullptr, *pl = nullptr;
         uint16_t* lat = nullptr;
         if (!strata::gpu::alloc_device(&ic, (size_t) (cells * 2 * ID) * 4) ||
@@ -282,9 +299,9 @@ bool PlainModel::load_glm5(std::string& err) {
         allocs_.push_back(ic);
         allocs_.push_back(pl);
         allocs_.push_back(lat);
-        g_idx_cache_.push_back(ic);
-        g_pooled_.push_back(pl);
-        g_latent_.push_back(lat);
+        g_idx_cache_[(size_t) i] = ic;
+        g_pooled_[(size_t) i] = pl;
+        g_latent_[(size_t) i] = lat;
     }
     {
         k::QsaShapes qs;
@@ -298,10 +315,13 @@ bool PlainModel::load_glm5(std::string& err) {
     const uint64_t K = (uint64_t) s.n_expert_used, NH = (uint64_t) H;
     const uint64_t QLR = (uint64_t) s.q_lora_rank, QK = (uint64_t) s.key_length_mla, VD = (uint64_t) s.value_length_mla;
     const uint64_t IH = (uint64_t) s.idx_n_head, FW = (uint64_t) std::max<int64_t>(s.n_ff, s.n_ff_shexp);
+    hand_w_ = kHC * s.n_embd;   // a stage hands the four streams on
     if (!mapped(T * N * 4, (void**) &h_emb_, (void**) &m_emb_) ||
         !mapped(T * k::kStepCount * 4, (void**) &h_step_, (void**) &m_step_) ||
         !mapped(T * (NH + 1) * 4, (void**) &h_pos_, (void**) &m_pos_) ||
-        !mapped(T * 4 + 16, (void**) &h_out_, (void**) &m_out_)) {
+        !mapped(T * 4 + 16, (void**) &h_out_, (void**) &m_out_) ||
+        (!first() && !mapped(T * kHC * N * 4, (void**) &h_in_, (void**) &m_in_)) ||
+        (!last() && !mapped(T * kHC * N * 4, (void**) &h_hand_, (void**) &m_hand_))) {
         err = "plain model: mapped staging allocation failed";
         return false;
     }
@@ -349,16 +369,17 @@ bool PlainModel::load_glm5(std::string& err) {
     segs_.assign((size_t) opt_.max_t + 1, {});
     mexec_.assign((size_t) opt_.max_t + 1, nullptr);
     msegs_.assign((size_t) opt_.max_t + 1, {});
-    std::fprintf(stderr, "strata plain: GLM-5.3-Flash, %lld KDA and %lld DSA blocks, %lld cells; the prompt in chunks of "
-                         "%lld%s\n", (long long) n_kda, (long long) (has_mtp_ ? n_dsa - 1 : n_dsa), (long long) cells,
-                 (long long) opt_.prompt_chunk, has_mtp_ ? "; the MTP layer drafts" : "");
-    return reset(err);
+    if (root_ == this)
+        std::fprintf(stderr, "strata plain: GLM-5.3-Flash, %lld KDA and %lld DSA blocks, %lld cells; the prompt in chunks "
+                             "of %lld%s\n", (long long) n_kda, (long long) (has_mtp_ ? n_dsa - 1 : n_dsa),
+                     (long long) cells, (long long) opt_.prompt_chunk, model_mtp_ ? "; the MTP layer drafts" : "");
+    return true;
 }
 
 bool PlainModel::reset_glm5(std::string& err) {
     bool ok = true;
-    for (float* p : gdn_state_) ok = ok && strata::gpu::memset(p, 0, state_bytes_);
-    for (float* p : gdn_conv_) ok = ok && strata::gpu::memset(p, 0, conv_bytes_);
+    for (float* p : gdn_state_) ok = ok && (p == nullptr || strata::gpu::memset(p, 0, state_bytes_));
+    for (float* p : gdn_conv_) ok = ok && (p == nullptr || strata::gpu::memset(p, 0, conv_bytes_));
     cur_ = -1;
     drafts_.clear();
     if (!ok) err = "plain model: resetting the state failed";
@@ -566,14 +587,22 @@ bool PlainModel::record_window_glm5(int T, strata::gpu::Stream cs, std::string& 
     const ModelSpec& s = spec_;
     const int64_t N = s.n_embd;
     const float eps = (float) s.rms_eps;
-    k::copy_from_mapped(x_, m_emb_, (int64_t) T * N, cs);
     k::copy_i32_from_mapped(step_, m_step_, (int64_t) T * k::kStepCount, cs);
     // the selection's step records, shared by every DSA block of the window
     k::glm5_idx_steps(step_, T, (int) s.idx_kpool, (int) s.idx_top_k, g_steps_, cs);
-    k::glm5_hc_init(x_, g_hs_, N, T, cs);
+    if (first()) {   // the four streams from the embeddings, or as the stage before left them
+        k::copy_from_mapped(x_, m_emb_, (int64_t) T * N, cs);
+        k::glm5_hc_init(x_, g_hs_, N, T, cs);
+    } else {
+        k::copy_from_mapped(g_hs_, m_in_, (int64_t) T * kHC * N, cs);
+    }
     uint32_t ring = 0;
-    for (int64_t l = 0; l < s.n_layer; ++l)
+    for (int64_t l = lb_; l < le_; ++l)
         if (!record_gblock(gblocks_[(size_t) l], l, T, ring, segs_[(size_t) T], cs, err)) return false;
+    if (!last()) {
+        k::copy_from_mapped(m_hand_, g_hs_, (int64_t) T * kHC * N, cs);
+        return true;
+    }
     k::glm5_hc_mean(g_hs_, x_, N, T, cs);
     k::native_qsa_rms_norm_weighted(x_, out_norm_, hn_, (int) N, T, eps, cs);
     head_logits(hn_, T, cs);   // the tokens are picked after the graph (forward), with the run's sampler
