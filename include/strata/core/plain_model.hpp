@@ -118,6 +118,19 @@ public:
 
     /// Zeroes the recurrent states and the K/V cache: the next window starts a sequence at position 0.
     bool reset(std::string& err);
+    /// The state of the first `tokens` tokens on the host (a conversation set aside: plain_serve's conversation
+    /// cache and session files): every attention layer's K/V pages that hold them, every recurrent layer's state and
+    /// convolution history, GLM's DSA caches.  The device is synchronized first; restore puts it back as it was, the
+    /// pending draft dropped.
+    struct Snapshot {
+        int64_t tokens = 0;
+        std::vector<std::vector<uint8_t>> parts;
+        size_t bytes() const;
+    };
+    bool save_state(int64_t tokens, Snapshot& snap, std::string& err);
+    bool restore_state(const Snapshot& snap, std::string& err);
+    /// The bytes save_state would take for `tokens` tokens
+    size_t state_bytes(int64_t tokens) const;
     /// Tokens [0, T) at positions pos .. pos + T - 1 (T <= max_t): out[t] is the greedy token after token t, and with
     /// `logits` the T rows of n_vocab logits.  Positions must follow the previous window's.
     bool forward(const int32_t* tokens, int T, int64_t pos, int32_t* out, float* logits, std::string& err);
@@ -414,6 +427,9 @@ private:
     std::FILE* route_dump_ = nullptr;             ///< --dump-routing's file, or null
     /// `n` tokens' `k` routed experts of MoE layer `layer` into --dump-routing's file
     void dump_routes(int64_t layer, const int32_t* ids, int64_t n, int64_t k);
+    struct StatePart { void* dev; size_t bytes; };
+    /// The device buffers a snapshot of `tokens` tokens copies (state_bytes, save_state, restore_state)
+    std::vector<StatePart> state_parts(int64_t tokens) const;
     std::vector<std::pair<int32_t, int32_t>> prior_;   ///< the profile the tier was filled from
     int64_t n_slots_ = 0;
     int64_t windows_ = 0, swaps_total_ = 0;

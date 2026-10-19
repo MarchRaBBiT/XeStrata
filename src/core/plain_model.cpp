@@ -1023,6 +1023,88 @@ void PlainModel::dump_routes(int64_t layer, const int32_t* ids, int64_t n, int64
     }
 }
 
+std::vector<PlainModel::StatePart> PlainModel::state_parts(int64_t tokens) const {
+    std::vector<StatePart> parts;
+    const ModelSpec& s = spec_;
+    tokens = std::clamp<int64_t>(tokens, 0, opt_.max_cells);
+    for (size_t g = 0; g < gdn_state_.size(); ++g) {   // the recurrent layers: whole
+        parts.push_back({gdn_state_[g], state_bytes_});
+        parts.push_back({gdn_conv_[g], conv_bytes_});
+    }
+    if (glm_) {   // per DSA block: its latent and indexer rows a cell, the pools that the cells close
+        const int64_t KVR = s.kv_lora_rank, ID = s.idx_key_length;
+        const int64_t pools = std::min<int64_t>(g_max_blocks_, tokens / s.idx_kpool + 1);
+        for (size_t d = 0; d < g_latent_.size(); ++d) {
+            parts.push_back({g_latent_[d], (size_t) (tokens * KVR) * 2});
+            parts.push_back({g_idx_cache_[d], (size_t) (tokens * 2 * ID) * 4});
+            parts.push_back({g_pooled_[d], (size_t) (pools * ID) * 4});
+        }
+        return parts;
+    }
+    // the attention layers (the MTP layer's too): the pages that hold the tokens, page by page in order (the page
+    // table is the identity)
+    const k::QsaShapes qs = attn_shapes(s, nkv_);
+    const int64_t pages = std::min<int64_t>(n_pages_, (tokens + qs.page_size - 1) / qs.page_size);
+    const size_t page = (size_t) (qs.n_head_kv * qs.page_size * qs.head_dim) * 2;
+    for (size_t a = 0; a < k_pool_.size(); ++a) {
+        parts.push_back({k_pool_[a], (size_t) pages * page});
+        parts.push_back({v_pool_[a], (size_t) pages * page});
+    }
+    return parts;
+}
+
+size_t PlainModel::Snapshot::bytes() const {
+    size_t n = 0;
+    for (const auto& p : parts) n += p.size();
+    return n;
+}
+
+size_t PlainModel::state_bytes(int64_t tokens) const {
+    size_t n = 0;
+    for (const StatePart& p : state_parts(tokens)) n += p.bytes;
+    return n;
+}
+
+bool PlainModel::save_state(int64_t tokens, Snapshot& snap, std::string& err) {
+    if (!settle_swaps(true, err)) return false;
+    if (!strata::gpu::stream_sync(cs_)) {
+        err = std::string("plain model: ") + strata::gpu::last_error();
+        return false;
+    }
+    const std::vector<StatePart> parts = state_parts(tokens);
+    snap.tokens = tokens;
+    snap.parts.resize(parts.size());
+    for (size_t i = 0; i < parts.size(); ++i) {
+        snap.parts[i].resize(parts[i].bytes);
+        if (parts[i].bytes > 0 && !strata::gpu::copy(snap.parts[i].data(), parts[i].dev, parts[i].bytes)) {
+            err = std::string("plain model: saving the state: ") + strata::gpu::last_error();
+            return false;
+        }
+    }
+    return true;
+}
+
+bool PlainModel::restore_state(const Snapshot& snap, std::string& err) {
+    if (!settle_swaps(true, err)) return false;
+    const std::vector<StatePart> parts = state_parts(snap.tokens);
+    if (parts.size() != snap.parts.size()) { err = "plain model: a state of another model"; return false; }
+    for (size_t i = 0; i < parts.size(); ++i)
+        if (parts[i].bytes != snap.parts[i].size()) { err = "plain model: a state of another shape"; return false; }
+    if (!strata::gpu::stream_sync(cs_)) {
+        err = std::string("plain model: ") + strata::gpu::last_error();
+        return false;
+    }
+    for (size_t i = 0; i < parts.size(); ++i)
+        if (parts[i].bytes > 0 && !strata::gpu::copy(parts[i].dev, snap.parts[i].data(), parts[i].bytes)) {
+            err = std::string("plain model: restoring the state: ") + strata::gpu::last_error();
+            return false;
+        }
+    cur_ = -1;
+    drafts_.clear();
+    mtp_h_set_ = false;
+    return true;
+}
+
 bool PlainModel::reset(std::string& err) {
     if (glm_) return reset_glm5(err);
     const ModelSpec& s = spec_;
