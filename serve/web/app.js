@@ -1227,6 +1227,14 @@ poll();
 setInterval(() => { if (!switching) loadSwitcher(); }, 15000);   // a switch started elsewhere shows here too
 
 // ------------------------------------------------------------------ images (POST /v1/images/generations)
+function readAsDataURL(f) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(r.error || new Error(`${f.name}: could not be read`));
+    r.readAsDataURL(f);
+  });
+}
 $("img-size").onchange = () => { $("img-custom").hidden = $("img-size").value !== "custom"; };
 $("img-form").onsubmit = async (ev) => {
   ev.preventDefault();
@@ -1236,21 +1244,15 @@ $("img-form").onsubmit = async (ev) => {
   const refs = Array.from($("img-ref").files || []);
   const body = {prompt, size: size === "auto" && !refs.length ? "1024x1024" : size, response_format: "b64_json"};
   if ($("img-seed").value !== "") body.seed = Number($("img-seed").value);
-  // with reference images: an edit, OpenAI's multipart form (the browser sets its boundary)
-  let url = "v1/images/generations", payload = JSON.stringify(body), hdrs = headers(true);
-  if (refs.length) {
-    const form = new FormData();
-    for (const [k, v] of Object.entries(body)) form.append(k, String(v));
-    for (const f of refs) form.append("image[]", f, f.name);
-    url = "v1/images/edits";
-    payload = form;
-    hdrs = headers();
-  }
   $("img-go").disabled = true;
   const t0 = performance.now();
   $("img-hint").textContent = "Generating\u2026 (a minute or more on a small GPU)";
   try {
-    const r = await fetch(url, {method: "POST", headers: hdrs, body: payload});
+    // with reference images: an edit, in JSON with data: URLs (without an API key the server takes only JSON from a
+    // browser page, so that another site's form cannot use it)
+    if (refs.length) body.images = await Promise.all(refs.map(async f => ({image_url: await readAsDataURL(f)})));
+    const url = refs.length ? "v1/images/edits" : "v1/images/generations";
+    const r = await fetch(url, {method: "POST", headers: headers(true), body: JSON.stringify(body)});
     const j = await r.json();
     if (!r.ok) throw new Error((j.error && j.error.message) || r.statusText);
     for (const d of j.data) {
