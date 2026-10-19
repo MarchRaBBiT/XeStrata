@@ -1502,6 +1502,21 @@ bool FileExpertSource::pin_complement(
                 fail("FileExpertSource: posix_fadvise could not release expert layer " + std::to_string(layer));
                 return;
             }
+            } else {
+                // the GGUF in place: the file cache of the experts now copied (the others are still read from there).
+                // Left in the cache, GLM-5.3-Flash UD-IQ1_S's 53 GiB copy on a 62.7 GiB PC (RX 9060 XT, ROCm) pushed
+                // 6.4 GiB into swap and the engine's next GPU wait never returned (2026-10-20)
+                for (int64_t expert = 0; expert < n_expert_; ++expert) {
+                    if (offsets[(size_t) layer * (size_t) n_expert_ + (size_t) expert] == kNoComplement) continue;
+                    for (int r = 0; r < 3; ++r) {
+                        const size_t i = (size_t) (3 * layer + r);
+                        const Map& m = maps_[(size_t) role_file_[i]];
+                        if (m.fd < 0) continue;
+                        const uint64_t per = role_bytes_[i];
+                        const uint64_t at = (uint64_t) (role_ptr_[i] - m.base) + (uint64_t) expert * per;
+                        (void) posix_fadvise(m.fd, (off_t) at, (off_t) per, POSIX_FADV_DONTNEED);
+                    }
+                }
             }
 #endif
             const int64_t done = layers_done.fetch_add(1) + 1;
