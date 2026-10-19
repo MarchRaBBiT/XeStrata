@@ -5243,6 +5243,10 @@ int main(int argc, char** argv) {
         // STRATA_TEST_CACHE_FAIL=N: the first N opens fail as an out-of-commit cudaMalloc does (tests the retry)
         int fake_fails = std::getenv("STRATA_TEST_CACHE_FAIL") ? (int) std::strtol(std::getenv("STRATA_TEST_CACHE_FAIL"), nullptr, 10) : 0;
         int failed = 0;
+        // the xe driver gives VRAM only with as much RAM free beside it, and the file cache does not count as free
+        // there: the OS is made to give it back first (PlainModel's open_experts)
+        if (strata::core::Runtime::get().device().get_backend() == sycl::backend::ext_oneapi_level_zero)
+            strata::platform::make_free_ram((uint64_t) cache_bytes() + (2ull << 30));
         for (int attempt = 0;; ++attempt) {
             bool ok = false;
             if (fake_fails > 0) {

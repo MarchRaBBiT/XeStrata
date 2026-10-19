@@ -237,7 +237,12 @@ bool PlainModel::load(const PlainOptions& opt, std::string& err) {
         err = "plain model: this model does not run on the processor's own graphics yet; choose another GPU (--gpu)";
         return false;
     }
+    // On Level Zero (xe) the device's allocations need free RAM beside them, and the file cache does not count as free
+    // there: the model's files left in the cache by a program that read them just before refused the VRAM tier's
+    // allocation (B70, 2026-10-19).  So the model's own files leave the cache first; they are read from the drive.
     try {
+        if (Runtime::get().device().get_backend() == sycl::backend::ext_oneapi_level_zero)
+            for (const std::string& path : gguf_split_paths(opt_.gguf)) strata::platform::drop_file_cache(path);
         model_ = std::make_unique<GgufModel>(GgufModel::open(opt_.gguf));
     } catch (const std::exception& e) {
         err = std::string("plain model: ") + e.what();
@@ -665,12 +670,13 @@ bool PlainModel::open_experts(std::string& err) {
     // On Level Zero the device's own allocations also need RAM beside the pinned experts: on the B70 (xe, 32 GiB) with
     // 100 GiB of host memory registered and 14 GiB left, 2 GiB device allocations were refused or the device was lost;
     // with 85 GiB and 29 GiB left, 24 GiB of them ran (2026-10-19).  So the room there counts the VRAM as well.
+    const bool level_zero = Runtime::get().device().get_backend() == sycl::backend::ext_oneapi_level_zero;
     bool in_ram = !opt_.mmap_experts;
     if (in_ram) {
         detail::HostMemory hm;
         const uint64_t need = lay.total + lay.max_blob;
         uint64_t beside = 8ull << 30;
-        if (Runtime::get().device().get_backend() == sycl::backend::ext_oneapi_level_zero) {
+        if (level_zero) {
             size_t f = 0, t = 0;
             if (strata::gpu::mem_info(&f, &t)) beside += (uint64_t) t;
         }
@@ -750,6 +756,10 @@ bool PlainModel::open_experts(std::string& err) {
         err = "plain model: no VRAM is left for the expert tier (" + std::to_string(free_b >> 20) + " MiB free)";
         return false;
     }
+    // the xe driver gives VRAM only with as much RAM free beside it, and the file cache does not count as free there
+    // (78 GiB of pinned experts, a model file in the cache: the tier's 24 GiB refused with 17 GiB free, B70,
+    // 2026-10-19): the OS is made to give the cache back first
+    if (level_zero) strata::platform::make_free_ram(per_layer_b * (uint64_t) q + (2ull << 30));
     std::vector<int64_t> slot_bytes;
     free_.assign((size_t) L, {});
     for (int64_t i = 0; i < q; ++i)   // the layers in turn: slot s is layer s % L's (prompt_borrow takes the last ones)
@@ -898,7 +908,7 @@ bool PlainModel::open_experts(std::string& err) {
             for (int32_t e = 0; e < (int32_t) E; ++e)
                 for (int32_t l = 0; l < (int32_t) L; ++l) order.emplace_back(l, e);
         uint64_t headroom = 8ull << 30;
-        if (Runtime::get().device().get_backend() == sycl::backend::ext_oneapi_level_zero) headroom += total_b / 2;
+        if (level_zero) headroom += total_b / 2;
         // STRATA_RESIDENT_PIN=0: never page-locked, 1: always; else as the RAM allows (#11), as generate.cpp
         using Pin = FileExpertSource::Pin;
         const char* pin_env = std::getenv("STRATA_RESIDENT_PIN");

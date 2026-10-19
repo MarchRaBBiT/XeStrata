@@ -5,6 +5,7 @@
 #include "strata/core/device.hpp"
 #include "strata/core/on_device.hpp"
 #include "strata/core/runtime.hpp"
+#include "strata/platform/memory.hpp"
 #define STRATA_DEVICE_ARCH_TAG_TU core_gpu
 #include "strata/kernels/device_arch_tag.hpp"
 
@@ -61,8 +62,17 @@ std::string refusal_state() {
         if (d.has(sycl::aspect::ext_intel_free_memory))
             free_mib = std::to_string(d.get_info<sycl::ext::intel::info::device::free_memory>() >> 20) + " MiB";
     } catch (const std::exception& e) { free_mib = std::string("unreadable: ") + e.what(); }
+    std::string ram;
+    // the xe driver gives VRAM only with RAM free beside it, and the file cache does not count as free there: a big
+    // model file read just before (by any program) left in the cache refused the allocations (B70, 2026-10-19)
+    uint64_t mem_free = 0, cached = 0;
+    if (strata::core::Runtime::get().device().get_backend() == sycl::backend::ext_oneapi_level_zero &&
+        strata::platform::free_and_cached(mem_free, cached) && cached > mem_free)
+        ram = "; the RAM free is " + std::to_string(mem_free >> 30) + " GiB and the file cache holds " +
+              std::to_string(cached >> 30) + " GiB, which this GPU's driver does not take as free: "
+              "`sync; echo 1 | sudo tee /proc/sys/vm/drop_caches` empties it";
     return "; device free " + free_mib + ", this process holds " + std::to_string(held >> 20) + " MiB in " +
-           std::to_string(n) + " blocks";
+           std::to_string(n) + " blocks" + ram;
 }
 
 bool fail(const char* what, const std::exception& e) {
