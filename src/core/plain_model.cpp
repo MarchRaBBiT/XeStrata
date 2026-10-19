@@ -45,12 +45,14 @@
 #include "strata/platform/memory.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <type_traits>
+#include <thread>
 #include <utility>
 
 namespace strata::core {
@@ -897,12 +899,41 @@ bool PlainModel::open_experts(std::string& err) {
                          prior_.end());
             err.clear();
         }
-        int64_t filled = 0;
+        // each layer up to its slots, the experts read on several threads, each through pinned memory of its own: one
+        // at a time, GLM-5.3-Flash's 2,646 (22.9 GB) took 19.5 s from the drive, 1.2 GB/s (B70, 990 Pro, 2026-10-19)
+        struct Fill { int64_t l; int32_t e, slot; };
+        std::vector<Fill> todo;
         for (const auto& [l, e] : prior_)
             if (!free_[(size_t) l].empty()) {
-                if (!fill_slot(l, e, err)) return false;
-                ++filled;
+                todo.push_back({l, e, free_[(size_t) l].back()});
+                free_[(size_t) l].pop_back();
             }
+        std::atomic<size_t> next{0};
+        std::atomic<bool> bad{false};
+        auto work = [&]() {
+            uint8_t* buf = nullptr;
+            if (!strata::gpu::alloc_host(&buf, (size_t) lay.max_blob)) { bad = true; return; }
+            for (size_t i; !bad && (i = next.fetch_add(1)) < todo.size();) {
+                const Fill& f = todo[i];
+                if (!src_->copy_blob(f.l, f.e, buf) ||
+                    !strata::gpu::copy(cache_.device_slot(f.slot), buf, (size_t) lay.blob_bytes(f.l)))
+                    bad = true;
+            }
+            strata::gpu::free(buf);
+        };
+        {
+            const int threads = (int) std::clamp<size_t>(todo.size() / 64, 1, 8);
+            std::vector<std::thread> pool;
+            for (int i = 1; i < threads; ++i) pool.emplace_back(work);
+            work();
+            for (auto& t : pool) t.join();
+        }
+        if (bad) {
+            err = "plain model: an expert could not be read for the VRAM tier";
+            return false;
+        }
+        for (const Fill& f : todo) res_[(size_t) (f.l * E + f.e)] = f.slot;
+        const int64_t filled = (int64_t) todo.size();
         std::fprintf(stderr, "strata plain: the VRAM tier filled from %s: %lld experts\n", opt_.profile.c_str(),
                      (long long) filled);
     }
