@@ -90,6 +90,7 @@ HF_REVISIONS = {
     "pfeifferj/Ornith-1.5-35B-A3B-GSQ-RCO-GGUF": "0bfdfe7f6c424de60481c26379c9d821469f75f1",         # 2026-10-11
     "llm-jp/llm-jp-4.1-32b-a3b-thinking-gguf": "044a4447c2da94b489484927355665b819eb3d4b",           # 2026-10-11
     "unsloth/Qwen3.6-35B-A3B-MTP-GGUF": "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d",                  # 2026-10-12
+    "unsloth/GLM-5.3-Flash-GGUF": "a38483c8cd5df544f53d70fb281afe97369d5ab6",                        # 2026-10-09
 }
 
 
@@ -344,13 +345,33 @@ FAMILIES: dict[str, dict[str, Any]] = {
                 "sha256": {**UNSLOTH_SHARDS, **UNSLOTH_IQ4_XS_SHARDS, **UNSLOTH_BIG_SHARDS}},
 }
 # The models the engine runs other than Qwen3.8-Flash-Next (src/core/plain_model.cpp: `strata --native` with another
-# architecture): one GGUF file each, its size and SHA-256 at the pinned revision (the Hub's LFS pointers), no pack, no
-# PLE table, no MTP draft layer and no images yet.  "tested": the files this release was checked with (the rest use
-# the same tensor types, checked on those files and in the kernels' tests).
+# architecture): one GGUF file each, its size and SHA-256 at the pinned revision (the Hub's LFS pointers), or its
+# "parts" (a model in several files: each one's path in the repository, size and SHA-256; "file" is the first, which
+# the engine is given), no pack, no PLE table and no images yet.  "tested": the files this release was checked with
+# (the rest use the same tensor types, checked on those files and in the kernels' tests).
 _ORNITH = "ornith-ai/Ornith-1.5-35B-A3B-GGUF"
 _ORNITH_GSQ = "pfeifferj/Ornith-1.5-35B-A3B-GSQ-RCO-GGUF"
 _LLMJP = "llm-jp/llm-jp-4.1-32b-a3b-thinking-gguf"
 _QWEN36 = "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
+_GLM53 = "unsloth/GLM-5.3-Flash-GGUF"
+
+
+def _glm53_parts(quant: str, parts: list[tuple[int, str]]) -> list[dict[str, Any]]:
+    """Unsloth's files of one GLM-5.3-Flash version: <quant>/GLM-5.3-Flash-<quant>-0000i-of-0000n.gguf"""
+    n = len(parts)
+    return [{"path": f"{quant}/GLM-5.3-Flash-{quant}-{i:05d}-of-{n:05d}.gguf", "size": size, "sha256": sha}
+            for i, (size, sha) in enumerate(parts, 1)]
+
+
+_GLM53_IQ3 = _glm53_parts("UD-IQ3_XXS", [
+    (9429984, "632f4fabe03ea73d20c299c8ef00c4a16e47dd9ab3f1750a8585b92eb70dfa74"),
+    (49261511584, "a4dba331fe92ffbd71317839cc1452c57f0b5b3f971a9e96ee5107f9a615cdac"),
+    (49075832480, "5b728b5b263c662201ef4a4a2b12fb509fe230d012418d0ed37c220a8a5aa230"),
+    (22020797792, "4b6d16e0d1381e1b4b7eeb6c9799671bf98153a995be12e75e3da93cd97981d2")])
+_GLM53_IQ1 = _glm53_parts("UD-IQ1_S", [
+    (9429984, "909a8a2dedb493c5a694facfd1e0e9a3309ac66fbb9d270c024ff5d12e0d565f"),
+    (49621122496, "b99c4dd929601884ff95d9ddeb581a5ef93fd281c37c162e48b2981bf23c0830"),
+    (43456692608, "9bb0ff754968d588793d795c715cc2a7d5292280ff9d0df46b7e1edd57da34a1")])
 PLAIN_FAMILIES: dict[str, dict[str, Any]] = {
     "ornith": {"title": "Ornith-1.5-35B-A3B", "by": "Ornith AI (MIT)",
                "about": "35B, 3B active; a Qwen3.5 MoE: Q4_K_M to BF16, and community GSQ-RCO 3 and 3.5 bits",
@@ -413,7 +434,26 @@ PLAIN_FAMILIES: dict[str, dict[str, Any]] = {
                             "about": "8-bit, the closest to the full model"},
                }},
 }
+# GLM-5.3-Flash (glm5-next): 320B, 18B active, KDA and DSA attention with four residual streams (mHC), its MTP layer
+# not read yet; Unsloth's files in several parts
+PLAIN_FAMILIES["glm53"] = {
+    "title": "GLM-5.3-Flash", "by": "Z.ai (MIT), GGUFs by Unsloth",
+    "about": "320B, 18B active; a large MoE for the PCs whose RAM and VRAM hold 95 GB or more",
+    "tag": "glm53-", "name": "glm-5.3-flash", "max_context": 262144, "plain": True,
+    "models": {
+        "UD-IQ3_XXS": {"repo": _GLM53, "file": _GLM53_IQ3[0]["path"], "parts": _GLM53_IQ3,
+                       "size": sum(x["size"] for x in _GLM53_IQ3), "about": "3-bit (Unsloth Dynamic)", "tested": True},
+        "UD-IQ1_S": {"repo": _GLM53, "file": _GLM53_IQ1[0]["path"], "parts": _GLM53_IQ1,
+                     "size": sum(x["size"] for x in _GLM53_IQ1), "about": "1-bit (Unsloth Dynamic), the smallest"},
+    }}
 FAMILIES.update(PLAIN_FAMILIES)
+
+
+def plain_parts(d: dict) -> list[dict[str, Any]]:
+    """A PLAIN_FAMILIES model's files: its "parts", or its one file"""
+    return d.get("parts") or [{"path": d["file"], "size": d["size"], "sha256": d["sha256"]}]
+
+
 MMPROJ = "mmproj-Qwen3.8-Flash-Next-BF16.gguf"
 # EXPERIMENTAL, off by default (setup asks): a control vector shipped with the repository, see its README
 # under the Qwen Community License, so in third_party/nonfree (XeStrata runs without that folder)
@@ -4033,19 +4073,20 @@ def setup_plain(a, family: str, fam: dict, gpu: dict, chosen: list, sel: list, f
     names = list(models)
     if a.model and a.model not in names:
         fail(f"{fam['title']} has no {a.model} model file", "choose one of: " + ", ".join(names))
+    vram = max(0.0, gpu.get("vram_gb", 0.0) - 5)      # the experts the GPU holds need no copy in RAM
     for i, m in enumerate(names, 1):
         d = models[m]
         gb = d["size"] / 1e9
-        fit = "" if ram >= gb + 8 else f"   <- {gb:.0f} GB of weights, this PC has {ram:.0f} GB of RAM"
+        fit = "" if ram + vram >= gb + 8 else f"   <- {gb:.0f} GB of weights, this PC has {ram:.0f} GB of RAM"
         say(f"  {i}) {m:15s} {d['about']}; download {gb:.0f} GB" + ("" if d.get("tested") else "   [untested]") + fit)
     rec = next((str(i) for i, m in enumerate(names, 1) if models[m].get("tested")), "1")
     model = a.model or names[int(ask("Which size?", [str(i) for i in range(1, len(names) + 1)], rec, a.yes)) - 1]
     d = models[model]
     if not d.get("tested"):
         warn(f"{model} has not been run with this release (its tensor types are checked with the tested files)")
-    if ram < d["size"] / 1e9 + 8:
-        warn(f"{model}'s {d['size'] / 1e9:.0f} GB of weights do not fit this PC's RAM with room to spare: the engine "
-             "reads the experts the GPU does not hold from the model file through the OS file cache (slower)")
+    if ram + vram < d["size"] / 1e9 + 8:
+        warn(f"{model}'s {d['size'] / 1e9:.0f} GB of weights do not fit this PC's RAM and GPU with room to spare: "
+             "the engine reads the experts neither holds from the model file through the OS file cache (slower)")
     ok(f"size: {model}")
     tag = fam["tag"] + model
     if len(sel) > 1:
@@ -4069,16 +4110,20 @@ def setup_plain(a, family: str, fam: dict, gpu: dict, chosen: list, sel: list, f
         ctx = contexts[int(ask("Context?", [str(i) for i in range(1, len(contexts) + 1)],
                                str(contexts.index(rec_ctx) + 1), a.yes)) - 1]
     ok(f"context: {ctx} tokens")
+    parts = plain_parts(d)
+    names_of = [Path(x["path"]).name for x in parts]   # side by side in one folder: the engine finds them by name
     models_dir = Path(a.gguf_dir) if a.gguf_dir else Path(a.models_dir) / tag
-    gguf = models_dir / d["file"]
-    if not a.gguf_dir and not (gguf.exists() and done(gguf)):
+
+    def all_there(folder: Path) -> bool:
+        return all((folder / n).exists() and (done(folder / n) or a.gguf_dir) for n in names_of)
+    if not a.gguf_dir and not all_there(models_dir):
         for r in elsewhere:                            # already downloaded in a Strata folder on another drive
-            cand = r / "models" / tag / d["file"]
-            if cand.exists() and done(cand):
-                models_dir, gguf = cand.parent, cand
+            if all_there(r / "models" / tag):
+                models_dir = r / "models" / tag
                 ok(f"model file found in {models_dir}")
                 break
-    have = gguf.exists() and (done(gguf) or a.gguf_dir)
+    gguf = models_dir / names_of[0]
+    have = all_there(models_dir)
     if not have and free_gb(models_dir) < d["size"] / 1e9 + 1:
         fail(f"not enough free disk space in {models_dir}: need ~{d['size'] / 1e9 + 1:.0f} GB",
              "use --models-dir on a bigger drive")
@@ -4088,11 +4133,14 @@ def setup_plain(a, family: str, fam: dict, gpu: dict, chosen: list, sel: list, f
     # ---- 5. the model file
     step(5, f"downloading {fam['title']} {model}")
     if not have:
-        say(f"  The model file goes in {models_dir} (a copy you already have: put it there with its name, "
-            f"{d['file']}, or use --gguf-dir <its folder>)")
-        download(hf(d["repo"]) + d["file"], gguf)
-    verify_sha256(gguf, d["size"], d["sha256"])
-    ok(f"model file present: {gguf}")
+        say(f"  The model file{'s go' if len(parts) > 1 else ' goes'} in {models_dir} (a copy you already have: put "
+            f"it there with its name, {', '.join(names_of)}, or use --gguf-dir <its folder>)")
+    for x, n in zip(parts, names_of):
+        if not ((models_dir / n).exists() and (done(models_dir / n) or a.gguf_dir)):
+            download(hf(d["repo"]) + x["path"], models_dir / n)
+        verify_sha256(models_dir / n, x["size"], x["sha256"])
+    more = f" and {len(parts) - 1} more beside it" if len(parts) > 1 else ""
+    ok(f"model file present: {gguf}{more}")
 
     # ---- 6. the tokenizer and the chat template, for the server
     step(6, "preparing the model for Strata")
@@ -4218,7 +4266,7 @@ def describe() -> dict:
                 d = fam["models"][m]
                 gb = d["size"] / 1e9
                 models.append({"id": m, "about": d["about"], "download_gb": round(gb, 1), "ram_gb": round(gb + 8),
-                               "fits": "yes" if ram >= gb + 8 else "slow", "tested": bool(d.get("tested")),
+                               "fits": "yes" if ram + vram >= gb + 8 else "slow", "tested": bool(d.get("tested")),
                                "experimental": False, "recommended": m == rec,
                                "context": min(by_vram, fam["max_context"])})
             max_ctx = fam["max_context"]
