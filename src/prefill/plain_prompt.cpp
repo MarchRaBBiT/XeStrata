@@ -288,6 +288,7 @@ bool PlainModel::prompt_routed(int64_t ml, int64_t T, bool cpu_share, int32_t* r
         ++count[(size_t) e];
         heat_[(size_t) (ml * E + e)] += 1.0;
     }
+    dump_routes(ml, P.h_ids, T, K);
     if (routes != nullptr) std::copy(P.h_ids, P.h_ids + T * K, routes);
     const auto& f = lay.fmt[(size_t) ml];
     // the CPU's share of the missed experts (after Project Maya's CPU lane, as the windows split them): of

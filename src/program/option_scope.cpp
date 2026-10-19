@@ -39,7 +39,7 @@ const char* const kNotYet[] = {
     "--mtp-window", "--layer-split", "--gpu-stages", "--split-device", "--expert-cache-device1",
     "--expert-cache-device2", "--expert-cache-device3", "--expert-cache-remote-placement", "--gpu-only-full",
     "--control-vector", "--control-vector-layer-range", "--control-vector-scaled", "--cvec-dir", "--cvec-mode",
-    "--logits-stride", "--dump-routing", "--window-hashes", "--graph-only", "--no-capture", "--no-token-graph",
+    "--logits-stride", "--window-hashes", "--graph-only", "--no-capture", "--no-token-graph",
     "--no-pool", "--no-host-worker", "--no-hit-poke", "--no-publish-kernel", "--no-split-rows", "--pipeline-windows",
     "--sync-every-layer", "--short-read", "--yarn-attn-factor", "--yarn-beta-fast", "--yarn-beta-slow", "--yarn-ext-factor", "--turn-token", "--tail-role-token",
 };

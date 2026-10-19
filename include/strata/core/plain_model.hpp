@@ -37,6 +37,7 @@
 #include "strata/kernels/sampler.hpp"
 
 #include <cstdint>
+#include <cstdio>
 #include <functional>
 #include <memory>
 #include <string>
@@ -81,6 +82,9 @@ struct PlainOptions {
     std::string rope_scaling;
     double rope_scale = 0;
     double yarn_orig_ctx = 0;
+    /// The routed experts written here, a record a token and MoE layer as generate.cpp's --dump-routing writes them
+    /// (int32 layer, int32 k, k int32 ids, k float weights, 0 here): tools/make_profile.py reads them.  Empty: none.
+    std::string dump_routing;
     double rope_freq_base = 0;      ///< the rotation's base (0: the file's)
     double rope_freq_scale = 0;     ///< ... and its frequency scale, as llama.cpp's --rope-freq-scale (0: none)
     /// The most tokens a prompt chunk takes through the batched products (`prompt`; a shorter prompt, one chunk of its
@@ -395,6 +399,9 @@ private:
     std::vector<int32_t> res_;                    ///< [moe layer][expert] slot or -1
     std::vector<std::vector<int32_t>> free_;      ///< per moe layer, its free slots
     std::vector<double> heat_;                    ///< [moe layer][expert] routed entries since the load
+    std::FILE* route_dump_ = nullptr;             ///< --dump-routing's file, or null
+    /// `n` tokens' `k` routed experts of MoE layer `layer` into --dump-routing's file
+    void dump_routes(int64_t layer, const int32_t* ids, int64_t n, int64_t k);
     std::vector<std::pair<int32_t, int32_t>> prior_;   ///< the profile the tier was filled from
     int64_t n_slots_ = 0;
     int64_t windows_ = 0, swaps_total_ = 0;

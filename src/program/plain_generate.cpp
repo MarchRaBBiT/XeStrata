@@ -327,6 +327,7 @@ static void plain_usage(const std::string& arch) {
                  "  --rope-scaling none|linear|yarn, --rope-scale F, --yarn-orig-ctx N   context extension\n"
                  "  --rope-freq-base F, --rope-freq-scale F   the rotation's base and frequency scale\n"
                  "  --dump-logits PATH   each generated token's logits, FP32 rows\n"
+                 "  --dump-routing PATH  the routed experts of every token and MoE layer (tools/make_profile.py)\n"
                  "  --serve              stay resident and take requests on stdin (server.py's protocol, text requests)\n"
                  "  --gpu PCI            the GPU (its PCI address)\n",
                  arch.c_str());
@@ -383,6 +384,7 @@ int plain_main(int argc, char** argv) {
         else if (a == "--spec") opt.spec = (int) std::strtol(next("--spec"), nullptr, 10);
         else if (a == "--pool-workers") opt.pool_workers = (int) std::strtol(next("--pool-workers"), nullptr, 10);
         else if (a == "--dump-logits") dump_path = next("--dump-logits");
+        else if (a == "--dump-routing") opt.dump_routing = next("--dump-routing");
         else if (a == "--adapt-every") opt.adapt_every = (int) std::strtol(next("--adapt-every"), nullptr, 10);
         else if (a == "--adapt-swaps") opt.adapt_swaps = (int) std::strtol(next("--adapt-swaps"), nullptr, 10);
         else if (a == "--adapt-mib-per-token")

@@ -83,6 +83,7 @@ k::QsaShapes attn_shapes(const ModelSpec& s, int64_t n_head_kv) {
 PlainModel::PlainModel() = default;
 
 PlainModel::~PlainModel() {
+    if (route_dump_ != nullptr) std::fclose(route_dump_);
     if (swap_cs_ != nullptr) strata::gpu::stream_sync(swap_cs_);
     if (cs_ != nullptr) strata::gpu::stream_sync(cs_);
     prompt_gemm_.reset();   // the products' state before the stream
@@ -226,6 +227,13 @@ bool PlainModel::load_block(const GgufModel& m, int64_t l, Block& b, std::string
 
 bool PlainModel::load(const PlainOptions& opt, std::string& err) {
     opt_ = opt;
+    if (!opt_.dump_routing.empty()) {
+        route_dump_ = std::fopen(opt_.dump_routing.c_str(), "wb");
+        if (route_dump_ == nullptr) {
+            err = "plain model: cannot write " + opt_.dump_routing;
+            return false;
+        }
+    }
     if (opt_.max_t < 1 || opt_.max_t > k::cpu::MAXT || opt_.max_cells < 16) {
         err = "plain model: the window or the context is out of range";
         return false;
@@ -953,6 +961,17 @@ int64_t PlainModel::resident() const {
     return n;
 }
 
+void PlainModel::dump_routes(int64_t layer, const int32_t* ids, int64_t n, int64_t k) {
+    if (route_dump_ == nullptr || k <= 0) return;
+    const int32_t head[2] = {(int32_t) layer, (int32_t) k};
+    const std::vector<float> w((size_t) k, 0.0f);
+    for (int64_t t = 0; t < n; ++t) {
+        std::fwrite(head, sizeof head, 1, route_dump_);
+        std::fwrite(ids + t * k, sizeof(int32_t), (size_t) k, route_dump_);
+        std::fwrite(w.data(), sizeof(float), (size_t) k, route_dump_);
+    }
+}
+
 bool PlainModel::reset(std::string& err) {
     if (glm_) return reset_glm5(err);
     const ModelSpec& s = spec_;
@@ -975,6 +994,7 @@ void PlainModel::pool_fn(void* user, const float* x_f, const int32_t* ids, int64
     const int64_t E = m->spec_.n_expert;
     for (int64_t i = 0; i < n_tok * k; ++i)
         if (ids[i] >= 0 && ids[i] < E) m->heat_[(size_t) (layer * E + ids[i])] += 1.0;
+    m->dump_routes(layer, ids, n_tok, k);
     m->disp_.layers = layer;
     expert_pool_dispatch_multi(m->disp_, x_f, ids, n_tok, k, out);
 }
