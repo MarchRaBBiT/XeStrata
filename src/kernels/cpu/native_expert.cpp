@@ -43,7 +43,7 @@ bool iq512_supported(int type) noexcept {
 }
 
 bool iq256_supported(int type) noexcept {
-    return type == 16 || type == 17 || type == 18 || type == 21 || type == 22 || type == 23;
+    return type == 16 || type == 17 || type == 18 || type == 19 || type == 21 || type == 22 || type == 23;
 }
 
 bool kq256_supported(int type) noexcept { return type == 10 || type == 11 || type == 12 || type == 13 || type == 14; }
@@ -292,6 +292,15 @@ void native_down_rows(const NativeFmt& f, const uint8_t* blob, const void* const
     const int mt_min = native_gu_mt_min(f.gu_type);
     if (nt >= mt_min && f.d_type == 20 && iq4nl_mt) {   // #152: the same rule as the gate/up rows
         iq4nl256_down_rows(blob + f.down_off, f.d_row, (int) f.n_ff, hq, nt, out, r0, r1);
+        return;
+    }
+    // the i-quant down rows (GLM-5.3-Flash's IQ3_S, IQ3_XXS, IQ2_XXS) by the gate/up rows' AVX-2 kernel on its Q8_K
+    // rows, on AVX-2 CPUs only, as the gate/up rows' formats with no AVX-512 kernel (an AVX-512 CPU keeps ggml-cpu for
+    // them).  i7-14700, one thread, 4096 x 2048: IQ3_S 0.770 -> 0.423 ms an expert at one token, 3.05 -> 0.66 at four
+    static const bool avx2 = std::getenv("STRATA_NO_IQ256") == nullptr;
+    static const bool cpu512 = cpu_avx512_ok();
+    if (nt >= mt_min && avx2 && !cpu512 && iq256_supported(f.d_type)) {
+        iq256_rows(f.d_type, blob + f.down_off, f.d_row, (int) f.n_ff, hq, nt, out, r0, r1);
         return;
     }
     if (nt >= kq_mt_min(f.d_type, mt_min) && kq_on(f.d_type)) {   // the K-quant and Q8_0 down rows: the same rule

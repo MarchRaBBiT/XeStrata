@@ -598,6 +598,7 @@ void gu_type(int type, int nt, const uint8_t* blob, size_t gu_row, size_t up_off
         case 16: gu_rows_nt<16>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
         case 17: gu_rows_nt<17>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
         case 18: gu_rows_nt<G ? 118 : 18>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
+        case 19: gu_rows_nt<19>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
         case 21: gu_rows_nt<G ? 121 : 21>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
         case 22: gu_rows_nt<G ? 122 : 22>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
         case 23: gu_rows_nt<23>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
@@ -617,6 +618,7 @@ void dot_type(int type, int nt, const uint8_t* w, size_t row_bytes, int n, const
         case 16: dot_rows_nt<16>(nt, w, row_bytes, n, act, out, r0, r1); break;
         case 17: dot_rows_nt<17>(nt, w, row_bytes, n, act, out, r0, r1); break;
         case 18: dot_rows_nt<G ? 118 : 18>(nt, w, row_bytes, n, act, out, r0, r1); break;
+        case 19: dot_rows_nt<19>(nt, w, row_bytes, n, act, out, r0, r1); break;
         case 21: dot_rows_nt<G ? 121 : 21>(nt, w, row_bytes, n, act, out, r0, r1); break;
         case 22: dot_rows_nt<G ? 122 : 22>(nt, w, row_bytes, n, act, out, r0, r1); break;
         case 23: dot_rows_nt<23>(nt, w, row_bytes, n, act, out, r0, r1); break;
