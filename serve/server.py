@@ -61,8 +61,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.sh) as well as a module
 SETUP_CMD = "xestrata" if (ROOT / "PACKAGED").is_file() else "./setup.sh"   # a deb or rpm package's command (setup.py)
-from serve.frontend import (THINK_END, ChatTemplate, Event, HarmonyParser, OutputParser, ToolCall,  # noqa: E402
-                            anthropic_to_messages, forced_call, images_of, literal_tags, mark_think_literals,
+from serve.frontend import (THINK_END, ChatTemplate, Event, GlmOutputParser, HarmonyParser,  # noqa: E402
+                            OutputParser, ToolCall, anthropic_to_messages, forced_call, images_of, literal_tags,
+                            mark_think_literals,
                             openai_to_messages, tool_choice_of, unmark_think_literals)
 from serve.mcp import McpCancelled, McpHub, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
@@ -4205,8 +4206,9 @@ class Service:
                 print(f"[strata] thinking capped at {max_new - reserve} of max_tokens {max_new} to leave room for "
                       f"the answer (budget {budget})", flush=True)
                 budget = max(1, max_new - reserve)
+        reader = GlmOutputParser if getattr(self.template, "call_form", "qwen") == "glm" else OutputParser
         parser = (HarmonyParser(thinking=thinking, tools=tools) if harmony else
-                  OutputParser(thinking=thinking, tools=tools, stream_tools=True, recover=self.tool_call_recovery))
+                  reader(thinking=thinking, tools=tools, stream_tools=True, recover=self.tool_call_recovery))
         detok, n, finish = Detokenizer(self.tok), 0, "length"
         run_tok, run_len, repeated = None, 0, False     # #606: the current run of one repeated token
         thinking_n = 0                                  # tokens written while thinking (Responses' reasoning_tokens)
@@ -6125,7 +6127,8 @@ def make_handler(svc: Service):
             self._no_local_images(messages)
             if tool_choice_of(req.get("tool_choice"))[0] == "none":   # as the Responses route: no tools are offered
                 tools = None
-            force = forced_call(req.get("tool_choice"), tools)      # a bad value is a 400 before anything is sent
+            force = forced_call(req.get("tool_choice"), tools,      # a bad value is a 400 before anything is sent
+                                getattr(svc.template, "call_form", "qwen"))
             messages, validator = prepare_format(req.get("response_format"), messages)
             if validator is not None and (tools or req.get("strata_mcp")):
                 raise ValueError("structured response_format with tools/MCP is not supported")
@@ -6402,7 +6405,8 @@ def make_handler(svc: Service):
             self._no_local_images(messages)
             if tool_choice_of(req.get("tool_choice"))[0] == "none":   # Anthropic's {"type": "none"}: no tools offered
                 tools = None
-            force = forced_call(req.get("tool_choice"), tools)        # "any" / {"type": "tool", "name": N}
+            force = forced_call(req.get("tool_choice"), tools,        # "any" / {"type": "tool", "name": N}
+                                getattr(svc.template, "call_form", "qwen"))
             max_new = int(req.get("max_tokens") or 0)                  # 0/-1: the rest of the context
             svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
             stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
