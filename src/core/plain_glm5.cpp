@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: 2026 MistVVK and the XeStrata contributors
 // SPDX-FileCopyrightText: 2023-2026 The ggml authors
-// SPDX-License-Identifier: LGPL-3.0-or-later
+// SPDX-License-Identifier: LGPL-3.0-or-later AND MIT
 // src/core/plain_glm5.cpp - GLM-5.3-Flash (glm5-next) in PlainModel (plain_model.hpp).
 //
 // The block follows llama.cpp's glm5-next graph (src/models/glm5-next.cpp at f9a95ae; MIT License, Copyright (c)
