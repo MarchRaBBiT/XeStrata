@@ -526,6 +526,14 @@ public:
         const std::vector<std::pair<int32_t, int32_t>>& additional_gpu_pairs = {}, int64_t lend_from_slot = -1,
         uint64_t headroom_bytes = 8ull << 30, uint64_t budget_bytes = 0,
         const std::vector<std::pair<int32_t, int32_t>>* rank = nullptr);
+    /// `pin_cache_complement` for a GPU tier that keeps its own map of what each slot holds (PlainModel): the experts
+    /// the GPU holds, each with its slot (`pair_slot`, of `n_slots`).
+    bool pin_complement(
+        int64_t n_slots, const std::vector<std::pair<int32_t, int32_t>>& gpu_pairs,
+        const std::vector<int32_t>& pair_slot, std::string& err, Pin pin = Pin::automatic,
+        const std::vector<std::pair<int32_t, int32_t>>& additional_gpu_pairs = {}, int64_t lend_from_slot = -1,
+        uint64_t headroom_bytes = 8ull << 30, uint64_t budget_bytes = 0,
+        const std::vector<std::pair<int32_t, int32_t>>* rank = nullptr);
     /// A layer split: the prompt path borrows the TAIL SLOTS of every stage's cache, CUDA0's included, and with
     /// `additional_gpu_pairs` the single lend region above is off.  Set these BEFORE `pin_cache_complement` to keep
     /// those slots' experts in the RAM copy too: each region lists its stage's (layer, expert) pairs, the highest

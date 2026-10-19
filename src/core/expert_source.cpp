@@ -1059,12 +1059,39 @@ bool FileExpertSource::pin_cache_complement(
     const std::vector<std::pair<int32_t, int32_t>>& additional_gpu_pairs, int64_t lend_from_slot,
     uint64_t headroom_bytes, uint64_t budget_bytes, const std::vector<std::pair<int32_t, int32_t>>* rank) {
     err.clear();
-    const auto pin_t0 = std::chrono::steady_clock::now();
-    if (base_ == nullptr) { err = "FileExpertSource: open the mapped experts before pinning a complement"; return false; }
-    if (complement_ready_) { err = "FileExpertSource: the cache complement is already pinned"; return false; }
     if (!cache.valid()) { err = "FileExpertSource: the GPU expert cache is not open"; return false; }
     if (cache.fills() != cache.resident()) {
         err = "FileExpertSource: the GPU expert cache is not fully filled";
+        return false;
+    }
+    // The GPU cache's experts and their slots
+    std::vector<std::pair<int32_t, int32_t>> primary_gpu_pairs;
+    std::vector<int32_t> pair_slot;
+    primary_gpu_pairs.reserve((size_t) cache.resident());
+    pair_slot.reserve((size_t) cache.resident());
+    for (int64_t layer = 0; layer < n_layers_; ++layer) {
+        for (int64_t expert = 0; expert < n_expert_; ++expert) {
+            const int32_t slot = cache.slot_of(layer, expert);
+            if (slot == kNotResident) continue;
+            primary_gpu_pairs.emplace_back((int32_t) layer, (int32_t) expert);
+            pair_slot.push_back(slot);
+        }
+    }
+    return pin_complement(cache.slots(), primary_gpu_pairs, pair_slot, err, pin, additional_gpu_pairs, lend_from_slot,
+                          headroom_bytes, budget_bytes, rank);
+}
+
+bool FileExpertSource::pin_complement(
+    int64_t n_slots, const std::vector<std::pair<int32_t, int32_t>>& primary_gpu_pairs,
+    const std::vector<int32_t>& pair_slot, std::string& err, Pin pin,
+    const std::vector<std::pair<int32_t, int32_t>>& additional_gpu_pairs, int64_t lend_from_slot,
+    uint64_t headroom_bytes, uint64_t budget_bytes, const std::vector<std::pair<int32_t, int32_t>>* rank) {
+    err.clear();
+    const auto pin_t0 = std::chrono::steady_clock::now();
+    if (base_ == nullptr) { err = "FileExpertSource: open the mapped experts before pinning a complement"; return false; }
+    if (complement_ready_) { err = "FileExpertSource: the cache complement is already pinned"; return false; }
+    if (primary_gpu_pairs.size() != pair_slot.size()) {
+        err = "FileExpertSource: a slot for each GPU expert";
         return false;
     }
     const bool sync = strata::gpu::device_sync();
@@ -1074,22 +1101,11 @@ bool FileExpertSource::pin_cache_complement(
         return false;
     }
 
-    // The GPU cache's experts, and the bytes each slot's expert takes here (for the lend region below).
-    const int64_t n_slots = cache.slots();
-    std::vector<std::pair<int32_t, int32_t>> primary_gpu_pairs;
-    std::vector<int32_t> pair_slot;
+    // the bytes each slot's expert takes here (for the lend region below)
     std::vector<uint64_t> slot_bytes((size_t) std::max<int64_t>(n_slots, 0), 0);
-    primary_gpu_pairs.reserve((size_t) cache.resident());
-    pair_slot.reserve((size_t) cache.resident());
-    for (int64_t layer = 0; layer < n_layers_; ++layer) {
-        for (int64_t expert = 0; expert < n_expert_; ++expert) {
-            const int32_t slot = cache.slot_of(layer, expert);
-            if (slot == kNotResident) continue;
-            primary_gpu_pairs.emplace_back((int32_t) layer, (int32_t) expert);
-            pair_slot.push_back(slot);
-            if (slot >= 0 && slot < n_slots) slot_bytes[(size_t) slot] = layer_blob_bytes_[(size_t) layer];
-        }
-    }
+    for (size_t i = 0; i < pair_slot.size(); ++i)
+        if (pair_slot[i] >= 0 && pair_slot[i] < n_slots)
+            slot_bytes[(size_t) pair_slot[i]] = layer_blob_bytes_[(size_t) primary_gpu_pairs[i].first];
     std::vector<uint64_t> offsets;
     uint64_t bytes = 0;
     if (!detail::make_cache_complement_plan(n_layers_, n_expert_, layer_blob_bytes_, primary_gpu_pairs,
