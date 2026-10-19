@@ -440,6 +440,7 @@ PLAIN_FAMILIES["glm53"] = {
     "title": "GLM-5.3-Flash", "by": "Z.ai (MIT), GGUFs by Unsloth",
     "about": "320B, 18B active; a large MoE for the PCs whose RAM and VRAM hold 95 GB or more",
     "tag": "glm53-", "name": "glm-5.3-flash", "max_context": 262144, "plain": True,
+    "profile": "expert-profile-glm53.bin",
     "models": {
         "UD-IQ3_XXS": {"repo": _GLM53, "file": _GLM53_IQ3[0]["path"], "parts": _GLM53_IQ3,
                        "size": sum(x["size"] for x in _GLM53_IQ3), "about": "3-bit (Unsloth Dynamic)", "tested": True},
