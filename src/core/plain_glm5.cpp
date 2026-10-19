@@ -68,7 +68,7 @@ int file_type(int t) { return t == k::kNativeQ6KRows ? kQ6K : t == k::kNativeQ8R
 
 }  // namespace
 
-bool PlainModel::load_gblock(const GgufModel& m, int64_t l, GBlock& b, std::string& err) {
+bool PlainModel::load_gblock(const GgufModel& m, int64_t l, GBlock& b, std::string& err, bool mtp) {
     const ModelSpec& s = spec_;
     const uint64_t N = (uint64_t) s.n_embd, E = (uint64_t) s.n_expert;
     const int64_t H = s.n_head, S = s.kda_head_dim, C = H * S;
@@ -80,16 +80,17 @@ bool PlainModel::load_gblock(const GgufModel& m, int64_t l, GBlock& b, std::stri
         return false;
     };
     if (!upload_f32(m, p + "attn_norm.weight", N, b.attn_norm, err) ||
-        !upload_f32(m, p + "ffn_norm.weight", N, b.ffn_norm, err) ||
-        !upload(m, p + "hc_attn_fn.weight", b.hc_attn_fn, err) ||
+        !upload_f32(m, p + "ffn_norm.weight", N, b.ffn_norm, err))
+        return false;
+    if (!mtp && (!upload(m, p + "hc_attn_fn.weight", b.hc_attn_fn, err) ||
         !upload_f32(m, p + "hc_attn_base.weight", kMix, b.hc_attn_base, err) ||
         !upload_f32(m, p + "hc_attn_scale.weight", 3, b.hc_attn_scale, err) ||
         !upload(m, p + "hc_ffn_fn.weight", b.hc_ffn_fn, err) ||
         !upload_f32(m, p + "hc_ffn_base.weight", kMix, b.hc_ffn_base, err) ||
-        !upload_f32(m, p + "hc_ffn_scale.weight", 3, b.hc_ffn_scale, err))
+        !upload_f32(m, p + "hc_ffn_scale.weight", 3, b.hc_ffn_scale, err)))
         return false;
     for (const W* w : {&b.hc_attn_fn, &b.hc_ffn_fn})
-        if ((uint64_t) w->n_in != kHC * N || w->n_out != kMix) return bad("mHC mixes");
+        if (!mtp && ((uint64_t) w->n_in != kHC * N || w->n_out != kMix)) return bad("mHC mixes");
     if (b.kda) {
         if (!upload(m, p + "attn_q.weight", b.q, err) || !upload(m, p + "attn_k.weight", b.k, err) ||
             !upload(m, p + "attn_v.weight", b.v, err) || !upload(m, p + "ssm_f_a.weight", b.f_a, err) ||
@@ -167,8 +168,9 @@ bool PlainModel::load_glm5(std::string& err) {
         err = "plain model: a GLM-5.3-Flash shape this engine's kernels are not built for";
         return false;
     }
-    // the MTP layer does not draft (not GLM's yet)
-    has_mtp_ = false;
+    // the MTP layer (blk.<n_layer>, nextn.*): drafts for speculative windows, as the Qwen-family files'
+    has_mtp_ = opt_.spec >= 2 && s.n_nextn == 1 &&
+               model_->find("blk." + std::to_string(s.n_layer) + ".nextn.eh_proj.weight") != nullptr;
     opt_.max_cells = (opt_.max_cells + s.idx_kpool - 1) / s.idx_kpool * s.idx_kpool;
     cs_ = strata::gpu::stream_create();
     if (cs_ == nullptr) { err = "plain model: stream create failed"; return false; }
@@ -215,6 +217,21 @@ bool PlainModel::load_glm5(std::string& err) {
         if (!load_gblock(m, l, b, err)) return false;
     }
     if (n_dsa == 0) { err = "plain model: the model has no DSA block"; return false; }
+    if (has_mtp_) {   // a DSA block of its own caches, after the trunk's
+        const std::string p = "blk." + std::to_string(s.n_layer) + ".nextn.";
+        gmtp_.kda = false;
+        gmtp_.idx = n_dsa++;
+        if (!load_gblock(m, s.n_layer, gmtp_, err, true) || !upload(m, p + "eh_proj.weight", mtp_eh_, err) ||
+            !upload_f32(m, p + "enorm.weight", (uint64_t) s.n_embd, mtp_enorm_, err) ||
+            !upload_f32(m, p + "hnorm.weight", (uint64_t) s.n_embd, mtp_hnorm_, err))
+            return false;
+        if (m.find(p + "shared_head_norm.weight") == nullptr) mtp_head_norm_ = out_norm_;
+        else if (!upload_f32(m, p + "shared_head_norm.weight", (uint64_t) s.n_embd, mtp_head_norm_, err)) return false;
+        if (mtp_eh_.n_in != 2 * s.n_embd || mtp_eh_.n_out != s.n_embd || mtp_eh_.type == kBF16) {
+            err = "plain model: the MTP layer's eh_proj has another shape or type";
+            return false;
+        }
+    }
 
     // per-sequence state: per KDA block its recurrence and its three convolutions' last 3 inputs; per DSA block the
     // indexer's key | gate rows, its pooled keys and the MLA latent (FP16), one row a cell
@@ -233,6 +250,25 @@ bool PlainModel::load_glm5(std::string& err) {
         allocs_.push_back(cv);
         gdn_state_.push_back(st);
         gdn_conv_.push_back(cv);
+    }
+    // the KDA states after a window's rows but its last, for going back to the last accepted draft
+    if (has_mtp_) {
+        opt_.spec = std::min({opt_.spec, opt_.max_t, k::kGlm5MaxSnaps + 1});
+        n_snap_ = opt_.spec - 1;
+        gdn_snap_.assign(gdn_state_.size(), {});
+        conv_snap_.assign(gdn_state_.size(), {});
+        for (size_t g = 0; g < gdn_state_.size(); ++g)
+            for (int t = 0; t < n_snap_; ++t) {
+                float *st = nullptr, *cv = nullptr;
+                if (!strata::gpu::alloc_device(&st, state_bytes_) || !strata::gpu::alloc_device(&cv, conv_bytes_)) {
+                    err = "plain model: no VRAM for the KDA states' copies (--spec)";
+                    return false;
+                }
+                allocs_.push_back(st);
+                allocs_.push_back(cv);
+                gdn_snap_[g].push_back(st);
+                conv_snap_[g].push_back(cv);
+            }
     }
     for (int64_t i = 0; i < n_dsa; ++i) {
         float *ic = nullptr, *pl = nullptr;
@@ -302,7 +338,7 @@ bool PlainModel::load_glm5(std::string& err) {
         // the FFN
         !dev(&g_ffg_, T * FW * 4) || !dev(&g_ffu_, T * FW * 4) || !dev(&rlog_, T * E * 4) || !dev(&ids_, T * K * 4) ||
         !dev(&w_, T * K * 4) || !dev(&shared_, T * N * 4) || !dev(&moe_out_, T * N * 4) ||
-        !dev(&logits_, T * (uint64_t) n_vocab_ * 4)) {
+        !dev(&logits_, T * (uint64_t) n_vocab_ * 4) || (has_mtp_ && !dev(&mtp_h_, T * N * 4))) {
         err = "plain model: no VRAM for the window's buffers";
         return false;
     }
@@ -314,7 +350,8 @@ bool PlainModel::load_glm5(std::string& err) {
     mexec_.assign((size_t) opt_.max_t + 1, nullptr);
     msegs_.assign((size_t) opt_.max_t + 1, {});
     std::fprintf(stderr, "strata plain: GLM-5.3-Flash, %lld KDA and %lld DSA blocks, %lld cells; the prompt in chunks of "
-                         "%lld\n", (long long) n_kda, (long long) n_dsa, (long long) cells, (long long) opt_.prompt_chunk);
+                         "%lld%s\n", (long long) n_kda, (long long) (has_mtp_ ? n_dsa - 1 : n_dsa), (long long) cells,
+                 (long long) opt_.prompt_chunk, has_mtp_ ? "; the MTP layer drafts" : "");
     return reset(err);
 }
 
@@ -336,9 +373,7 @@ void PlainModel::gproj(const W& w, const float* x, float* y, int T, bool quantiz
 bool PlainModel::record_gblock(const GBlock& b, int64_t l, int T, uint32_t& ring, std::vector<strata::gpu::Graph*>& segs,
                                strata::gpu::Stream cs, std::string& err) {
     const ModelSpec& s = spec_;
-    const int64_t N = s.n_embd, H = s.n_head, S = s.kda_head_dim, C = H * S, E = s.n_expert, K = s.n_expert_used;
-    const int64_t QLR = s.q_lora_rank, KVR = s.kv_lora_rank, QK = s.key_length_mla, VD = s.value_length_mla;
-    const int64_t IH = s.idx_n_head, ID = s.idx_key_length;
+    const int64_t N = s.n_embd, H = s.n_head, S = s.kda_head_dim, C = H * S;
     const float eps = (float) s.rms_eps, hc_eps = (float) s.hc_eps;
     const int iters = (int) s.hc_sinkhorn_iters;
     // hc_pre: the mixes of the four streams as they are (their RMS is applied in glm5_hc_pre), then the block's row
@@ -360,17 +395,67 @@ bool PlainModel::record_gblock(const GBlock& b, int64_t l, int T, uint32_t& ring
         for (const auto& [w, y] : from_row) gproj(*w, hn_, y, T, true, cs);
         gproj(b.f_b, g_fa_, g_f_, T, false, cs);   // the low-rank gates' second halves (their inputs quantized in turn)
         gproj(b.g_b, g_ga_, g_g2_, T, false, cs);
-        k::glm5_kda_conv(g_q_, conv, b.conv_q, g_qc_, C, T, true, cs);
-        k::glm5_kda_conv(g_k_, conv + hist, b.conv_k, g_kc_, C, T, true, cs);
-        k::glm5_kda_conv(g_v_, conv + 2 * hist, b.conv_v, g_vc_, C, T, true, cs);
+        // the states after rows 0 .. n_snaps - 1, for spec_step: the convolutions then go row by row, their history
+        // copied after each of those rows
+        const int n_snaps = std::min(T - 1, n_snap_);
+        if (n_snaps <= 0) {
+            k::glm5_kda_conv(g_q_, conv, b.conv_q, g_qc_, C, T, true, cs);
+            k::glm5_kda_conv(g_k_, conv + hist, b.conv_k, g_kc_, C, T, true, cs);
+            k::glm5_kda_conv(g_v_, conv + 2 * hist, b.conv_v, g_vc_, C, T, true, cs);
+        } else {
+            for (int t = 0; t < T; ++t) {
+                const size_t r = (size_t) t * (size_t) C;
+                k::glm5_kda_conv(g_q_ + r, conv, b.conv_q, g_qc_ + r, C, 1, true, cs);
+                k::glm5_kda_conv(g_k_ + r, conv + hist, b.conv_k, g_kc_ + r, C, 1, true, cs);
+                k::glm5_kda_conv(g_v_ + r, conv + 2 * hist, b.conv_v, g_vc_ + r, C, 1, true, cs);
+                if (t < n_snaps)
+                    k::copy_from_mapped(conv_snap_[(size_t) b.idx][(size_t) t], conv, (int64_t) (conv_bytes_ / 4), cs);
+            }
+        }
+        float* snaps[k::kGlm5MaxSnaps] = {};
+        for (int t = 0; t < n_snaps; ++t) snaps[t] = gdn_snap_[(size_t) b.idx][(size_t) t];
         k::glm5_l2_heads(g_qc_, H, kL2Eps, T, cs);
         k::glm5_l2_heads(g_kc_, H, kL2Eps, T, cs);
         k::glm5_kda_gate(g_f_, b.dt, b.a, (float) s.kda_gate_lower_bound, g_gate_, H, S, T, cs);
         k::native_gdn_beta_gate(g_beta_, H * T, cs);
-        k::glm5_kda_scan(state, g_qc_, g_kc_, g_vc_, g_gate_, g_beta_, g_o_, H, T, cs);   // the recurrence
+        k::glm5_kda_scan(state, g_qc_, g_kc_, g_vc_, g_gate_, g_beta_, g_o_, H, T, cs, snaps,   // the recurrence
+                         std::max(n_snaps, 0));
         k::glm5_kda_out(g_o_, g_g2_, b.o_norm, eps, g_oy_, H, T, cs);
         gproj(b.o, g_oy_, mix_, T, false, cs);
     } else {
+        record_dsa(b, T, cs);
+    }
+    k::glm5_hc_post(mix_, g_hs_, g_post_, g_comb_, g_hs_, N, T, cs);
+
+    // ---- the FFN
+    hc_read(b.hc_ffn_fn, b.hc_ffn_scale, b.hc_ffn_base, b.ffn_norm);
+    auto swiglu = [&](float* out) {   // gate / up from hn_'s q8_1, the clamp, down
+        const int FW = b.ffn_gate.n_out;
+        if (b.ffn_gate.type != b.ffn_up.type ||
+            !k::native_mmvq_pair(b.ffn_gate.type, b.ffn_gate.data, b.ffn_up.data, g_xq_, g_ffg_, g_ffu_, (int) N, FW, T,
+                                 cs)) {
+            k::native_mmvq(b.ffn_gate.type, b.ffn_gate.data, g_xq_, g_ffg_, (int) N, FW, T, cs);
+            k::native_mmvq(b.ffn_up.type, b.ffn_up.data, g_xq_, g_ffu_, (int) N, FW, T, cs);
+        }
+        k::glm5_swiglu_clamp(g_ffg_, g_ffu_, g_ffg_, (int64_t) T * FW, b.clamp, cs);
+        gproj(b.ffn_down, g_ffg_, out, T, false, cs);
+    };
+    const float* ffn_out = mix_;
+    if (l < s.n_dense_lead) {
+        swiglu(mix_);
+    } else {
+        if (!record_moe(b, s.moe_index(l), T, ring, segs, cs, err)) return false;
+        ffn_out = moe_out_;
+    }
+    k::glm5_hc_post(ffn_out, g_hs_, g_post_, g_comb_, g_hs_, N, T, cs);
+    return true;
+}
+
+void PlainModel::record_dsa(const GBlock& b, int T, strata::gpu::Stream cs) {
+    const ModelSpec& s = spec_;
+    const int64_t N = s.n_embd, H = s.n_head, QLR = s.q_lora_rank, KVR = s.kv_lora_rank, QK = s.key_length_mla,
+                  VD = s.value_length_mla, IH = s.idx_n_head, ID = s.idx_key_length;
+    const float eps = (float) s.rms_eps;
         const int64_t d = b.idx;
         // from the block row: q_a, kv_a, the indexer's key and pool gate (its q8_1), its head weights (F32)
         gproj(b.q_a, hn_, g_qa_, T, true, cs);
@@ -413,12 +498,18 @@ bool PlainModel::record_gblock(const GBlock& b, int64_t l, int T, uint32_t& ring
                            (int) VD, T, cs);
         k::glm5_transpose_abd(g_voT_, g_vo_, H, T, VD, cs);
         gproj(b.o, g_vo_, mix_, T, false, cs);
-    }
-    k::glm5_hc_post(mix_, g_hs_, g_post_, g_comb_, g_hs_, N, T, cs);
+}
 
-    // ---- the FFN
-    hc_read(b.hc_ffn_fn, b.hc_ffn_scale, b.hc_ffn_base, b.ffn_norm);
-    auto swiglu = [&](float* out) {   // gate / up from hn_'s q8_1, the clamp, down
+bool PlainModel::record_moe(const GBlock& b, int64_t ml, int T, uint32_t& ring, std::vector<strata::gpu::Graph*>& segs,
+                            strata::gpu::Stream cs, std::string& err) {
+    const ModelSpec& s = spec_;
+    const int64_t N = s.n_embd, E = s.n_expert, K = s.n_expert_used;
+    k::f32_gemv_fp32_mmvf_multi(hn_, N, b.router, rlog_, E, N, E, T, cs);
+    const float scale = s.expert_weights_scale > 0 ? (float) s.expert_weights_scale : 1.0f;
+    k::glm5_router_sigmoid(rlog_, b.router_b, T, (int) E, (int) K, s.expert_weights_norm, scale, ids_, w_, cs);
+    ++ring;
+    win_.publish(ring, 0, 0, T, hn_, ids_, w_, cs);
+    {   // the shared expert while the host serves: gate / up from hn_'s q8_1, the clamp, down
         const int FW = b.ffn_gate.n_out;
         if (b.ffn_gate.type != b.ffn_up.type ||
             !k::native_mmvq_pair(b.ffn_gate.type, b.ffn_gate.data, b.ffn_up.data, g_xq_, g_ffg_, g_ffu_, (int) N, FW, T,
@@ -427,32 +518,47 @@ bool PlainModel::record_gblock(const GBlock& b, int64_t l, int T, uint32_t& ring
             k::native_mmvq(b.ffn_up.type, b.ffn_up.data, g_xq_, g_ffu_, (int) N, FW, T, cs);
         }
         k::glm5_swiglu_clamp(g_ffg_, g_ffu_, g_ffg_, (int64_t) T * FW, b.clamp, cs);
-        gproj(b.ffn_down, g_ffg_, out, T, false, cs);
-    };
-    const float* ffn_out = mix_;
-    if (l < s.n_dense_lead) {
-        swiglu(mix_);
-    } else {
-        k::f32_gemv_fp32_mmvf_multi(hn_, N, b.router, rlog_, E, N, E, T, cs);
-        const float scale = s.expert_weights_scale > 0 ? (float) s.expert_weights_scale : 1.0f;
-        k::glm5_router_sigmoid(rlog_, b.router_b, T, (int) E, (int) K, s.expert_weights_norm, scale, ids_, w_, cs);
-        ++ring;
-        win_.publish(ring, 0, 0, T, hn_, ids_, w_, cs);
-        swiglu(shared_);   // the shared expert while the host serves
-        if (win_.segmented()) {   // a graph ends where the host must answer the ring
-            strata::gpu::Graph* g = nullptr;
-            if (!strata::gpu::end_capture(cs, &g)) {
-                err = std::string("plain model: segment capture: ") + strata::gpu::last_error();
-                return false;
-            }
-            segs.push_back(g);
-            if (!strata::gpu::begin_capture(cs)) { err = "plain model: begin capture failed"; return false; }
-        }
-        if (!win_.experts(s.moe_index(l), ring, 0, 0, T, cs, err)) return false;
-        k::native_moe_combine_multi(win_.parts(), w_, shared_, moe_out_, N, K, T, cs);
-        ffn_out = moe_out_;
+        gproj(b.ffn_down, g_ffg_, shared_, T, false, cs);
     }
-    k::glm5_hc_post(ffn_out, g_hs_, g_post_, g_comb_, g_hs_, N, T, cs);
+    if (win_.segmented()) {   // a graph ends where the host must answer the ring
+        strata::gpu::Graph* g = nullptr;
+        if (!strata::gpu::end_capture(cs, &g)) {
+            err = std::string("plain model: segment capture: ") + strata::gpu::last_error();
+            return false;
+        }
+        segs.push_back(g);
+        if (!strata::gpu::begin_capture(cs)) { err = "plain model: begin capture failed"; return false; }
+    }
+    if (!win_.experts(ml, ring, 0, 0, T, cs, err)) return false;
+    k::native_moe_combine_multi(win_.parts(), w_, shared_, moe_out_, N, K, T, cs);
+    return true;
+}
+
+bool PlainModel::record_mtp_glm5(int T, strata::gpu::Stream cs, std::string& err) {
+    const ModelSpec& s = spec_;
+    const int64_t N = s.n_embd;
+    const float eps = (float) s.rms_eps;
+    const GBlock& b = gmtp_;
+    k::copy_from_mapped(x_, m_emb_, (int64_t) T * N, cs);
+    k::copy_i32_from_mapped(step_, m_step_, (int64_t) T * k::kStepCount, cs);
+    k::glm5_idx_steps(step_, T, (int) s.idx_kpool, (int) s.idx_top_k, g_steps_, cs);
+    // llama.cpp's glm5-next graph_mtp: x = eh_proj([rms_norm(e) enorm | rms_norm(h) hnorm]), then the block with
+    // plain residuals, and the shared head's norm
+    k::native_qsa_rms_norm_weighted(x_, mtp_enorm_, hn_, (int) N, T, eps, cs);
+    k::native_qsa_rms_norm_weighted(mtp_h_, mtp_hnorm_, mix_, (int) N, T, eps, cs);
+    k::concat_rows(g_qbT_, hn_, mix_, N, T, cs);
+    gproj(mtp_eh_, g_qbT_, x_, T, false, cs);
+    k::native_qsa_rms_norm_weighted_q8_1(x_, b.attn_norm, hn_, g_xq_, (int) N, T, eps, cs);
+    record_dsa(b, T, cs);
+    k::add_inplace(x_, mix_, (int64_t) T * N, cs);
+    k::native_qsa_rms_norm_weighted_q8_1(x_, b.ffn_norm, hn_, g_xq_, (int) N, T, eps, cs);
+    uint32_t ring = 0;
+    if (!record_moe(b, n_moe_ - 1, T, ring, msegs_[(size_t) T], cs, err)) return false;
+    k::add_inplace(x_, moe_out_, (int64_t) T * N, cs);
+    // the last row only: its norm is the next step's trunk row, and its logits pick the draft
+    k::native_qsa_rms_norm_weighted(x_ + (size_t) (T - 1) * N, mtp_head_norm_, hn_, (int) N, 1, eps, cs);
+    k::copy_from_mapped(mtp_h_, hn_, N, cs);
+    head_logits(hn_, 1, cs);
     return true;
 }
 

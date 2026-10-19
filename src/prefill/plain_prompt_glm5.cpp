@@ -248,14 +248,63 @@ bool PlainModel::prompt_chunks_glm5(const int32_t* tokens, int64_t n, int64_t po
                 }
                 k::glm5_hc_post(ffn_out, P.g_hs, P.g_post, P.g_comb, P.g_hs, N, T, cs);
             }
+            // the MTP layer after the trunk, its caches a cell ahead: row t pairs the trunk's normed row t with the
+            // token after it (the prompt's last row with a stand-in, rewritten by spec_start once the token is picked).
+            // Only its caches are wanted here, so of its block only the latent and the indexer's keys are made.
+            const bool mtp_chunk = has_mtp_ && p0 + T < opt_.max_cells;
+            const int64_t rows = mtp_chunk ? T : 1;   // the trunk's normed rows: every row for the MTP layer
+            if (mtp_chunk || c0 + T >= n) {
+                k::glm5_hc_mean(P.g_hs + (T - rows) * kHC * N, P.x, N, rows, cs);
+                k::native_qsa_rms_norm_weighted(P.x, out_norm_, P.hn, (int) N, (int) rows, eps, cs);
+            }
             if (c0 + T >= n) {   // the last token's logits, by the decode's head
-                k::glm5_hc_mean(P.g_hs + (T - 1) * kHC * N, P.x, N, 1, cs);
-                k::native_qsa_rms_norm_weighted(P.x, out_norm_, P.hn, (int) N, 1, eps, cs);
-                k::native_quantize_q8_1(P.hn, xq_, head_.n_in, 1, cs);
+                const float* last = P.hn + (rows - 1) * N;
+                k::native_quantize_q8_1(last, xq_, head_.n_in, 1, cs);
                 k::native_mmvq(head_.type, head_.data, xq_, logits_, head_.n_in, head_.n_out, 1, cs);
                 k::SamplerParams sp = sampler_;
                 sp.counter = (uint64_t) (p0 + T - 1);
                 k::sample_tokens(logits_, 1, (int) n_vocab_, nullptr, 0, sp, m_out_, cs);
+                if (mtp_chunk && !strata::gpu::copy_async(mtp_h_, last, (size_t) N * 4, cs)) {
+                    err = std::string("plain prompt: the MTP layer's input: ") + strata::gpu::last_error();
+                    return false;
+                }
+            }
+            if (mtp_chunk) {
+                const GBlock& b = gmtp_;
+                const int64_t d = b.idx;
+                k::native_qsa_rms_norm_weighted(P.hn, mtp_hnorm_, P.mix, (int) N, (int) T, eps, cs);
+                if (!strata::gpu::stream_sync(cs)) {   // the host's staging is rewritten below
+                    err = std::string("plain prompt: ") + strata::gpu::last_error();
+                    return false;
+                }
+                for (int64_t t = 0; t < T; ++t) {
+                    const int32_t tok = c0 + t + 1 < n ? tokens[c0 + t + 1] : tokens[n - 1];
+                    if (!k::cpu::native_row_to_float(emb_type_, emb_ + (size_t) tok * emb_row_, P.emb + t * N, N)) {
+                        err = "plain prompt: a token is out of the vocabulary";
+                        return false;
+                    }
+                    k::qsa_step_fill(P.h_steps + t * k::kStepCount, p0 + 1 + t, qs);
+                }
+                if (!strata::gpu::copy_async(P.x, P.emb, (size_t) (T * N) * 4, cs) ||
+                    !strata::gpu::copy_async(P.steps, P.h_steps, (size_t) (T * k::kStepCount) * 4, cs)) {
+                    err = std::string("plain prompt: staging: ") + strata::gpu::last_error();
+                    return false;
+                }
+                k::glm5_idx_steps(P.steps, T, (int) s.idx_kpool, (int) s.idx_top_k, P.g_steps, cs);
+                k::native_qsa_rms_norm_weighted(P.x, mtp_enorm_, P.hn, (int) N, (int) T, eps, cs);
+                k::concat_rows(P.g_qbT, P.hn, P.mix, N, T, cs);
+                dense(mtp_eh_, P.g_qbT, P.x, T);
+                k::native_qsa_rms_norm_weighted(P.x, b.attn_norm, P.hn, (int) N, (int) T, eps, cs);
+                dense(b.kv_a, P.hn, P.g_absT, T);
+                dense(b.idx_k, P.hn, P.g_ik, T);
+                dense(b.idx_gate, P.hn, P.g_ig, T);
+                k::native_qsa_rms_norm_weighted(P.g_absT, b.kv_a_norm, P.g_kv, (int) KVR, (int) T, eps, cs);
+                k::glm5_latent_store(P.g_kv, P.g_steps, T, KVR, g_latent_[(size_t) d], cs);
+                k::glm5_idx_append(P.g_ik, P.g_ig, b.idx_k_norm, b.idx_k_norm_b,
+                                   s.norm_eps > 0 ? (float) s.norm_eps : 1e-6f, P.g_steps, T, g_idx_cache_[(size_t) d],
+                                   cs);
+                k::glm5_idx_pool(g_idx_cache_[(size_t) d], b.idx_ape, (int) s.idx_kpool, P.g_steps, T,
+                                 g_pooled_[(size_t) d], cs);
             }
             mark(10);
             if (!routes.empty()) {   // the windows' counts at the prompt's end, as plain_prompt.cpp leaves them
@@ -288,6 +337,7 @@ bool PlainModel::prompt_chunks_glm5(const int32_t* tokens, int64_t n, int64_t po
                      (long long) n, stage_ms[5] + stage_ms[6] + stage_ms[7] + stage_ms[8], stage_ms[5], stage_ms[6],
                      stage_ms[7], stage_ms[8], stage_ms[1], stage_ms[2], stage_ms[3], stage_ms[4], stage_ms[9], stage_ms[10], stage_ms[11],
                      (long long) rst.miss_n, (long long) rst.cpu_n, (long long) rst.cpu_rows);
+    mtp_h_set_ = has_mtp_ && pos + n < opt_.max_cells;   // the trunk's last row is in mtp_h_ for spec_start
     *out = ((volatile int32_t*) h_out_)[0];
     if (logits != nullptr && !strata::gpu::copy(logits, logits_, (size_t) n_vocab_ * 4)) {
         err = "plain prompt: reading the logits failed";

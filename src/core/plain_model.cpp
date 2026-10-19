@@ -1203,7 +1203,7 @@ bool PlainModel::record(int T, bool mtp, std::string& err) {
     }
     bool ok = false;
     try {
-        ok = mtp ? record_mtp(T, cs_, err) : record_window(T, cs_, err);
+        ok = mtp ? (glm_ ? record_mtp_glm5(T, cs_, err) : record_mtp(T, cs_, err)) : record_window(T, cs_, err);
     } catch (const std::exception& e) {
         err = std::string("plain model: recording the window: ") + e.what();
     }

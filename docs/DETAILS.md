@@ -301,7 +301,7 @@ The others are made of the same tensor types, checked on those files and in the 
 ```
 
 The API works, with the thinking kept apart from the answer, streaming and tool calls.
-Ornith's official versions (Q4_K_M to BF16) and Qwen3.6 draft up to two tokens ahead with the model's MTP layer and check them in a window (speculative decoding, greedy requests only; the GSQ-RCO versions and llm-jp have no MTP layer, and GLM-5.3-Flash's is not used yet).
+Ornith's official versions (Q4_K_M to BF16), Qwen3.6 and GLM-5.3-Flash draft up to two tokens ahead with the model's MTP layer and check them in a window (speculative decoding, greedy requests only; the GSQ-RCO versions and llm-jp have no MTP layer).
 Not yet: images, Intel processors' own graphics, more than one GPU (setup uses the
 first), and the options made for Qwen3.8-Flash-Next such as the KV cache's precision and the low-RAM modes.
 When RAM is short of all the experts, the engine keeps the ones VRAM does not hold in RAM as far as it has room and
