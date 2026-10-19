@@ -139,7 +139,7 @@ void glm5_hc_post(const float* f, const float* residual, const float* post, cons
         for (int s = 0; s < HC; ++s) r[s] = residual[(t * HC + s) * N + n];
         for (int d = 0; d < HC; ++d) {
             float v = fv * post[t * HC + d];
-            for (int s = 0; s < HC; ++s) v += r[s] * comb[t * HC * HC + d + HC * s];
+            for (int s = 0; s < HC; ++s) v += r[s] * comb[(t * HC + s) * HC + d];
             out[(t * HC + d) * N + n] = v;
         }
     });
@@ -449,9 +449,9 @@ void glm5_idx_scores(const float* pooled, const float* q, const float* w, int n_
             float score = 0.0f;
             if (b < n_bid) {
                 float k[PER];
-                for (int i = 0; i < PER; ++i) k[i] = pooled[b * D + lane * PER + i];
+                for (int i = 0; i < PER; ++i) k[i] = pooled[b * D + (int64_t) lane * PER + i];
                 for (int h = 0; h < H; ++h) {
-                    const float* qh = q + (t * H + h) * D + lane * PER;
+                    const float* qh = q + (t * H + h) * D + (int64_t) lane * PER;
                     float d = 0.0f;
                     for (int i = 0; i < PER; ++i) d += qh[i] * k[i];
                     d = sycl::reduce_over_group(sg, d, sycl::plus<float>());
@@ -506,7 +506,7 @@ void glm5_mla_attn(const float* q, const uint16_t* latent, const int32_t* ids, i
             const int32_t* sel = ids + t * cap;
             auto cell = [&](int64_t j) { return j < chosen ? (int64_t) sel[j] : tail0 + (j - chosen); };
             for (int64_t j = warp; j < width; j += NSG) {   // a sub-group a cell
-                const uint16_t* row = latent + cell(j) * L + lane * PER;
+                const uint16_t* row = latent + cell(j) * L + (int64_t) lane * PER;
                 float d = 0.0f;
                 for (int i = 0; i < PER; ++i) d += qr[i] * f32_from_f16(row[i]);
                 d = sycl::reduce_over_group(sg, d, sycl::plus<float>());

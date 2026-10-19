@@ -1359,12 +1359,12 @@ void dq_iq1_s(const void* vx, int64_t ibs, const Out& o, int tid) {   // ggml-cu
     const int64_t il = tid % 4, ib = tid / 4;          // neighbours in one sub-block: contiguous writes
     const int y = (int) (32 * ib + 8 * il);
     const int qh = x[ibs].qh[ib];
-    const float d = (float) x[ibs].d * (2 * ((qh >> 12) & 7) + 1);
+    const float d = (float) x[ibs].d * (float) (2 * ((qh >> 12) & 7) + 1);
     const float delta = qh & 0x8000 ? -1 - IQ1S_DELTA : -1 + IQ1S_DELTA;
     const uint32_t g = iq1s_grid_gpu[x[ibs].qs[4 * ib + il] | (((qh >> 3 * il) & 7) << 8)];
     const uint32_t grid32[2] = {g & 0x0f0f0f0f, (g >> 4) & 0x0f0f0f0f};
     float v[8];
-    for (int j = 0; j < 8; ++j) v[j] = d * ((int8_t) byte_of(grid32[j / 4], j % 4) + delta);
+    for (int j = 0; j < 8; ++j) v[j] = d * ((float) (int8_t) byte_of(grid32[j / 4], j % 4) + delta);
     o.template put<8>(y, v);
 }
 template<typename Out>
@@ -1379,7 +1379,7 @@ void dq_iq1_m(const void* vx, int64_t ibs, const Out& o, int tid) {
     const uint32_t g = iq1s_grid_gpu[x[ibs].qs[4 * ib + il] | (((x[ibs].qh[2 * ib + il / 2] >> 4 * (il % 2)) & 7) << 8)];
     const uint32_t grid32[2] = {g & 0x0f0f0f0f, (g >> 4) & 0x0f0f0f0f};
     float v[8];
-    for (int j = 0; j < 8; ++j) v[j] = d * ((int8_t) byte_of(grid32[j / 4], j % 4) + delta);
+    for (int j = 0; j < 8; ++j) v[j] = d * ((float) (int8_t) byte_of(grid32[j / 4], j % 4) + delta);
     o.template put<8>(y, v);
 }
 template<typename Out>
