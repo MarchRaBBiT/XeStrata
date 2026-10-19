@@ -421,6 +421,7 @@ PLAIN_FAMILIES: dict[str, dict[str, Any]] = {
     "qwen36": {"title": "Qwen3.6-35B-A3B", "by": "Qwen (Apache-2.0), GGUFs with the MTP layer by Unsloth",
                "about": "35B, 3B active; a Qwen3.5 MoE with the Qwen tokenizer: Unsloth's 4-, 6- and 8-bit files",
                "tag": "qwen36-", "name": "qwen3.6-35b-a3b", "max_context": 262144, "plain": True,
+               "profile": "expert-profile-qwen36.bin",
                "draft_vocab": True,   # the vocabulary of Qwen3.8's draft head subsets (data/draft_vocab*.bin)
                "models": {
                    "UD-Q4_K_XL": {"repo": _QWEN36, "file": "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf", "size": 22853663008,
