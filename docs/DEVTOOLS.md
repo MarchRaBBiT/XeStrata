@@ -247,14 +247,18 @@ ninja -C build/win $(git diff --name-only HEAD -- '*.cpp' | sed "s|^|$PWD/|; s|$
 ### intel/llvm for Windows
 
 `tools/intel_llvm_build.py --windows` builds the SYCL runtime for Windows from the same clone as the Linux one, into `.tools/intel-llvm-win/install`.
-It builds the parts the engine uses only (`sycl9.dll`, UR's loader and its CUDA and Level Zero adapters, `xptifw.dll`, the device libraries, the NVIDIA libspirv, the headers and the import libraries): no Debug DLLs, no `clang.exe` and no sycl-jit.
+It builds the parts the engine uses only (`sycl9.dll`, UR's loader and its CUDA, HIP and Level Zero adapters, `xptifw.dll`, the device libraries, the NVIDIA and AMD libspirv, the headers and the import libraries): no Debug DLLs, no `clang.exe` and no sycl-jit.
 
 - The clang-cl of the toolchain `--contrib` built, of the same release, compiles and lld-link links. The tools that make the device libraries and libspirv are that toolchain's too (`--contrib`'s build also copies `opt`, `llvm-as` and `libclc-remangler`, which it does not install, into its install folder). No compiler is built, for Windows or for this machine. Build `--contrib` first.
 - The MSVC CRT and the Windows SDK are xwin's splat (`--xwin`, by default `.tools/xwin/sdk`). `llvm-lib`, `llvm-rc`, `llvm-mt` and `llvm-ml` are the distribution's LLVM's (`sudo apt install llvm`).
 - The Windows CUDA headers and import libraries the CUDA adapter links come from NVIDIA's redistributable archives (CUDA 12.4.1's `cuda_cudart`, `cuda_nvml_dev` and `cuda_cccl`). They are not free software and do not go into the 7z.
+- The HIP adapter (AMD GPUs) is built where this machine has ROCm's HIP (Ubuntu's `libamdhip64-dev`) and `--contrib` was built with the HIP target. Its headers are that HIP's (MIT; the license text in `install/licenses/hip-headers.txt`), and the `amdhip64.lib` it links is an import library of `amdhip64_7.dll`, made with `llvm-dlltool` from the C names Linux's `libamdhip64.so.7` exports. AMD's driver (Adrenalin 26.5.1 and later) puts `amdhip64_7.dll` into System32.
+- The Windows l32 libspirv it makes (the NVIDIA and the AMD one) is also copied into the `--contrib` toolchain's `lib/clang/<version>/lib/libclc`: the ones built on Linux have another `wchar_t` and do not link into Windows code, and `-fsycl-libspirv-path` names one file only, so building for NVIDIA and AMD together needs them in the compiler's own folder. Linux builds take the l64 ones and do not change.
 - It takes about three minutes on the development machine (28 threads).
 
 For NVIDIA GPUs, configure the cross build with `-DSTRATA_LICENSE=contrib -DSTRATA_CUDA_ARCHS=<the GPU's architecture> -DSTRATA_CUDA_PATH=<a CUDA toolkit>`, a CUDA toolkit no newer than the version the target PC's driver supports.
+For AMD GPUs add `-DSTRATA_HIP_ARCHS=<the gfx names>` (RDNA2 and later, as on Linux).
+For oneMKL add `-DSTRATA_ONEMKL=ON -DMKL_ROOT=<oneMKL for Windows' Library/>`: oneMKL's Windows headers, import libraries and CMake package are in the `Library/` of Intel's PyPI wheels (`mkl-devel`, `mkl-include`, `mkl-devel-dpcpp` and `onemkl-sycl-include`, win_amd64). On Windows oneMKL's CMake package also checks that the DLLs are there, so the `mkl` and `onemkl-sycl-*` wheels' DLLs are unpacked into the same `Library/` (for the build only; the 7z does not carry them). It builds oneMath and its oneMKL backend (`onemath.dll`, `onemath_blas_mklgpu.dll`); on Windows the engine looks for oneMKL on the PATH and then in oneAPI's `mkl` and `tbb` folders (`ONEAPI_ROOT`, else the installer's default folder) and `MKLROOT`. The cuBLAS and rocBLAS backends are not built on Windows: oneMath looks for Linux's libraries only.
 `tools/package/build.sh windows cuda12.4` builds all of this, and the Windows 7z, in a disposable Ubuntu 26.04 container ([BUILD.md](BUILD.md)).
 
 ### Running on a Windows PC

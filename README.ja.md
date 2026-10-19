@@ -33,7 +33,7 @@ Strata との主な違い:
 - **Intel Arc 向け**で、AMD と NVIDIA の GPU でも動きます。
 - **GPU は 1 枚が基本**です。同じ PC の 2 枚以上の GPU に層を分けて載せることもできます（[MULTIGPU](docs/MULTIGPU.ja.md)）。
   Intel・AMD・NVIDIA のメーカーの違う GPU も組み合わせられます（例: Intel Arc の Battlemage と NVIDIA の Ada。NVIDIA を含むときは contrib-llvm のビルド）。
-- **Linux と Windows** で動きます。Windows は Intel と NVIDIA の GPU で、AMD の GPU は Linux だけです（[Windows](#windows)）。WSL 2 は動くかもしれません（プルリクエスト歓迎）。
+- **Linux と Windows** で動きます。Windows でも Intel・NVIDIA・AMD の GPU で動きます（[Windows](#windows)）。WSL 2 は動くかもしれません（プルリクエスト歓迎）。
 - **自由ソフトウェアだけでも動きます**（free のビルド、Debian main に入れられる程度に自由な構成。[ソースから作ります](docs/BUILD.ja.md#deb-と-rpm-のパッケージ)）。
   配っている contrib-llvm の版は、自由ソフトウェアでない Intel の oneMKL と NVIDIA の cuBLAS を、入っていれば使います（[インストール](#インストール)）。
 
@@ -270,7 +270,8 @@ sudo dnf remove xestrata-contrib-cuda13.4    # Fedora（同じ）
 
 - **要るもの**: [.NET 10 のランタイム](https://dotnet.microsoft.com/download/dotnet/10.0)と [Visual C++ の再頒布可能パッケージ](https://aka.ms/vs/17/release/vc_redist.x64.exe)、GPU のドライバー。
   Visual C++ の再頒布可能パッケージがなければ、`xestrata.exe` が知らせて止まります。
-- **GPU**: Intel と NVIDIA です（NVIDIA は Pascal 以降、cuda12.4 のパッケージと同じコード）。AMD の GPU は Windows ではまだ使えません。
+- **GPU**: Intel、NVIDIA（Pascal 以降、cuda12.4 のパッケージと同じコード）、AMD（RDNA2 以降、Ubuntu のパッケージと同じ gfx）です。AMD は Adrenalin 26.5.1 以降のドライバーが要ります（`amdhip64_7.dll`）。
+- **oneMKL**: Intel の GPU では、Intel の oneMKL 2026.2 が入っていれば prompt の密な積に使います（7z には入っていません）。なければ XeStrata 自身のカーネルで動きます。
 - **置き場所**: 7z のフォルダーには書き込みません。設定は `%APPDATA%\xestrata`、ログなどは `%LOCALAPPDATA%\xestrata`、モデルはデータのフォルダー（既定は `%LOCALAPPDATA%\xestrata\data`）に置きます。
 - **更新**: 新しい 7z を別のフォルダーに展開して、そちらの `xestrata.exe` を起動します。設定とモデルはそのまま使います。
 

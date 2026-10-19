@@ -247,14 +247,18 @@ ninja -C build/win $(git diff --name-only HEAD -- '*.cpp' | sed "s|^|$PWD/|; s|$
 ### Windows 版の intel/llvm
 
 `tools/intel_llvm_build.py --windows` は、Linux 版と同じクローンから、Windows 版の SYCL のランタイムを `.tools/intel-llvm-win/install` に作ります。
-エンジンが使う部分（`sycl9.dll`、UR のローダーと CUDA・Level Zero のアダプター、`xptifw.dll`、デバイスライブラリ、NVIDIA 向けの libspirv、ヘッダー、インポートライブラリ）だけで、Debug 版の DLL、`clang.exe`、sycl-jit は作りません。
+エンジンが使う部分（`sycl9.dll`、UR のローダーと CUDA・HIP・Level Zero のアダプター、`xptifw.dll`、デバイスライブラリ、NVIDIA 向けと AMD 向けの libspirv、ヘッダー、インポートライブラリ）だけで、Debug 版の DLL、`clang.exe`、sycl-jit は作りません。
 
 - コンパイルは `--contrib` で作った同じ版のツールチェーンの clang-cl、リンクは lld-link が行います。デバイスライブラリと libspirv を作るツールも、そのツールチェーンのものです（`--contrib` のビルドは、入れ先にない `opt`・`llvm-as`・`libclc-remangler` も入れ先に写します）。Windows 向けにもこの機械向けにも、コンパイラは作りません。先に `--contrib` を作っておきます。
 - MSVC の CRT と Windows SDK は xwin の展開（`--xwin`、既定は `.tools/xwin/sdk`）を使います。`llvm-lib`・`llvm-rc`・`llvm-mt`・`llvm-ml` はディストリビューションの LLVM のものです（`sudo apt install llvm`）。
 - CUDA のアダプターがリンクする CUDA の Windows 版のヘッダーとインポートライブラリは、NVIDIA の再配布用のアーカイブ（CUDA 12.4.1 の `cuda_cudart`・`cuda_nvml_dev`・`cuda_cccl`）から取ります。自由ソフトウェアではなく、7z には入れません。
+- HIP のアダプター（AMD の GPU）は、この機械の ROCm の HIP（Ubuntu の `libamdhip64-dev`）があり、`--contrib` が HIP のターゲットつきで作られているときに作ります。ヘッダーはその HIP のもの（MIT。ライセンス文は `install/licenses/hip-headers.txt`）で、リンクする `amdhip64.lib` は、Linux の `libamdhip64.so.7` が出す C の名前から `llvm-dlltool` で作った `amdhip64_7.dll` のインポートライブラリです。`amdhip64_7.dll` は AMD のドライバー（Adrenalin 26.5.1 以降）が System32 に入れます。
+- できた Windows 向けの l32 の libspirv（NVIDIA 向けと AMD 向け）は、`--contrib` のツールチェーンの `lib/clang/<版>/lib/libclc` にも写します。Linux で作ったものは `wchar_t` が違って Windows のコードにリンクできず、`-fsycl-libspirv-path` は 1 つしか指せないので、NVIDIA と AMD を一緒に作るにはコンパイラー自身の置き場所にあることが要ります。Linux 向けのビルドは l64 を使うので変わりません。
 - 開発機（28 スレッド）で 3 分ほどです。
 
 NVIDIA の GPU 向けには、クロスビルドを `-DSTRATA_LICENSE=contrib -DSTRATA_CUDA_ARCHS=<GPU の版> -DSTRATA_CUDA_PATH=<CUDA ツールキット>` で構成します。CUDA ツールキットは、動かす PC のドライバの対応する版以下にします。
+AMD の GPU 向けには `-DSTRATA_HIP_ARCHS=<gfx の名前>` を足します（Linux と同じく RDNA2 以降）。
+oneMKL を使うには `-DSTRATA_ONEMKL=ON -DMKL_ROOT=<oneMKL の Windows 版の Library/>` を足します。oneMKL の Windows 版のヘッダー・インポートライブラリ・CMake のパッケージは、Intel の PyPI の wheel（`mkl-devel`・`mkl-include`・`mkl-devel-dpcpp`・`onemkl-sycl-include`、win_amd64）の `Library/` にあります。oneMKL の CMake のパッケージは Windows では DLL があることも確かめるので、`mkl` と `onemkl-sycl-*` の wheel の DLL も同じ `Library/` に展開します（リンクにだけ使い、7z には入れません）。oneMath とその oneMKL の backend（`onemath.dll`・`onemath_blas_mklgpu.dll`）ができ、エンジンは Windows では PATH のあとに oneAPI の `mkl` と `tbb` のフォルダー（`ONEAPI_ROOT`、なければインストーラーの既定の場所）と `MKLROOT` を足して oneMKL を探します。cuBLAS と rocBLAS の backend は、oneMath が Linux のライブラリしか探さないので Windows では作りません。
 Windows 版の 7z は、`tools/package/build.sh windows cuda12.4` が Ubuntu 26.04 の使い捨てのコンテナでここまでをすべて作ります（[BUILD.md](BUILD.ja.md)）。
 
 ### Windows の PC で動かす

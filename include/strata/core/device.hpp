@@ -24,6 +24,7 @@ struct DeviceInfo {
     std::string name, driver_version, platform_version;
     std::string backend;            ///< "Level Zero", "CUDA" or "HIP"
     std::string pci;                ///< its PCI address (domain:bus:device.function, lower case), "?" if not reported
+    std::string arch;               ///< an AMD GPU's ISA as its HIP runtime names it (gfx1200), empty elsewhere
     uint32_t vendor_id = 0, device_id = 0;   ///< device_id: Intel GPUs only (0 elsewhere)
     uint64_t total_bytes = 0, free_bytes = 0;
     bool free_bytes_known = false;

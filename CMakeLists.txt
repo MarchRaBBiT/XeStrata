@@ -470,8 +470,16 @@ if(STRATA_ENABLE_XE)
   if(NOT STRATA_LICENSE STREQUAL "contrib")
     set(_strata_onemkl OFF)   # oneMKL is not free software
   endif()
-  # Windows: not yet (oneMath's FindcuBLAS finds Linux's libraries only), so every GPU takes XeStrata's own kernels
-  if((_strata_onemkl OR _strata_cuda_archs OR _strata_hip_archs) AND NOT WIN32)
+  # Windows: oneMKL's backend only, which runs where oneMKL is installed (the engine adds its folders to the DLL search,
+  # src/prefill/gemm.cpp); oneMath's FindcuBLAS and rocBLAS backend find Linux's libraries only, so there the NVIDIA and
+  # AMD GPUs take XeStrata's own kernels
+  set(_strata_math_cuda "${_strata_cuda_archs}")
+  set(_strata_math_hip "${_strata_hip_archs}")
+  if(WIN32)
+    set(_strata_math_cuda "")
+    set(_strata_math_hip "")
+  endif()
+  if(_strata_onemkl OR _strata_math_cuda OR _strata_math_hip)
     if(_strata_onemkl AND NOT MKL_ROOT)
       if(DEFINED ENV{MKLROOT})
         set(MKL_ROOT $ENV{MKLROOT})
@@ -479,13 +487,17 @@ if(STRATA_ENABLE_XE)
         set(MKL_ROOT /opt/intel/oneapi/mkl/latest)
       endif()
     endif()
+    if(_strata_onemkl AND CMAKE_CROSSCOMPILING AND MKL_ROOT)
+      # a Windows cross build searches only under its roots (cmake/toolchain-windows-msvc.cmake): oneMKL's for Windows
+      list(APPEND CMAKE_FIND_ROOT_PATH "${MKL_ROOT}")
+    endif()
     # oneMath's options as plain variables (its policy CMP0077 takes them); shared libraries for this folder only, as
     # ggml is static
     set(BUILD_SHARED_LIBS ON)
     set(TARGET_DOMAINS blas)
     set(ENABLE_MKLCPU_BACKEND OFF)
     set(ENABLE_MKLGPU_BACKEND ${_strata_onemkl})
-    if(_strata_hip_archs)
+    if(_strata_math_hip)
       # the backend's own GPU code takes one architecture (the products themselves run inside rocBLAS and hipBLASLt)
       set(ENABLE_ROCBLAS_BACKEND ON)
       list(GET _strata_hip_archs 0 HIP_TARGETS)
@@ -507,7 +519,7 @@ if(STRATA_ENABLE_XE)
                                  "slower on some GPUs")
       endif()
     endif()
-    if(_strata_cuda_archs AND _strata_cuda_cublas)
+    if(_strata_math_cuda AND _strata_cuda_cublas)
       set(ENABLE_CUBLAS_BACKEND ON)
       # the backend's own GPU code for the oldest architecture, which every NVIDIA GPU here runs (its default, sm_75's
       # PTX, does not run on an sm_70 GPU)
@@ -543,8 +555,8 @@ if(STRATA_ENABLE_XE)
       set(_strata_onemath_url URL ${STRATA_ONEMATH_SOURCE})
     else()
       set(_strata_onemath_url
-        URL https://github.com/MistVVK/oneMath/archive/refs/tags/xestrata-3.tar.gz
-        URL_HASH SHA256=9a5203102002e5e85f1ad4a8b91b9f6134365f016bba1a430b038df95517e61d)
+        URL https://github.com/MistVVK/oneMath/archive/refs/tags/xestrata-4.tar.gz
+        URL_HASH SHA256=856df52129f5f1747300a1795dc0fd4207bb7aff2672eec12371f869d2e52f5a)
     endif()
     # another archive is another tree: start from it again
     if(NOT "${_strata_onemath_url}" STREQUAL "${_STRATA_ONEMATH_KEY}")
@@ -591,7 +603,7 @@ if(STRATA_ENABLE_XE)
     # -fsycl-targets=nvptx64-nvidia-cuda on them, which would replace the engine's own targets
     add_dependencies(strata_prefill onemath)
     target_include_directories(strata_prefill SYSTEM PRIVATE $<TARGET_PROPERTY:onemath,INTERFACE_INCLUDE_DIRECTORIES>)
-    target_link_libraries(strata_prefill PRIVATE $<TARGET_FILE:onemath>)
+    target_link_libraries(strata_prefill PRIVATE $<TARGET_LINKER_FILE:onemath>)   # Windows: its import library
     target_compile_definitions(strata_prefill PRIVATE STRATA_ONEMATH=1)
   endif()
 
