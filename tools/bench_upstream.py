@@ -77,10 +77,15 @@ def load_setup(src: Path):
     if spec is None or spec.loader is None:
         raise UpstreamError(f"{src}/setup.py cannot be read")
     mod = importlib.util.module_from_spec(spec)
+    # its tree first on the path, as when it runs from there: 0.2.0's setup.py imports its own strata_control
+    saved = list(sys.path)
+    sys.path.insert(0, str(src))
     try:
         spec.loader.exec_module(mod)
     except (Exception, SystemExit) as e:
         raise UpstreamError(f"the tag's setup.py does not load here ({e})") from e
+    finally:
+        sys.path[:] = saved
     return mod
 
 
