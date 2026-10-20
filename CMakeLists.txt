@@ -114,6 +114,19 @@ if(STRATA_LICENSE STREQUAL "contrib")
 endif()
 message(STATUS "AMD architectures '${_strata_hip_archs}'")
 
+# upstream #3202: Windows hands a program its command line in the system's ANSI code page (cp1251 on a Russian Windows,
+# cp1252 on an English one), but the engine reads every path as UTF-8 (the run configs and the server write UTF-8): a
+# model folder with Cyrillic letters arrived as other bytes, or as "?", and did not open.  The manifest makes the
+# process's ANSI code page UTF-8 (Windows 10 1903 and newer; older Windows ignores it), so the command line, fopen and
+# std::ifstream take UTF-8.  lld-link merges it into the manifest it embeds (/MANIFESTINPUT).
+function(strata_utf8_manifest target)
+  if(WIN32)
+    # a .manifest source reaches only MSVC's link: clang's GNU driver passes the file to lld-link itself
+    set(_manifest "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/cmake/strata-utf8.manifest")
+    target_link_options(${target} PRIVATE "LINKER:/MANIFESTINPUT:${_manifest}")
+  endif()
+endfunction()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -358,6 +371,7 @@ if(STRATA_ENABLE_XE)
   target_link_libraries(strata_core PUBLIC strata_sycl strata_warnings strata_plan strata_platform)
 
   add_executable(strata-device src/core/device_main.cpp)
+  strata_utf8_manifest(strata-device)
   target_link_libraries(strata-device PRIVATE strata_core strata_kernels_cpu)   # --cpu: the engine's CPU tests
   add_executable(strata-load src/core/load_main.cpp)
   target_link_libraries(strata-load PRIVATE strata_core)
@@ -613,6 +627,7 @@ if(STRATA_ENABLE_XE)
 
   # `strata generate` (P2.S6): the program that composes the components into tokens
   add_executable(strata src/program/generate.cpp src/program/plain_generate.cpp src/program/option_scope.cpp)
+  strata_utf8_manifest(strata)
   target_link_libraries(strata PRIVATE strata_engine strata_prefill strata_spec)
 
   # the image engine (Qwen-Image-2.1's DiT, src/image/): its kernels and the DiT; strata-image-probe, one block of the
@@ -638,6 +653,7 @@ if(STRATA_ENABLE_XE)
   add_executable(strata-image-vision-probe src/image/qi_vision_probe.cpp)
   target_link_libraries(strata-image-vision-probe PRIVATE strata_image)
   add_executable(strata-image src/image/strata_image.cpp)
+  strata_utf8_manifest(strata-image)
   target_link_libraries(strata-image PRIVATE strata_image)
 
   if(STRATA_BUILD_TESTS)
