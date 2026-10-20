@@ -5605,6 +5605,20 @@ def main() -> int:
             warn(f"the model is on a rotational disk ({disk}): its n-gram table is read from it at random, which can "
                  f"stall prompts for minutes. An SSD is recommended; with ~{table_gb:.0f} GB more RAM, "
                  "--ple-io ram in the config's args keeps the table in RAM instead")
+    elif not low_ram and not WIN and wsl_version() == 0:
+        # upstream b25b30970: on an SSD too, a PC with RAM to spare keeps the n-gram table in RAM, so a new prompt's
+        # first chunk does not wait for its table rows (65,536 random SSD reads at 4K tokens).  upstream (RTX PRO 5000,
+        # Linux, NVMe): prompt 4K -18%, 20K -9%, decode +0.8%; the B70 (IQ3_XXS 4K, 2026-10-20): prompt +1.9%, decode
+        # the same.  Measured on Linux only (Windows locks pages otherwise, WSL pins little), and only with 16 GB to
+        # spare beyond the model's own need: a smaller PC keeps reading from the SSD.
+        tensor = next((t for t in GGUFFile(ple).tensors if t.name == "per_layer_token_embd.weight"), None)
+        size = getattr(tensor, "expected_bytes", lambda: None)()
+        table_gb = size / 1e9 if size else 28.8
+        if ram >= MODELS[model]["ram_gb"] + table_gb + 16:
+            args += ["--ple-io", "ram"]
+            ok(f"{ram:.0f} GB of RAM: the {table_gb:.0f} GB n-gram table is kept in RAM (--ple-io ram), so a new "
+               "prompt does not wait for its rows from the SSD; remove --ple-io ram from the config's args to read it "
+               "from the SSD instead")
     # KV streaming: from 64K up the whole KV cache lives in RAM and only the part the attention reads (32K positions
     # per layer) stays in VRAM; the VRAM it frees holds more experts (+6% at 128K, +23% at 262K with Q2_0). It
     # costs ~13.7 KB of RAM per context token with 8-bit KV (1.7 GB at 128K), 10.6 KB with K8V4, 7.5 KB with 4-bit, so
