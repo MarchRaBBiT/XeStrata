@@ -97,6 +97,7 @@ HF_REVISIONS = {
     "llm-jp/llm-jp-4.1-32b-a3b-thinking-gguf": "044a4447c2da94b489484927355665b819eb3d4b",           # 2026-10-11
     "unsloth/Qwen3.6-35B-A3B-MTP-GGUF": "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d",                  # 2026-10-12
     "unsloth/GLM-5.3-Flash-GGUF": "a38483c8cd5df544f53d70fb281afe97369d5ab6",                        # 2026-10-09
+    "agentionai/Qwen3.8-Flash-Next-Gyro-GGUF": "1ada08422e404aca51ab9df665f089f34c419c6b",          # 2026-10-13
 }
 
 
@@ -226,6 +227,17 @@ REQUIREMENTS = ROOT / "requirements.txt"   # the same packages and their depende
 BUILD_PACKAGES = ["cmake", "ninja"]
 BUILD_REQUIREMENTS = ROOT / "requirements-build.txt"
 
+# agentionai's Gyro files (Qwen3.8-Flash-Next with trellis-coded, Hadamard-rotated experts, TQ2_T / TQK6 / TQK7;
+# upstream ba64156fd): one GGUF per size, the n-gram table inside it (hence the 58 / 92 GB downloads for 27.6 / 35 GB of
+# memory).  The pack is xs2 (Hadamard-folded experts, hadamard.txt).  The sizes and SHA-256 are the Hub's LFS pointers
+# of the revision pinned in HF_REVISIONS.  The model's license is Qwen's.
+GYRO_FILES = {
+    "Qwen3.8-Flash-Next-Gyro-S-TQ1_0.gguf":
+        (58487015808, "c6ea1b08ca312f99095b27588ba35976b53f948268e7f91e7761926aa01d9c87"),
+    "Qwen3.8-Flash-Next-Gyro-M-TQ2_0.gguf":
+        (91965774272, "7aa36d15131d255179ab6c87fa9c9f81a0b541fc9e81e959d4c3e29eb20feb5f"),
+}
+
 MODELS: dict[str, dict[str, Any]] = {
     "Q2_0": {"about": "2-bit, the fastest", "download_gb": 66.4, "ram_gb": 48, "arena_gb": 34.0},
     "IQ2_XS": {"about": "2-bit i-quant, a little better quality, close in speed", "download_gb": 68.0, "ram_gb": 48,
@@ -270,6 +282,17 @@ MODELS: dict[str, dict[str, Any]] = {
              "download_gb": 188.2, "ram_gb": 136, "arena_gb": 128.3, "families": ("unsloth",), "budget": True,
              "experimental": True, "shards": 6, "file": "Qwen3.8-Flash-Next-{q}-0000{i}-of-00006.gguf",
              "vision": True, "vision_untested": True},
+    # Gyro (agentionai): "ram_gb" is the memory the weights need in total, VRAM and RAM together ("mem_total"): Gyro-S
+    # 27.6 GB, Gyro-M 35 GB (the rest of the download is the n-gram table, read from the SSD).  Neither is anyone's
+    # default.  Images: the same mmproj as every Flash-Next model; strata-vision reads only the vocabulary and header of
+    # the Gyro GGUF (tools/vision/gguf_meta.h), whose TQK6 / TQK7 tensors llama.cpp does not know.
+    "Gyro-S": {"about": "the smallest option, for PCs with little memory (27.6 GB of VRAM + RAM together); lower "
+                        "quality than the 2-3-bit sizes, and the 2-bit Q2_0 decodes faster",
+               "download_gb": 58.5, "ram_gb": 27.6, "arena_gb": 25.8, "families": ("gyro",), "mem_total": True,
+               "file": "Qwen3.8-Flash-Next-Gyro-S-TQ1_0.gguf", "shards": 1, "vision": True},
+    "Gyro-M": {"about": "about IQ3_XXS quality with about 20% less GPU memory (35 GB of VRAM + RAM together)",
+               "download_gb": 92.0, "ram_gb": 35.0, "arena_gb": 32.1, "families": ("gyro",), "mem_total": True,
+               "file": "Qwen3.8-Flash-Next-Gyro-M-TQ2_0.gguf", "shards": 1, "vision": True},
 }
 # The experimental Unsloth file's four shards at the pinned revision: name -> (bytes, sha256), checked after the
 # download (check_shards reads the other model files' directories; these are also hashed once).
@@ -428,6 +451,16 @@ FAMILIES: dict[str, dict[str, Any]] = {
                 "mmproj": "mmproj-Qwen3.8-Flash-Next-BF16.gguf", "name": "qwen3.8-flash-next-unsloth",
                 "vision": False, "pack_args": ["--compat-bf16"],
                 "sha256": {**UNSLOTH_SHARDS, **UNSLOTH_IQ4_XS_SHARDS, **UNSLOTH_BIG_SHARDS}},
+    # agentionai's Gyro quantizations (see GYRO_FILES): after the regular families, never the default
+    "gyro": {"title": "Qwen3.8-Flash-Next (Gyro)", "by": "Gyro quantizations by agentionai",
+             "about": "Gyro-S (27.6 GB of memory) and Gyro-M (35 GB): the smallest sizes, for PCs with little memory; "
+                      "58 and 92 GB downloads (the files include the n-gram table)",
+             "hf": hf("agentionai/Qwen3.8-Flash-Next-Gyro-GGUF"), "file": "Qwen3.8-Flash-Next-{q}.gguf", "shards": 1,
+             "tag": "gyro-", "name": "qwen3.8-flash-next-gyro", "vision": True, "pack_args": ["--compat-bf16"],
+             "mmproj_hf": hf("ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF"), "mmproj": "mmproj-Qwen3.8-Flash-Next-BF16.gguf",
+             "sha256": GYRO_FILES,
+             "license": "Qwen Community License 1.0 (Qwen3.8-Flash-Next's; the Gyro files are agentionai's quantization): "
+                        "https://huggingface.co/agentionai/Qwen3.8-Flash-Next-Gyro-GGUF"},
 }
 # The models the engine runs other than Qwen3.8-Flash-Next (src/core/plain_model.cpp: `strata --native` with another
 # architecture): one GGUF file each, its size and SHA-256 at the pinned revision (the Hub's LFS pointers), or its
@@ -551,6 +584,7 @@ REPO_PINS: dict[str, dict[str, tuple[int, str]]] = {
     "ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF": SWIFT_FILES,
     "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF": CODER_FILES,
     "unsloth/Qwen3.8-Flash-Next-GGUF": {**UNSLOTH_SHARDS, **UNSLOTH_IQ4_XS_SHARDS, **UNSLOTH_BIG_SHARDS},
+    "agentionai/Qwen3.8-Flash-Next-Gyro-GGUF": GYRO_FILES,
 }
 for _fam in PLAIN_FAMILIES.values():                 # the other models' files, from their own tables
     for _d in _fam["models"].values():

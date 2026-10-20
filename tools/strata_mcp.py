@@ -78,6 +78,13 @@ FALLBACK_MODELS = {
     "Q8_0": {"about": "8-bit, the reference quality (every expert Q8_0), for a 192 GB PC; not tested in XeStrata",
              "download_gb": 188.2, "ram_gb": 136, "arena_gb": 128.3, "families": ("unsloth",), "budget": True,
              "experimental": True, "vision": True},
+    # Gyro (agentionai): the memory is VRAM and RAM together ("mem_total")
+    "Gyro-S": {"about": "the smallest option, for PCs with little memory (27.6 GB of VRAM + RAM together)",
+               "download_gb": 58.5, "ram_gb": 27.6, "arena_gb": 25.8, "families": ("gyro",), "mem_total": True,
+               "vision": True},
+    "Gyro-M": {"about": "about IQ3_XXS quality with about 20% less GPU memory (35 GB of VRAM + RAM together)",
+               "download_gb": 92.0, "ram_gb": 35.0, "arena_gb": 32.1, "families": ("gyro",), "mem_total": True,
+               "vision": True},
 }
 FALLBACK_FAMILIES = {
     "qwen": {"title": "Qwen3.8-Flash-Next", "about": "the original model", "tag": ""},
@@ -89,6 +96,9 @@ FALLBACK_FAMILIES = {
                                                                   "of RAM part of its experts are read from the SSD "
                                                                   "(UD-Q4_K_XL, 111 GB: experimental)",
                 "tag": "unsloth-", "vision": False},
+    "gyro": {"title": "Qwen3.8-Flash-Next (Gyro)",
+             "about": "Gyro-S (27.6 GB of memory) and Gyro-M (35 GB): the smallest sizes, for PCs with little memory",
+             "tag": "gyro-"},
     "ornith": {"title": "Ornith-1.5-35B-A3B", "about": "35B, 3B active; a Qwen3.5 MoE: Q4_K_M to BF16, and community "
                                                        "GSQ-RCO 3 and 3.5 bits", "tag": "ornith-"},
     "llmjp": {"title": "llm-jp-4.1-32b-a3b-thinking", "about": "32B, 3B active; Japanese and English, a thinking model",
