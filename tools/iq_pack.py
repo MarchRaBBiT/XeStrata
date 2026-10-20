@@ -477,6 +477,23 @@ def expert_layout(model: Model, src: pathlib.Path):
     return layout, head + "".join(line + "\n" for line in lines), n_expert, offset
 
 
+NATIVE_HEAD = re.compile(r"^# xestrata native experts (xs\d+):")
+
+
+def native_experts_xs2(text: str) -> str:
+    """native_experts.txt as expert_layout writes it (xs1) -> the same table marked xs2 (Hadamard-folded experts,
+    hadamard.txt beside it), or an error string naming the version it cannot mark (upstream 4557f6805: a table of
+    another version would keep its header beside a hadamard.txt, an inconsistent pack the engine refuses)."""
+    head, rest = text.split("\n", 1) if "\n" in text else (text, "")
+    m = NATIVE_HEAD.match(head)
+    if not m or m.group(1) != "xs1":
+        found = m.group(1) if m else "without a version header (%r)" % head[:40]
+        return ("cannot mark native_experts.txt %s as xs2 for Hadamard-folded experts: only xs1 tables are "
+                "supported" % found)
+    return ("# xestrata native experts xs2:" + head[m.end():] + " - xs2: Hadamard-folded experts, see hadamard.txt\n"
+            + rest)
+
+
 HADAMARD_ROLE = re.compile(r"^blk\.(\d+)\.ffn_(gate|up|down)_exps\.weight$")
 
 
@@ -605,9 +622,10 @@ def main() -> int:
         print("prism.hadamard: " + had)
         return 1
     if had is not None:
-        head, rest = text.split("\n", 1)
-        head = re.sub(r"^# xestrata native experts xs1:", "# xestrata native experts xs2:", head)
-        text = head + " - xs2: Hadamard-folded experts, see hadamard.txt\n" + rest
+        text = native_experts_xs2(text)
+        if not text.startswith("#"):
+            print(text)
+            return 1
         n_had = sum(1 for ln in had.splitlines() if ln.startswith("layer "))
         print("prism.hadamard: %d layer(s) of Hadamard-folded experts (block %s, %s signs): hadamard.txt, "
               "native_experts.txt xs2" % (n_had, g.metadata["prism.hadamard.block_size"],
