@@ -100,7 +100,7 @@ PlainModel::~PlainModel() {
     for (auto& v : msegs_)
         for (auto* g : v) strata::gpu::graph_destroy(g);
     for (void* p : allocs_) strata::gpu::free(p);
-    for (void* p : {(void*) h_emb_, (void*) h_step_, (void*) h_pos_, (void*) h_out_, (void*) fill_tmp_})
+    for (void* p : {(void*) h_emb_, (void*) h_step_, (void*) h_pos_, (void*) h_out_, (void*) fill_tmp_, (void*) hand_host_})
         strata::gpu::free(p);
     if (swap_ev_ != nullptr) strata::gpu::event_destroy(swap_ev_);
     if (swap_cs_ != nullptr) strata::gpu::stream_destroy(swap_cs_);
@@ -356,17 +356,35 @@ bool PlainModel::load_arch(std::string& err) {
     return spec_.arch == ModelArch::Glm5Next ? load_glm5(err) : load_qwen(err);
 }
 
-// The points from the GPUs' memory: each GPU's share of the MoE layers in proportion to the memory it has for them
-// (its free memory, less its reserve, and the head on the last), so that each GPU's tier holds about the same part of
-// its layers' experts
+// The points from the GPUs' memory and links.  Each GPU's share of the MoE layers is in proportion to the memory it has
+// for them (its free memory, less its reserve, and the head on the last), so that each GPU's tier holds about the same
+// part of its layers' experts; except a GPU whose link from the host is less than half the first's: it takes only the
+// layers its tier holds whole, since a prompt chunk copies each of its layers' missed experts over that link.  GLM-5.3-
+// Flash on a B70 and an RTX 4070 behind the chipset (Gen4 x4, 4.3x slower): a 4K prompt 100 tok/s with the 4070's
+// share by memory (11 layers), 149 with the 2 layers and the MTP layer it holds whole, 165 on the B70 alone; the
+// decode 12.0, 11.3 and 10.8 tok/s (2026-10-20).
 bool PlainModel::split_auto_points(std::string& err) {
     opt_.split_at.clear();
     const int n = (int) split_devs_.size();
     if (n < 2) return true;
+    const ModelSpec& s = spec_;
+    const int64_t M = s.n_moe_layers();
+    if (M < n) return true;
     uint64_t head = 0;
     if (size_t at = 0; const TensorInfo* t = model_->find("output.weight", &at)) head = tensor_payload_bytes(*t);
-    std::vector<double> room((size_t) n, 0.0);
-    double sum = 0;
+    // a MoE layer's experts (the largest layer's three tensors: a file's layers can differ in type), and whether the
+    // last GPU runs the MTP layer as well
+    uint64_t layer_b = 0;
+    for (int64_t l = 0; l < s.n_layer; ++l) {
+        if (!s.layer_routes(l)) continue;
+        uint64_t b = 0;
+        for (const char* w : {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"})
+            if (size_t at = 0; const TensorInfo* t = model_->find("blk." + std::to_string(l) + "." + w + ".weight", &at))
+                b += tensor_payload_bytes(*t);
+        layer_b = std::max(layer_b, b);
+    }
+    const bool mtp = opt_.spec >= 2 && model_->find("blk." + std::to_string(s.n_layer) + ".nextn.eh_proj.weight") != nullptr;
+    std::vector<double> room((size_t) n, 0.0), link((size_t) n, 0.0);
     for (int d = 0; d < n; ++d) {
         const OnDevice on(split_devs_[(size_t) d]);
         size_t f = 0, t = 0;
@@ -376,22 +394,61 @@ bool PlainModel::split_auto_points(std::string& err) {
         const uint64_t reserve = std::clamp<uint64_t>(total_b / 32, 192ull << 20, 768ull << 20) + (1ull << 30) +
                                  (d == n - 1 ? head : 0);
         room[(size_t) d] = free_b > reserve ? (double) (free_b - reserve) : 0.0;
-        sum += room[(size_t) d];
+        // the link: the best of three 64 MiB copies from pinned host memory
+        constexpr size_t kProbe = 64ull << 20;
+        void *h = nullptr, *g = nullptr;
+        if (strata::gpu::alloc_host(&h, kProbe) && strata::gpu::alloc_device(&g, kProbe)) {
+            std::memset(h, 0, kProbe);
+            double best = 0;
+            for (int r = 0; r < 3; ++r) {
+                const auto t0 = std::chrono::steady_clock::now();
+                if (!strata::gpu::copy(g, h, kProbe)) break;
+                const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+                best = std::max(best, (double) kProbe / std::max(sec, 1e-9));
+            }
+            link[(size_t) d] = best;
+        }
+        strata::gpu::free(g);
+        strata::gpu::free(h);
     }
-    const ModelSpec& s = spec_;
-    const int64_t M = s.n_moe_layers();
-    if (sum <= 0 || M < n) return true;
-    double acc = 0;
-    int64_t seen = 0, l = 0;
+    std::vector<int64_t> count((size_t) n, 0);
+    int64_t left = M;
+    double fast_room = 0;
+    for (int d = 0; d < n; ++d) {
+        const bool slow = d > 0 && link[0] > 0 && link[(size_t) d] < link[0] / 2 && layer_b > 0;
+        if (!slow) { fast_room += room[(size_t) d]; continue; }
+        // (a fifth of the room for its blocks' own weights, K/V and buffers: the RTX 4070's tier took 8.4 of 9.6 GiB)
+        const int64_t whole = (int64_t) (room[(size_t) d] * 0.8 / (double) layer_b) - (d == n - 1 && mtp ? 1 : 0);
+        count[(size_t) d] = std::clamp<int64_t>(whole, 1, left - 1);
+        left -= count[(size_t) d];
+    }
+    if (left < 1 || fast_room <= 0) return true;
+    {   // the rest by memory among the others
+        double acc = 0;
+        int64_t given = 0;
+        int last_fast = 0;
+        for (int d = 0; d < n; ++d)
+            if (count[(size_t) d] == 0) last_fast = d;
+        for (int d = 0; d < n; ++d) {
+            if (count[(size_t) d] != 0) continue;
+            acc += room[(size_t) d];
+            const int64_t upto = d == last_fast ? left : (int64_t) std::llround((double) left * acc / fast_room);
+            count[(size_t) d] = std::max<int64_t>(1, upto - given);
+            given += count[(size_t) d];
+        }
+    }
+    int64_t seen = 0, l = 0, want = 0;
     for (int d = 0; d + 1 < n; ++d) {
-        acc += room[(size_t) d];
-        const int64_t want = std::clamp<int64_t>((int64_t) std::llround((double) M * acc / sum), seen + 1,
-                                                 M - (n - 1 - d));
+        want += count[(size_t) d];
         while (l < s.n_layer && seen < want) seen += s.layer_routes(l++) ? 1 : 0;
         if (l >= s.n_layer) break;
         opt_.split_at.push_back(l);
     }
     if ((int) opt_.split_at.size() != n - 1) opt_.split_at.clear();
+    for (int d = 0; d < n; ++d)
+        std::fprintf(stderr, "strata plain: --layer-split auto: %s, %.1f GiB for experts, %.1f GB/s from the host: %lld "
+                             "MoE layers\n", strata::gpu::device_name(split_devs_[(size_t) d]).c_str(),
+                     room[(size_t) d] / 1073741824.0, link[(size_t) d] / 1e9, (long long) count[(size_t) d]);
     return true;
 }
 
@@ -813,7 +870,6 @@ void PlainModel::prompt_carve(int64_t T, PromptBufs& b, uint8_t* dev, uint8_t* h
     hold(b.h_hn, U * N * 4); hold(b.h_cpu, (uint64_t) b.cpu_cap * N * 4); hold(b.h_cpu_row, (uint64_t) b.cpu_cap * 4);
     hold(b.h_nact, U * k::cpu::kNativeActBytes); hold(b.h_dense_bounds, 2 * sizeof(int32_t));
     hold(b.h_stage, 2 * (uint64_t) PromptBufs::kGroup * lay.max_blob);
-    hold(b.h_hand, first() && last() ? 0 : U * (uint64_t) hand_w_ * 4);   // a layer split's rows in and out
     host_bytes = at;
 }
 
@@ -919,6 +975,12 @@ bool PlainModel::open_experts(std::string& err) {
         for (; opt_.prompt_chunk >= 16; opt_.prompt_chunk /= 2) {
             prompt_carve(opt_.prompt_chunk, pb_, nullptr, nullptr, db, hb);
             if (strata::gpu::alloc_host(&prompt_host_, hb)) break;
+            prompt_host_ = nullptr;
+        }
+        // a layer split's: the rows between the stages, for the longest chunk (the stages' chunks may be shorter)
+        if (prompt_host_ != nullptr && !(first() && last()) &&
+            !strata::gpu::alloc_host(&hand_host_, (size_t) (asked * hand_w_) * 4)) {
+            strata::gpu::free(prompt_host_);
             prompt_host_ = nullptr;
         }
         if (prompt_host_ == nullptr) {

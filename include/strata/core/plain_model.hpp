@@ -226,6 +226,9 @@ private:
     int64_t hand_w_ = 0;               ///< the hand-off's floats a row
     float *h_in_ = nullptr, *m_in_ = nullptr;       ///< mapped: a later stage's input rows
     float *h_hand_ = nullptr, *m_hand_ = nullptr;   ///< mapped: an earlier stage's output rows
+    /// pinned: a layer split's prompt rows in and out, up to prompt_chunk of them (each stage reads them in chunks of
+    /// its own, as long as its tier lends the buffers for)
+    float* hand_host_ = nullptr;
     bool in_ram_ = false;              ///< the experts in pinned RAM (an arena), else read in place
     bool level_zero_ = false;
     uint64_t total_b_ = 0;             ///< the GPU's memory
@@ -334,7 +337,6 @@ private:
         int32_t* h_dense_bounds = nullptr;
         uint8_t* h_nact = nullptr;         ///< the CPU's activations: a token's in the layer's native format
         int32_t* h_rbounds = nullptr;
-        float* h_hand = nullptr;           ///< a layer split's rows in and out (T rows of hand_w_)
         // GLM-5.3-Flash's (plain_prompt_glm5.cpp): the four streams, the mHC's mixes, the window's selection steps, the
         // KDA and DSA intermediates, the dense FFN's gate and up
         float *g_hs = nullptr, *g_mixes = nullptr, *g_post = nullptr, *g_comb = nullptr, *g_y = nullptr;

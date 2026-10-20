@@ -546,14 +546,20 @@ bool PlainModel::prompt(const int32_t* tokens, int64_t n, int64_t pos, int32_t* 
     return next_.empty() ? prompt_one(tokens, n, pos, out, logits, err) : prompt_split(tokens, n, pos, out, logits, err);
 }
 
-// A layer split's prompt: every stage's buffers for chunks of one length (each GPU's tier lends what it can), then
-// each chunk through the stages in turn, the rows handed on through pinned memory
+// A layer split's prompt: every stage's buffers for chunks as long as its GPU's tier lends them, then each chunk of the
+// longest through the stages in turn, the rows handed on through pinned memory, a stage of shorter chunks reading them
+// in its own.  Chunks of the shortest everywhere made the RTX 4070's 1K the B70's too, which then read every missed
+// expert four times as often: GLM-5.3-Flash's 4K prompt 78 tok/s (B70 + 4070, 2026-10-20)
 bool PlainModel::prompt_split(const int32_t* tokens, int64_t n, int64_t pos, int32_t* out, float* logits,
                               std::string& err) {
     const std::vector<PlainModel*> c = chain();
     int64_t T = n;
     for (PlainModel* st : c) {
-        if (st->opt_.prompt_chunk <= 0 || n <= 0 || st->prompt_host_ == nullptr) { err.clear(); return false; }
+        if (st->opt_.prompt_chunk <= 0 || n <= 0 || st->prompt_host_ == nullptr ||
+            (st->hand_host_ == nullptr && !(st->first() && st->last()))) {
+            err.clear();
+            return false;
+        }
         T = std::min(T, st->opt_.prompt_chunk);
     }
     if (pos < 0 || pos + n > opt_.max_cells) { err = "plain prompt: past the context"; return false; }
@@ -564,37 +570,28 @@ bool PlainModel::prompt_split(const int32_t* tokens, int64_t n, int64_t pos, int
             (void) c[i]->prompt_return(e2);
         }
     };
-    for (int round = 0;; ++round) {
-        int64_t least = T;
-        for (size_t i = 0; i < c.size(); ++i) {
-            const OnDevice on(c[i]->dev_);
-            if (!c[i]->prompt_borrow(T, err)) {
-                give_back(i);
-                if (c[i]->borrow_short_) {   // as prompt_one: the windows read the prompt
-                    static bool said = false;
-                    if (!said) std::fprintf(stderr, "strata plain: %s: prompts are read through the decode windows\n", err.c_str());
-                    said = true;
-                    err.clear();
-                }
-                return false;
+    int64_t longest = 0;
+    for (size_t i = 0; i < c.size(); ++i) {
+        const OnDevice on(c[i]->dev_);
+        if (!c[i]->prompt_borrow(T, err)) {
+            give_back(i);
+            if (c[i]->borrow_short_) {   // as prompt_one: the windows read the prompt
+                static bool said = false;
+                if (!said) std::fprintf(stderr, "strata plain: %s: prompts are read through the decode windows\n", err.c_str());
+                said = true;
+                err.clear();
             }
-            least = std::min(least, c[i]->pb_.T);
+            return false;
         }
-        bool same = true;
-        for (PlainModel* st : c) same = same && st->pb_.T == least;
-        if (same) break;
-        give_back(c.size());
-        if (round == 4) { err = "plain prompt: the GPUs' prompt buffers agree on no chunk"; return false; }
-        T = least;
+        longest = std::max(longest, c[i]->pb_.T);
     }
-    T = c[0]->pb_.T;
     bool ok = true;
-    for (int64_t c0 = 0; ok && c0 < n; c0 += T) {
+    for (int64_t c0 = 0; ok && c0 < n; c0 += longest) {
         const float* hand = nullptr;
         for (PlainModel* st : c) {
             const OnDevice on(st->dev_);
-            if (!st->prompt_chunks(tokens, n, pos, out, logits, err, c0, c0 + T, hand)) { ok = false; break; }
-            hand = st->pb_.h_hand;
+            if (!st->prompt_chunks(tokens, n, pos, out, logits, err, c0, c0 + longest, hand)) { ok = false; break; }
+            hand = st->hand_host_;
         }
     }
     std::string err2;
@@ -737,8 +734,12 @@ bool PlainModel::prompt_chunks(const int32_t* tokens, int64_t n, int64_t pos, in
         // the chunk's routes, every MoE layer's, for the adaptive tier's counts (below, after the chunk)
         const int64_t L = n_moe_;
         std::vector<int32_t> routes(disp_.usage.empty() ? 0 : (size_t) (L * P.T * K));
-        for (int64_t c0 = c_begin; c0 < std::min(n, c_end); c0 += P.T) {
-            const int64_t T = std::min<int64_t>(P.T, n - c0), p0 = pos + c0;
+        const int64_t c_last = std::min(n, c_end);
+        if (!first())   // the rows handed on, into this stage's own pinned memory (and its rows out from there)
+            std::memcpy(hand_host_, hand_in, (size_t) ((c_last - c_begin) * N) * 4);
+        for (int64_t c0 = c_begin; c0 < c_last; c0 += P.T) {
+            const int64_t T = std::min<int64_t>(P.T, c_last - c0), p0 = pos + c0;
+            float* hand = hand_host_ != nullptr ? hand_host_ + (c0 - c_begin) * N : nullptr;
             // the chunk's inputs: embedding rows (a later stage: the rows handed on), per-token step counts and rotary
             // positions
             for (int64_t t = 0; t < T; ++t) {
@@ -752,8 +753,7 @@ bool PlainModel::prompt_chunks(const int32_t* tokens, int64_t n, int64_t pos, in
                 for (int64_t hd = 0; hd < NH; ++hd) P.h_pos[t * NH + hd] = (int32_t) (p0 + t);
                 for (int64_t hd = 0; hd < NKV; ++hd) P.h_pos[T * NH + t * NKV + hd] = (int32_t) (p0 + t);
             }
-            if (!first()) std::memcpy(P.h_hand, hand_in, (size_t) (T * N) * 4);
-            if (!strata::gpu::copy_async(P.x, first() ? P.emb : P.h_hand, (size_t) (T * N) * 4, cs) ||
+            if (!strata::gpu::copy_async(P.x, first() ? P.emb : hand, (size_t) (T * N) * 4, cs) ||
                 !strata::gpu::copy_async(P.steps, P.h_steps, (size_t) (T * k::kStepCount) * 4, cs) ||
                 !strata::gpu::copy_async(P.pos_q, P.h_pos, (size_t) (T * NH) * 4, cs) ||
                 !strata::gpu::copy_async(P.pos_k, P.h_pos + T * NH, (size_t) (T * NKV) * 4, cs)) {
@@ -937,7 +937,7 @@ bool PlainModel::prompt_chunks(const int32_t* tokens, int64_t n, int64_t pos, in
                 mark(3, t_mark);
             }
             if (!last()) {   // the rows to the next stage
-                if (!strata::gpu::copy_async(P.h_hand, P.x, (size_t) (T * N) * 4, cs)) {
+                if (!strata::gpu::copy_async(hand, P.x, (size_t) (T * N) * 4, cs)) {
                     err = std::string("plain prompt: the rows to the next GPU: ") + strata::gpu::last_error();
                     return false;
                 }

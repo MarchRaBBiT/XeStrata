@@ -120,8 +120,12 @@ bool PlainModel::prompt_chunks_glm5(const int32_t* tokens, int64_t n, int64_t po
     try {
         const int64_t L = n_moe_;
         std::vector<int32_t> routes(disp_.usage.empty() ? 0 : (size_t) (L * P.T * K));
-        for (int64_t c0 = c_begin; c0 < std::min(n, c_end); c0 += P.T) {
-            const int64_t T = std::min<int64_t>(P.T, n - c0), p0 = pos + c0;
+        const int64_t c_last = std::min(n, c_end);
+        if (!first())   // the rows handed on, into this stage's own pinned memory (and its rows out from there)
+            std::memcpy(hand_host_, hand_in, (size_t) ((c_last - c_begin) * kHC * N) * 4);
+        for (int64_t c0 = c_begin; c0 < c_last; c0 += P.T) {
+            const int64_t T = std::min<int64_t>(P.T, c_last - c0), p0 = pos + c0;
+            float* hand = hand_host_ != nullptr ? hand_host_ + (c0 - c_begin) * kHC * N : nullptr;
             for (int64_t t = 0; t < T; ++t) {
                 const int32_t tok = tokens[c0 + t];
                 if (tok < 0 || tok >= n_vocab_ ||
@@ -134,9 +138,8 @@ bool PlainModel::prompt_chunks_glm5(const int32_t* tokens, int64_t n, int64_t po
             P.h_dense_bounds[0] = 0;
             P.h_dense_bounds[1] = (int32_t) T;
             // the four streams from the embeddings, or as the stage before left them
-            if (!first()) std::memcpy(P.h_hand, hand_in, (size_t) (T * kHC * N) * 4);
             if (!(first() ? strata::gpu::copy_async(P.x, P.emb, (size_t) (T * N) * 4, cs)
-                          : strata::gpu::copy_async(P.g_hs, P.h_hand, (size_t) (T * kHC * N) * 4, cs)) ||
+                          : strata::gpu::copy_async(P.g_hs, hand, (size_t) (T * kHC * N) * 4, cs)) ||
                 !strata::gpu::copy_async(P.steps, P.h_steps, (size_t) (T * k::kStepCount) * 4, cs) ||
                 !strata::gpu::copy_async(P.dense_bounds, P.h_dense_bounds, 2 * sizeof(int32_t), cs)) {
                 err = std::string("plain prompt: staging: ") + strata::gpu::last_error();
@@ -258,7 +261,7 @@ bool PlainModel::prompt_chunks_glm5(const int32_t* tokens, int64_t n, int64_t po
             // the MTP layer after the trunk, its caches a cell ahead: row t pairs the trunk's normed row t with the
             // token after it (the prompt's last row with a stand-in, rewritten by spec_start once the token is picked).
             // Only its caches are wanted here, so of its block only the latent and the indexer's keys are made.
-            if (!last() && !strata::gpu::copy_async(P.h_hand, P.g_hs, (size_t) (T * kHC * N) * 4, cs)) {
+            if (!last() && !strata::gpu::copy_async(hand, P.g_hs, (size_t) (T * kHC * N) * 4, cs)) {
                 err = std::string("plain prompt: the rows to the next GPU: ") + strata::gpu::last_error();
                 return false;
             }
