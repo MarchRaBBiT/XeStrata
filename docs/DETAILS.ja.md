@@ -766,8 +766,7 @@ print(r.choices[0].message.content)
 
   `limit.context` は setup で選んだ文脈にします。OpenCode は、そこに達する前に会話を要約します。
   `limit.output` は、それより十分小さくします。
-  プロンプトと `max_tokens` の和が文脈を超える要求は断られます（下の「文脈」）。
-  または `xestrata-<model>.json` に `"fit_max_tokens": true` を書きます。
+  プロンプトと `max_tokens` の和が文脈を超える要求は、`max_tokens` を残りの余地まで縮めて受け付けます（下の「文脈」）。
   思考に厳密な上限を付けるなら、`xestrata-<model>.json` に `"reasoning_budget_tokens": N` を書きます（上を参照）。
   OpenCode はシステムの発言の先頭近くに `<env>` の塊（作業フォルダーと今日の日付）を書き、その後に毎回同じ約 4 万文字の指示とツールの定義が続きます。
   プレフィックスのキャッシュはプロンプトの先頭しか使い回さないので、フォルダーや日が変わるたびに約 1 万 4 千トークンを読み直します。
@@ -779,10 +778,9 @@ print(r.choices[0].message.content)
 - **Codex CLI**: [下の Responses API](#responses-api-と-codex-cli) を参照してください。
 - **文脈**: setup で選びます（8K〜262K）。
   それより長い要求は断り、黙って切り詰めることはしません。
-  `max_tokens` が文脈を超える要求も断ります（400）。
-  いつも出力の上限いっぱいを求めるエージェントのために、`xestrata-<model>.json` に `"fit_max_tokens": true` を書く
-  （または `serve/server.py` に `--fit-max-tokens` を渡す）と、残りの余地まで縮めて受け付けます。
-  余地がまったくないプロンプトは、それでも断ります。
+  `max_tokens` が文脈を超える要求は、`max_tokens` を残りの余地まで縮めて受け付けます（Claude Code などのエージェントは毎回 32,000 を求めます）。思考の上限も縮めた値に従います（upstream f31b6efd6）。
+  llama.cpp と同じく断る（400）には、`xestrata-<model>.json` に `"fit_max_tokens": false` を書くか、`serve/server.py` に `--no-fit-max-tokens` を渡します。
+  余地がまったくないプロンプトは、いつも断ります。
 - **モデルの別名**: `xestrata-<model>.json` に `"aliases": ["qwen", "local-model"]` を書くと、`/v1/models` にその名前でも並びます。
   それぞれが自分の `id` を持ち、モデルの `aliases` にも入ります（llama-server の `--alias` と同じ）。
   別名で呼ばれた要求には、その名前で答えます。

@@ -786,8 +786,7 @@ on easy questions all three think briefly, on hard ones `high` thinks longest an
   ```
 
   Set `limit.context` to the context you chose in setup: OpenCode compacts the conversation before it gets there.
-  Keep `limit.output` well under it: a request whose prompt plus `max_tokens` runs past the context is refused (see **Context** below),
-  or add `"fit_max_tokens": true` to `xestrata-<model>.json`.
+  Keep `limit.output` well under it: a request whose prompt plus `max_tokens` runs past the context has its `max_tokens` shortened to the room left (see **Context** below).
   For a hard cap on the thinking, add `"reasoning_budget_tokens": N` to `xestrata-<model>.json` (see above).
   OpenCode writes an `<env>` block (working directory, today's date) near the start of its system message, ahead of ~40K characters of instructions and tool definitions that are the same in every session.
   The prefix cache only reuses a prompt's start, so every new folder and every new day reads ~14K tokens again.
@@ -799,10 +798,9 @@ on easy questions all three think briefly, on hard ones `high` thinks longest an
 - **Codex CLI**: see [the Responses API](#the-responses-api-and-codex-cli) below.
 - **Context.** Chosen in setup (8K–262K).
   Requests longer than that are refused, never silently cut.
-  A request whose `max_tokens` would run past the context is refused too (400).
-  Agents that always ask for their full output cap can instead get it shortened to the room left:
-  add `"fit_max_tokens": true` to `xestrata-<model>.json` (or pass `--fit-max-tokens` to `serve/server.py`).
-  A prompt that leaves no room at all is still refused.
+  A request whose `max_tokens` would run past the context is answered with `max_tokens` shortened to the room left (agents such as Claude Code ask for 32,000 on every request); the thinking budget follows the shortened cap (upstream f31b6efd6).
+  For the strict llama.cpp behaviour (400), set `"fit_max_tokens": false` in `xestrata-<model>.json` or pass `--no-fit-max-tokens` to `serve/server.py`.
+  A prompt that leaves no room at all is always refused.
 - **Model aliases.** `"aliases": ["qwen", "local-model"]` in `xestrata-<model>.json` lists the model under those names too in `/v1/models`
   (each with its own `id`, and in the model's `aliases`), like llama-server's `--alias`.
   A request naming one is answered under that name.
