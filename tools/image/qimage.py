@@ -146,7 +146,7 @@ def image_config(quant: str, exe: Path, models_dir: Path, *, model: str = DEFAUL
     name, dit, text_encoder = IMAGE_MODELS[model]
     return {"model_name": name, "exe": str(exe), "quant": quant,
             "diffusion_model": str(local_path(models_dir, f"{dit}-{quant}")), "steps": DITS[dit][1],
-            "schedule": dit, "mask": True, "vae": str(local_path(models_dir, "vae")),
+            "schedule": dit, "mask": True, "transparency": True, "vae": str(local_path(models_dir, "vae")),
             "llm": str(local_path(models_dir, text_file(text_encoder, text_quant))), "text_encoder": text_encoder,
             "text_quant": text_quant,
             "vision": str(local_path(models_dir, "mmproj")),

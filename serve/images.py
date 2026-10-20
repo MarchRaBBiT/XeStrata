@@ -77,6 +77,9 @@ MIN_SIDE = 256
 FILE_NAME = re.compile(r"^[0-9a-f]{32}\.(png|jpeg|webp)$")
 # OpenAI's output_format -> the file's MIME type (Pillow writes jpeg and webp; PNG is png_rgba's)
 FORMATS = {"png": "image/png", "jpeg": "image/jpeg", "webp": "image/webp"}
+# Qwen's recommended prompt for a transparent image (its README's "Transparent Image Generation (RGBA)")
+TRANSPARENT_PROMPT = ("This is an RGBA image with transparency. {prompt}. The image has alpha channel and the "
+                      "background is transparent.")
 # OpenAI's quality -> the base model's steps (None: the config's); Turbo keeps its 8 whatever it says
 QUALITY_STEPS = {"low": 20, "medium": 30, "standard": 30, "high": None, "hd": None, "auto": None}
 # the model's prompt (stable-diffusion.cpp's Qwen-Image template): the system turn, whose DROP leading ids' states the
@@ -128,8 +131,9 @@ def _int_field(req: dict, key: str, lo: int, hi: int, default):
 def parse_request(req: dict, cfg: dict) -> dict:
     """The fields of one /v1/images/generations request, checked.  output_format png, jpeg or webp
     (output_compression 0-100, the quality jpeg and webp are written at); quality low, medium or high (the base model's
-    steps, QUALITY_STEPS; an explicit steps wins).  Unknown OpenAI fields (style, user, background, moderation) are
-    accepted and ignored."""
+    steps, QUALITY_STEPS; an explicit steps wins); background transparent (the prompt in Qwen's form for it, an image
+    with alpha; not with jpeg), opaque (alpha flattened on white) or auto.  Unknown OpenAI fields (style, user,
+    moderation) are accepted and ignored."""
     prompt = req.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         raise ImageRequestError("prompt: a non-empty string")
@@ -147,6 +151,13 @@ def parse_request(req: dict, cfg: dict) -> dict:
     quality = req.get("quality")
     if quality is not None and quality not in QUALITY_STEPS:
         raise ImageRequestError("quality: low, medium, high or auto")
+    background = req.get("background") or "auto"
+    if background not in ("auto", "opaque", "transparent"):
+        raise ImageRequestError("background: auto, opaque or transparent")
+    if background == "transparent" and out_fmt == "jpeg":
+        raise ImageRequestError("background transparent: png or webp (jpeg has no alpha channel)")
+    if background == "transparent" and cfg.get("transparency") is False:
+        raise ImageRequestError("background transparent: this image model does not make transparent images")
     w, h = parse_size(req.get("size"), int(cfg.get("max_side") or 2048))
     n = _int_field(req, "n", 1, int(cfg.get("max_n") or 4), 1)
     if cfg.get("schedule") == "base":
@@ -160,23 +171,31 @@ def parse_request(req: dict, cfg: dict) -> dict:
     if seed is None:
         seed = random.SystemRandom().randrange(0, 2**31)
     return {"prompt": prompt, "width": w, "height": h, "n": n, "steps": steps, "seed": seed,
-            "response_format": fmt, "output_format": out_fmt, "output_compression": compression}
+            "quality": quality or "auto", "response_format": fmt, "output_format": out_fmt,
+            "output_compression": compression, "background": background}
 
 
-def encode_image(png: bytes, fmt: str, compression: int) -> bytes:
+def model_prompt(job: dict) -> str:
+    """The prompt as the model reads it: a transparent image's in Qwen's form for one (TRANSPARENT_PROMPT)."""
+    if job.get("background") == "transparent":
+        return TRANSPARENT_PROMPT.format(prompt=job["prompt"].strip().rstrip("."))
+    return job["prompt"]
+
+
+def encode_image(png: bytes, fmt: str, compression: int, opaque: bool = False) -> bytes:
     """A made image (png_rgba's PNG) in OpenAI's output_format: PNG as it is, jpeg (no alpha: on white) and webp at
-    `compression` as their quality (Pillow)."""
-    if fmt == "png":
+    `compression` as their quality (Pillow); `opaque` (background opaque): its alpha flattened on white."""
+    if fmt == "png" and not opaque:
         return png
     import io
     from PIL import Image
     im = Image.open(io.BytesIO(png))
-    if fmt == "jpeg":
+    if fmt == "jpeg" or opaque:
         bg = Image.new("RGB", im.size, (255, 255, 255))
         bg.paste(im, mask=im.split()[-1])
         im = bg
     out = io.BytesIO()
-    im.save(out, format=fmt.upper(), quality=compression)
+    im.save(out, format=fmt.upper(), **({} if fmt == "png" else {"quality": compression}))
     return out.getvalue()
 
 
@@ -636,7 +655,7 @@ class ImageGen:
         if self.tok is None:
             self.tok = load_tokenizer(self.cfg["llm"])
         if "ids" not in job:
-            job["ids"] = prompt_ids(self.tok, job["prompt"], len(job.get("refs") or ()))
+            job["ids"] = prompt_ids(self.tok, model_prompt(job), len(job.get("refs") or ()))
         return job["ids"]
 
     def stage(self, job: dict) -> None:
@@ -781,15 +800,16 @@ class ImageGen:
         data = []
         fmt = job.get("output_format") or "png"
         for i, png in enumerate(images):
-            item = {"revised_prompt": job["prompt"], "seed": job["seed"] + i}
-            img = encode_image(png, fmt, job.get("output_compression", 100))
+            item = {"revised_prompt": model_prompt(job), "seed": job["seed"] + i}
+            img = encode_image(png, fmt, job.get("output_compression", 100), job.get("background") == "opaque")
             if job["response_format"] == "url":
                 item["url"] = f"{base_url}/v1/images/files/{self.store(img, fmt)}"
             else:
                 item["b64_json"] = base64.b64encode(img).decode("ascii")
             data.append(item)
         return {"created": int(time.time()), "data": data, "model": self.model, "output_format": fmt,
-                "size": f"{job['width']}x{job['height']}", "usage": usage(job), "strata": figures}
+                "size": f"{job['width']}x{job['height']}", "background": job.get("background") or "auto",
+                "quality": job.get("quality") or "auto", "usage": usage(job), "strata": figures}
 
     # ---- the progress the Monitor shows (/metrics' live.image) and the jobs that ended (its Requests table)
     STAGE_LABELS = {"waiting": "Making room on the GPU", "refs": "Reading the reference images",
@@ -852,6 +872,7 @@ class ImageGen:
 
 
 # ------------------------------------------------------------------------------------------- chat's image tools
+OPTION_KEYS = ("size", "quality", "output_format", "output_compression", "background")
 FILE_REF = re.compile(r"/v1/images/files/([0-9a-f]{32}\.(?:png|jpeg|webp))")
 TOOLS = [
     {"name": "generate_image",
@@ -882,8 +903,12 @@ class ImageTools:
     the server makes the image in the GPU's turn as /v1/images does, keeps it (/v1/images/files/), and the call's
     result tells the model where it is.  The hub run_with_mcp runs (template_tools, routes, call, settings)."""
 
-    def __init__(self, svc, gen: ImageGen, messages: list, load, normalize):
+    def __init__(self, svc, gen: ImageGen, messages: list, load, normalize, options: dict | None = None):
         self.svc, self.gen, self.messages, self.load, self.normalize = svc, gen, messages, load, normalize
+        # a Responses request's image_generation tool: its size, quality, output_format, output_compression and
+        # background, over what the model's call says (size "auto": the call's)
+        self.options = {k: v for k, v in (options or {}).items()
+                        if k in OPTION_KEYS and v is not None and not (k == "size" and v == "auto")}
         self.settings = {"max_rounds": 4}
         self.made: list[str] = []          # the images this request made (file names)
 
@@ -922,7 +947,7 @@ class ImageTools:
         args = arguments if isinstance(arguments, dict) else {}
         urls: list[str] = []
         try:
-            req = {k: args[k] for k in ("prompt", "size", "seed") if args.get(k) not in (None, "")}
+            req = {**{k: args[k] for k in ("prompt", "size", "seed") if args.get(k) not in (None, "")}, **self.options}
             if name == "generate_image":
                 job = parse_request(req, self.gen.cfg)
             elif name == "edit_image":
@@ -934,7 +959,9 @@ class ImageTools:
                 raise ImageRequestError(f"there is no tool named {name!r}")
             with gpu_turn(self.svc, self.gen, job, cancel):
                 images, figures = self.gen.run(job, cancel)
-            names = [self.gen.store(png) for png in images]
+            fmt = job["output_format"]
+            names = [self.gen.store(encode_image(png, fmt, job["output_compression"], job["background"] == "opaque"),
+                                    fmt) for png in images]
             self.made += names
             urls = [f"/v1/images/files/{n}" for n in names]
             text = (f"The image is made ({job['width']}x{job['height']}, seed {job['seed']}, "
@@ -944,7 +971,10 @@ class ImageTools:
         except (ValueError, ImageJobFailed) as e:
             text, ok = f"error: {e}", False
         return {"ok": ok, "text": text, "chars": len(text), "truncated": False,
-                "ms": int((time.monotonic() - t0) * 1000), "server": None, "tool": name, "images": urls}
+                "ms": int((time.monotonic() - t0) * 1000), "server": None, "tool": name, "images": urls,
+                **({"image": {"size": f"{job['width']}x{job['height']}", "quality": job["quality"],
+                              "background": job["background"], "output_format": job["output_format"],
+                              "revised_prompt": model_prompt(job)}} if ok else {})}
 
 
 # ------------------------------------------------------------------------------------------- the GPU turn

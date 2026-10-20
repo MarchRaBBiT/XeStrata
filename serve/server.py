@@ -2623,9 +2623,10 @@ class Vision:
             return False
 
     @staticmethod
-    def normalize(data: bytes) -> bytes:
+    def normalize(data: bytes, keep_alpha: bool = False) -> bytes:
         """The formats strata-vision's decoder (stb_image) reads pass through; anything else is converted to PNG.
-        A JPEG with an EXIF Orientation other than 1 is turned upright first (needs Pillow)."""
+        A JPEG with an EXIF Orientation other than 1 is turned upright first (needs Pillow).  `keep_alpha` (an image
+        edit's reference: the image model reads the alpha): a transparent image stays RGBA, else it goes on white."""
         jpeg = data[:3] == b"\xff\xd8\xff"
         if (jpeg and not Vision._exif_rotated(data)) or data[:8] == b"\x89PNG\r\n\x1a\n" or data[:2] == b"BM" or \
                 data[:6] in (b"GIF87a", b"GIF89a"):
@@ -2643,7 +2644,9 @@ class Vision:
             im = ImageOps.exif_transpose(im)             # the camera's orientation tag, applied (#1229)
         except Exception as e:
             raise ValueError(f"the image could not be read ({e})") from None
-        if im.mode in ("RGBA", "LA", "P") and "transparency" in im.info or im.mode in ("RGBA", "LA"):
+        if keep_alpha and (im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info):
+            im = im.convert("RGBA")
+        elif im.mode in ("RGBA", "LA", "P") and "transparency" in im.info or im.mode in ("RGBA", "LA"):
             im = im.convert("RGBA")
             bg = Image.new("RGB", im.size, (255, 255, 255))   # transparent areas become white, not black
             bg.paste(im, mask=im.split()[-1])
@@ -4937,7 +4940,8 @@ def run_with_mcp(svc: Service, hub, messages, tools, kw, ids, thinking, max_new,
             results.append(r["text"])
             yield "mcp", {"event": "result", "id": c.id,
                           **{k: r[k] for k in ("ok", "text", "chars", "truncated", "ms")},
-                          **({"images": r["images"]} if r.get("images") else {})}
+                          **({"images": r["images"]} if r.get("images") else {}),
+                          **({"image": r["image"]} if r.get("image") else {})}
         if cancel.is_set() or len(results) < len(calls):
             done = {**done, "finish": "cancel"}
             break
@@ -6009,7 +6013,8 @@ def make_handler(svc: Service):
                         raise ValueError("mask: {\"image_url\": a data: URL, an http(s) URL or a path}")
                     self._no_local_sources([mask])
                     mask = svc.download(mask) if mask.startswith(("http://", "https://")) else Vision.load(mask)
-            job = images_api.parse_edit_request(req, [Vision.normalize(d) for d in files], gen.cfg, mask)
+            job = images_api.parse_edit_request(req, [Vision.normalize(d, keep_alpha=True) for d in files], gen.cfg,
+                                                mask)
             self._image_job(gen, job)
 
         def _image_job(self, gen, job):
@@ -6266,7 +6271,8 @@ def make_handler(svc: Service):
                 if extra:
                     hubs.append(svc.mcp)
             if req.get("strata_images") is True and svc.images is not None:   # opt-in: the image tools
-                image_tools = images_api.ImageTools(svc, svc.images, messages, Vision.load, Vision.normalize)
+                image_tools = images_api.ImageTools(svc, svc.images, messages, Vision.load,
+                                                    lambda d: Vision.normalize(d, keep_alpha=True))
                 more = image_tools.template_tools(exclude=own | {t["name"] for t in extra})
                 if more:
                     extra += more
@@ -6448,7 +6454,11 @@ def make_handler(svc: Service):
             # OpenAI's hosted image_generation tool: this server's image tools, run here (serve/images.py)
             self.image_tools = None
             if "image_generation" in skipped and svc.images is not None and req.get("tool_choice") != "none":
-                self.image_tools = images_api.ImageTools(svc, svc.images, messages, Vision.load, Vision.normalize)
+                spec = next((t for t in req.get("tools") or [] if isinstance(t, dict)
+                             and t.get("type") == "image_generation"), {})
+                self.image_tools = images_api.ImageTools(svc, svc.images, messages, Vision.load,
+                                                         lambda d: Vision.normalize(d, keep_alpha=True),
+                                                         spec)
                 tools = (tools or []) + self.image_tools.template_tools(exclude={t["name"] for t in tools or []})
                 skipped = [k for k in skipped if k != "image_generation"]
             kw = responses_api.template_kwargs(req, {"reasoning_effort": svc.effort_default()})
