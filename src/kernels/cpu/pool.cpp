@@ -20,7 +20,9 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <stdexcept>
+#include <string>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -286,13 +288,48 @@ void ExpertPool::diag(std::FILE* f) const {
     std::fprintf(f, " for %lld ms\n", (long long) (now_ms() - hstate_ms_.load()));
 }
 
+// The default workers at most: 32 (upstream 036c8f6ec, a 32-core EPYC: 24 lost 2-5% of the decode, 32 and 48 were
+// equal, 63 oversubscribed lost 35%), and no more than the container's CPU quota (cgroup cpu.max / cfs_quota_us).
+// Upstream's default for a hybrid CPU with more E-cores than P-cores (the P-cores and half the E-cores, bec4c838a) is
+// not taken: on an i7-14700 it cost XeStrata 3% of the decode and 13% of the prompt (13 workers against 19, B70,
+// GLM-5.3-Flash and llm-jp-4.1, 2026-10-20).
+static int default_worker_cap() {
+    int cap = 32;
+#if defined(__linux__)
+    auto first_line = [](const char* path) {
+        std::string line;
+        if (std::FILE* f = std::fopen(path, "r")) {
+            char buf[64] = {0};
+            if (std::fgets(buf, sizeof buf, f) != nullptr) line = buf;
+            std::fclose(f);
+        }
+        return line;
+    };
+    double quota = 0;
+    const std::string v2 = first_line("/sys/fs/cgroup/cpu.max");   // "max 100000" or "<quota> <period>"
+    if (!v2.empty()) {
+        char* end = nullptr;
+        const double q = std::strtod(v2.c_str(), &end);
+        const double period = end != v2.c_str() ? std::strtod(end, nullptr) : 0;
+        if (end != v2.c_str() && q > 0 && period > 0) quota = q / period;
+    } else {   // v1: cpu.cfs_quota_us (-1: none) / cpu.cfs_period_us
+        const double q = std::strtod(first_line("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").c_str(), nullptr);
+        const double period = std::strtod(first_line("/sys/fs/cgroup/cpu/cpu.cfs_period_us").c_str(), nullptr);
+        if (q > 0 && period > 0) quota = q / period;
+    }
+    // the host loop takes a core of the quota too
+    if (quota > 0) cap = std::min(cap, std::max(1, (int) std::floor(quota) - 1));
+#endif
+    return cap;
+}
+
 ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, int first_core, int tasks)
     : tasks_(tasks), host_works_(host_works) {
     if (tasks < 0 || tasks > kMaxTasks) throw std::invalid_argument("expert pool tasks must be in 0..4096");
     if (const char* e = std::getenv("STRATA_POOL_SPIN_US"))   // a test knob; see kSpinBeforeSleep
         spin_before_sleep_ = std::chrono::microseconds((std::max)(0, std::atoi(e)));
     const std::vector<int> cores = physical_cores(true);
-    n_ = n_workers > 0 ? n_workers : (int) cores.size();
+    n_ = n_workers > 0 ? n_workers : (int) std::min<size_t>(cores.size(), (size_t) default_worker_cap());
     if (n_ < 1) n_ = 1;
     scratch_.resize((size_t) n_);
     wstate_.reset(new std::atomic<int32_t>[(size_t) n_]);
