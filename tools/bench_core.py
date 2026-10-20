@@ -669,16 +669,68 @@ def run_usage(e: Engine, cfg: dict, seed: int, agent_files: list[str], stem: Pat
         why = str(err)
     finally:
         try:
-            os.killpg(srv.pid, signal.SIGTERM)
-            srv.wait(timeout=120)
-        except (ProcessLookupError, subprocess.TimeoutExpired):
             try:
-                os.killpg(srv.pid, signal.SIGKILL)
+                os.killpg(srv.pid, signal.SIGTERM)
+                srv.wait(timeout=120)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(srv.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                srv.wait()
+            end_group(srv.pid, f"{label or e.arm}: its server's")
+        finally:
+            log.close()
+    return {"turns": turns, "why": why}
+
+
+class EngineLeft(RuntimeError):
+    """A run's engine still runs after it was stopped and killed (stuck in its GPU driver): the next run would start
+    beside it, in what it leaves of the GPU's memory, so the measurements stop here."""
+
+
+GROUP_END = 120   # s: for the processes left in a run's group to end, and again after they are killed
+
+
+def group_left(pgid: int) -> list[str]:
+    """The processes of process group `pgid` that still run, as "PID name" (zombies left out: they hold no memory,
+    and one a container's init does not reap would stay for good)."""
+    left = []
+    for p in Path("/proc").iterdir():
+        if not p.name.isdigit():
+            continue
+        try:
+            stat = (p / "stat").read_text()
+        except OSError:
+            continue
+        name_end = stat.rfind(")")
+        f = stat[name_end + 2:].split()    # state, ppid, pgrp, ...
+        if len(f) > 2 and int(f[2]) == pgid and f[0] != "Z":
+            left.append(f"{p.name} {stat[stat.find('(') + 1:name_end]}")
+    return left
+
+
+def end_group(pgid: int, what: str) -> None:
+    """#34: wait until every process of a run's group has ended, not only the server: the server ends once it has
+    given up on its engine (EngineStuck), and an engine stuck after a GPU fault kept its VRAM while the next run
+    started (6674 and 838 MiB free).  The group is killed after GROUP_END s; EngineLeft when a process is still there
+    GROUP_END s later."""
+    killed = False
+    deadline = time.monotonic() + GROUP_END
+    while left := group_left(pgid):
+        if time.monotonic() > deadline:
+            if killed:
+                raise EngineLeft(f"{what} engine has not ended ({'; '.join(left[:3])}), {2 * GROUP_END} s after it "
+                                 "was stopped, and keeps its GPU memory: the next run would start beside it, so the "
+                                 "measurements stop here. The GPU's driver log (sudo dmesg) may say why; a reboot "
+                                 "frees the GPU")
+            try:
+                os.killpg(pgid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            srv.wait()
-        log.close()
-    return {"turns": turns, "why": why}
+            killed = True
+            deadline = time.monotonic() + GROUP_END
+        time.sleep(1)
 
 
 # ------------------------------------------------------------------------------------------------ the alternation

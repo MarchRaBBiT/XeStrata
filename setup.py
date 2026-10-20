@@ -4018,7 +4018,7 @@ def bench_config(cfg_path: Path, data: Path, verbose: bool, original: str | None
         (f", twice that with upstream {original}" if original else "") + ". The PC is busy meanwhile.")
     try:
         md = BENCH.run(cfg_path, data, chosen, verbose, original, say, rounds, temperature)
-    except BENCH.BenchError as e:
+    except (BENCH.BenchError, BENCH.C.EngineLeft) as e:
         fail(str(e))
     say()
     say(md.read_text(encoding="utf-8"))
