@@ -218,6 +218,11 @@ def ms_meta(repo: str, path: str):
 HF = hf("ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF")
 LLAMA_CPP_COMMIT = "3cf03257f219afbe7334045ff7c6a06ac68c627d"
 LLAMA_CPP_ZIP = f"https://github.com/ggml-org/llama.cpp/archive/{LLAMA_CPP_COMMIT}.zip"
+# #32: what the zip holds at that commit (tree_sha256: every file's path and SHA-256, in path order), checked before the
+# source is used and compiled.  The zip's own bytes are not pinned: GitHub makes archives on request and does not
+# promise the same compression; the files in it are the commit's.  A new LLAMA_CPP_COMMIT takes its own value:
+# tree_sha256() of the zip unpacked with zipfile.
+LLAMA_CPP_TREE_SHA256 = "87b1443f593e9b9159a61fa933e0fd4a2bc29e95f5ad6da422789d1c7cc515ae"
 
 # KV bytes per context token and attention layer: 8-bit 1056, rotated 4-bit 576, hybrid K8V4 (8-bit K, 4-bit V) 816
 KV_CELL_BYTES = {"q4_0": 576, "k8v4": 816}
@@ -2345,6 +2350,23 @@ def verify_sha256(s: Path, size: int, sha: str) -> None:
     mark(s, f"sha256 {sha}")
 
 
+def tree_sha256(top: Path) -> str:
+    """#32: a folder's files as one SHA-256 - each file's path (relative, with /) and its SHA-256, in path order."""
+    items = []
+    for root, _dirs, files in os.walk(top):
+        for f in files:
+            p = Path(root) / f
+            h = hashlib.sha256()
+            with open(p, "rb") as fh:
+                for block in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(block)
+            items.append((p.relative_to(top).as_posix(), h.hexdigest()))
+    total = hashlib.sha256()
+    for rel, digest in sorted(items):
+        total.update(f"{rel}\0{digest}\n".encode())
+    return total.hexdigest()
+
+
 def get_llama_cpp():
     """llama.cpp at the pinned commit (ggml for the build, gguf-py for the tools, mtmd for images), as a zip: no git."""
     llama = ROOT / "third_party" / "main" / "llama.cpp"
@@ -2367,6 +2389,13 @@ def get_llama_cpp():
             warn(f"cannot remove damaged {z.name} ({e}): delete it and its .done mark before running setup again")
         raise
     top = next(tmp.iterdir())
+    if (got := tree_sha256(top)) != LLAMA_CPP_TREE_SHA256:   # #32: before anything of it is used or compiled
+        shutil.rmtree(tmp, ignore_errors=True)
+        z.unlink(missing_ok=True)
+        z.with_name(z.name + ".done").unlink(missing_ok=True)
+        fail(f"the llama.cpp source from {LLAMA_CPP_ZIP.split('/')[2]} is not the pinned commit's (its files' "
+             f"SHA-256 {got[:16]}..., expected {LLAMA_CPP_TREE_SHA256[:16]}...)",
+             "run setup again; if it says so again, the download is being changed on its way: update XeStrata")
     if llama.exists():
         shutil.rmtree(llama)
     top.replace(llama)
