@@ -95,6 +95,9 @@ FALLBACK_FAMILIES = {
               "tag": "llmjp-"},
     "qwen36": {"title": "Qwen3.6-35B-A3B", "about": "35B, 3B active; a Qwen3.5 MoE with the Qwen tokenizer: Unsloth's "
                                                     "4-, 6- and 8-bit files", "tag": "qwen36-"},
+    "glm53": {"title": "GLM-5.3-Flash",
+              "about": "320B, 18B active; a large MoE for the PCs whose RAM and VRAM hold 95 GB or more",
+              "tag": "glm53-"},
 }
 FALLBACK_CONTEXTS = [8192, 32768, 65536, 131072, 204800, 262144, 393216, 524288]
 BENCH_PROMPT = ("Write a short story (about 300 words) about a lighthouse keeper who finds a message in a bottle. "
