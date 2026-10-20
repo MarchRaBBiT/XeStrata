@@ -3886,12 +3886,23 @@ int main(int argc, char** argv) {
                 all += lm;
             }
             ms += ((double) head_bytes + (drafts ? (rows - 1.0) * dense_layer : 0.0)) / bw[0];
-            const bool helper = nh > 0 && (role == "helper" || ms < best_ms);
+            // #34: the helper only when its window is predicted faster by more than the model's error.  The model
+            // prices decode only, and the split reads a prompt on both GPUs, the helper every layer on CUDA0: on two
+            // B70s the helper, predicted 1.7% faster, read a 2.5K prompt in 1.8x the time and decoded slower; on a
+            // B70 + RTX 4070 (IQ3_XXS, serve) predicted 2.4 to 3% faster, it read 4K 21% faster and 32K as fast,
+            // and decoded 32K 10 to 25% slower (2026-10-21).  STRATA_SPLIT_HELPER_GAIN_PCT: the margin, 0 = any.
+            const char* gain_env = std::getenv("STRATA_SPLIT_HELPER_GAIN_PCT");
+            const double gain_pct = gain_env != nullptr ? std::strtod(gain_env, nullptr) : 5.0;
+            const bool faster = ms < best_ms * (1.0 - gain_pct / 100.0);
+            const bool helper = nh > 0 && (role == "helper" || (role.empty() && faster));
             std::fprintf(stderr, "strata generate: layer split auto: CUDA%d as a helper expert cache instead: %.1f ms per "
                                  "decode window (%lld more experts there, ~%.1f%% of the routed mass on the GPUs) "
                                  "against %.1f split at K=%s -> %s%s\n",
                          dev_of_stage(h), ms, (long long) nh, all > 0 ? 100.0 * kept / all : 0.0, best_ms, ks.c_str(),
-                         helper ? "the helper" : "the split", role.empty() ? "" : " (STRATA_SPLIT_ROLE)");
+                         helper ? "the helper" : "the split",
+                         !role.empty() ? " (STRATA_SPLIT_ROLE)"
+                         : !helper && nh > 0 && ms < best_ms ? " (not faster by STRATA_SPLIT_HELPER_GAIN_PCT; the "
+                                                               "split also reads the prompt on both GPUs)" : "");
             if (helper) {
                 o.expert_cache_remote[0] = (int) nh;
                 remote_dev[0] = dev_of_stage(h);
