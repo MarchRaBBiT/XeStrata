@@ -63,6 +63,7 @@ struct CgroupMemoryStat {
     uint64_t file_dirty = 0;
     uint64_t file_writeback = 0;
     bool valid = false;
+    uint64_t file = 0;   ///< every file page of the group (memory.stat "file"; 0: not given, inactive_file alone)
 };
 
 /// Calculate additional bytes under a finite cgroup limit after reclaiming only clean inactive file cache.

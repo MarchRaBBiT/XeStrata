@@ -65,10 +65,14 @@ bool cgroup_available_bytes(uint64_t limit, const CgroupMemoryStat& stat, uint64
     bytes = 0;
     if (!stat.valid) return false;
 
-    // memory.stat's inactive_file can race memory.current, so bound it to charged usage first.
-    uint64_t reclaimable = std::min(stat.inactive_file, stat.current);
+    // memory.stat's counters can race memory.current, so bound them to charged usage first.  The whole clean page
+    // cache is reclaimable, as MemAvailable counts active file pages too, less what the kernel keeps (upstream
+    // 82c80ac4d: a container whose own reads left active cache was judged short of RAM, 1.2 GiB available instead of
+    // about 11 in a 32 GiB group).
+    uint64_t reclaimable = std::min(std::max(stat.file, stat.inactive_file), stat.current);
     reclaimable = stat.file_dirty >= reclaimable ? 0 : reclaimable - stat.file_dirty;
     reclaimable = stat.file_writeback >= reclaimable ? 0 : reclaimable - stat.file_writeback;
+    reclaimable -= std::min(reclaimable / 2, limit / 64);
 
     // Reclaiming clean file pages reduces usage; saturating subtraction also handles a transient over-limit read.
     const uint64_t usage_after_reclaim = stat.current - reclaimable;
@@ -263,7 +267,7 @@ bool read_cgroup_memory_stat(const std::filesystem::path& path, uint64_t current
     std::ifstream input(path / "memory.stat");
     if (!input) return false;
 
-    bool inactive_file = false, file_dirty = false, file_writeback = false;
+    bool inactive_file = false, file_dirty = false, file_writeback = false, file = false;
     std::string line;
     while (std::getline(input, line)) {
         std::istringstream fields(line);
@@ -285,6 +289,10 @@ bool read_cgroup_memory_stat(const std::filesystem::path& path, uint64_t current
             if (file_writeback) return false;
             file_writeback = true;
             stat.file_writeback = value;
+        } else if (key == "file") {   // optional (every v2 kernel has it)
+            if (file) return false;
+            file = true;
+            stat.file = value;
         }
     }
     if (!input.eof() || !inactive_file || !file_dirty || !file_writeback) return false;
