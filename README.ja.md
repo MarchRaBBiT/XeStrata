@@ -196,8 +196,11 @@ BETA の 4 つの RAM の目安は、ダウンロードの大きさに約 8 GB �
 | --- | --- | --- | --- |
 | `qwen-image-turbo` | [Qwen-Image-2.1-Turbo](https://huggingface.co/unsloth/Qwen-Image-2.1-Turbo-GGUF) | 速い（8 ステップ） | ふだんの画像の生成と編集（**おすすめ**） |
 | `qwen-image-base` | [Qwen-Image-2.1](https://huggingface.co/unsloth/Qwen-Image-2.1-GGUF) | 遅い（40 ステップ、Turbo の約 5 倍） | Turbo の元のモデル。ステップ数を変えられる |
+| `mage-flow-turbo` | [Mage-Flow-Turbo](https://huggingface.co/Comfy-Org/Mage-Flow) | いちばん速い（4 ステップ） | 小さい 4B のモデル。RAM や VRAM の少ない PC 向け |
+| `mage-flow` | [Mage-Flow](https://huggingface.co/Comfy-Org/Mage-Flow) | 遅い（20 ステップ、CFG） | 指示への従い方と文字の描き方を調整した版 |
+| `mage-flow-base` | [Mage-Flow-Base](https://huggingface.co/Comfy-Org/Mage-Flow) | 遅い（30 ステップ、CFG） | 調整の前の元のモデル |
 
-`-uncensored` を付けると（`qwen-image-turbo-uncensored` など）、文の読み手が AtomicChat の拒否の方向を取り除いた Qwen3-VL-8B になります。
+Qwen-Image-2.1 に `-uncensored` を付けると（`qwen-image-turbo-uncensored` など）、文の読み手が AtomicChat の拒否の方向を取り除いた Qwen3-VL-8B になります。
 
 | 画像のモデルの大きさ（`--image-quant`） | ダウンロード | RAM の目安 | VRAM |
 | --- | ---: | ---: | ---: |
@@ -209,8 +212,11 @@ BETA の 4 つの RAM の目安は、ダウンロードの大きさに約 8 GB �
 RAM の目安は、文章のモデルとは別に要る量です。足りなければ setup は文の読み手を Q4_K まで下げ、それでも足りなければ画像のモデルを下げます（`--image-ssd-offload on` なら下げずに、入らない分を SSD から読みます）。
 VRAM が大きいほど速くなります。
 
+Mage-Flow（Microsoft、MIT）は大きさが 1 つで、ダウンロードは画像のモデル（bf16）、文の読み手（Qwen3-VL-4B の Q8_0）、VAE の合計 12.9 GB、RAM の目安は 15 GB です。
+画像のモデルはエンジンが読み込むときに Q8_0 にして VRAM に置き、入らない分は Q8_0 にしてピン留めした RAM に置きます（`--image-dit-q8 off` で bf16 のまま）。
+
 画像は `POST /v1/images/generations` と `/v1/images/edits`（vLLM-Omni 互換（OpenAI 互換））、Web のページの Images のタブ、チャットから作れます（[詳細](docs/DETAILS.ja.md#画像の生成任意)）。
-Qwen-Image-2.1 の重みは Qwen Research License で、自由なソフトウェアのライセンスではありません。
+Qwen-Image-2.1 の重みは Qwen Research License で、自由なソフトウェアのライセンスではありません。Mage-Flow の重みは MIT です。
 
 ## インストール
 

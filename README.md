@@ -210,8 +210,11 @@ It goes with any text model, and the images are made by XeStrata's own image eng
 | --- | --- | --- | --- |
 | `qwen-image-turbo` | [Qwen-Image-2.1-Turbo](https://huggingface.co/unsloth/Qwen-Image-2.1-Turbo-GGUF) | fast (8 steps) | everyday images and edits (**recommended**) |
 | `qwen-image-base` | [Qwen-Image-2.1](https://huggingface.co/unsloth/Qwen-Image-2.1-GGUF) | slow (40 steps, about 5 times Turbo) | the model Turbo was made from; its steps can be changed |
+| `mage-flow-turbo` | [Mage-Flow-Turbo](https://huggingface.co/Comfy-Org/Mage-Flow) | fastest (4 steps) | a small 4B model, for PCs with little RAM or VRAM |
+| `mage-flow` | [Mage-Flow](https://huggingface.co/Comfy-Org/Mage-Flow) | slow (20 steps, CFG) | tuned for following instructions and drawing text |
+| `mage-flow-base` | [Mage-Flow-Base](https://huggingface.co/Comfy-Org/Mage-Flow) | slow (30 steps, CFG) | the model before that tuning |
 
-With `-uncensored` (`qwen-image-turbo-uncensored` and so on), the text encoder is AtomicChat's Qwen3-VL-8B with its refusal direction removed.
+For Qwen-Image-2.1, with `-uncensored` (`qwen-image-turbo-uncensored` and so on), the text encoder is AtomicChat's Qwen3-VL-8B with its refusal direction removed.
 
 | Image model size (`--image-quant`) | Download | RAM (about) | VRAM |
 | --- | ---: | ---: | ---: |
@@ -223,8 +226,11 @@ The download is the image model, the text encoder (Qwen3-VL-8B Q8_0), the VAE an
 The RAM is what it takes besides the text model: when it is short, setup lowers the text encoder down to Q4_K, then the image model (with `--image-ssd-offload on` it keeps them and reads what does not fit from the SSD).
 More VRAM makes it faster.
 
+Mage-Flow (Microsoft, MIT) comes in one size: the download is the image model (bf16), the text encoder (Qwen3-VL-4B Q8_0) and the VAE, 12.9 GB together, and the RAM about 15 GB.
+The engine turns the image model into Q8_0 as it loads it and keeps it in VRAM, what does not fit in pinned RAM, also as Q8_0 (`--image-dit-q8 off` keeps bf16).
+
 Images are made through `POST /v1/images/generations` and `/v1/images/edits` (vLLM-Omni compatible, so OpenAI compatible), the Images tab of the web page, and the chat ([details](docs/DETAILS.md#image-generation-optional)).
-Qwen-Image-2.1's weights are under the Qwen Research License, not a free software license.
+Qwen-Image-2.1's weights are under the Qwen Research License, not a free software license; Mage-Flow's are under MIT.
 
 ## Install
 
