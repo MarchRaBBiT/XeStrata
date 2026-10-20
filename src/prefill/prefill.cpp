@@ -2699,9 +2699,12 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     const bool had_gu = lay.native && lay.fmt[(size_t) l].had_gu;
                     const bool had_d = lay.native && lay.fmt[(size_t) l].had_d;
                     const int had_block = lay.native ? lay.fmt[(size_t) l].had_block : 0;
-                    const float* had_sx = had_gu ? strata::kernels::hadamard_device_signs(lay.fmt[(size_t) l].gu_signs, (int) N)
+                    const float* had_sx = had_gu ? strata::kernels::hadamard_device_signs(lay.fmt[(size_t) l].gu_signs,
+                                                                                          (int) lay.fmt[(size_t) l].n_embd)
                                                  : nullptr;
-                    const float* had_sh = had_d ? strata::kernels::hadamard_device_signs(lay.fmt[(size_t) l].d_signs, 640)
+                    // the sign vectors at the layout's widths (upstream dd32704d4), this device's copies made once
+                    const float* had_sh = had_d ? strata::kernels::hadamard_device_signs(lay.fmt[(size_t) l].d_signs,
+                                                                                         (int) lay.fmt[(size_t) l].n_ff)
                                                 : nullptr;
                     const size_t mmq_gub = use_mmq ? mmq::matrix_bytes(mmq_gt, 1280, N) : 0;
                     const size_t mmq_db = use_mmq ? mmq::matrix_bytes(mmq_dt, N, 640) : 0;
