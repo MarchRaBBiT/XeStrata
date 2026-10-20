@@ -3,20 +3,23 @@
 // src/image/strata_image.cpp - strata-image: Qwen-Image-2.1 text to image on the GPU.
 //
 //   strata-image --dit DIT.gguf --vae VAE.safetensors --text TEXT_ENCODER.gguf [--vision MMPROJ.gguf]
-//                [--budget-mib M] (--ids 1,2,3 [--drop N] [--width W] [--height H] [--seed S] [--ref IMAGE]...
-//                [--repeat N] --out IMAGE.rgba | --serve)
+//                [--budget-mib M] (--ids 1,2,3 [--drop N] [--width W] [--height H] [--seed S] [--sigmas 1,...,0]
+//                [--ref IMAGE]... [--repeat N] --out IMAGE.rgba | --serve)
 //
 // One image: --ids, the prompt in the model's chat form, tokenized (the server's tokenizer); --drop, the leading ids of
 // the system turn; --budget-mib, the VRAM the engine may take (default: the free VRAM); --repeat, the image again N
-// times in the process (the cache's effect); --ref, an edit's reference image (PNG, JPEG, BMP, GIF; its pad in --ids
-// is one <|image_pad|>, which the engine widens to the image's tokens), with the vision encoder (--vision, Qwen3-VL's
-// mmproj).  Writes RGBA8 rows to --out and a line of times and of the budget's split a run.
+// times in the process (the cache's effect); --sigmas, the sampler's sigmas from 1 down to the terminal 0, one step
+// between each two (default Turbo's 8 steps; serve/images.py's base_sigmas for the base model); --ref, an edit's
+// reference image (PNG, JPEG, BMP, GIF; its pad in --ids is one <|image_pad|>, which the engine widens to the image's
+// tokens), with the vision encoder (--vision, Qwen3-VL's mmproj).  Writes RGBA8 rows to --out and a line of times
+// and of the budget's split a run.
 //
 // --serve: the engine stays, its layers and the last prompt's states kept between requests, and takes lines on stdin
 // (serve/images.py), one at a time, answering each on stdout:
-//   IMG <width> <height> <seed> <drop> <out path> <ids, commas> [REF:<path>]...   -> STAGE <refs|text|sampling|decode>
-//                            as each stage starts and STEP <done> <steps> lines, then IMAGE key=value ... (times, the
-//                            budget's split); REF: an edit's reference images
+//   IMG <width> <height> <seed> <drop> <out path> <ids, commas> [SIGMAS:<sigmas, commas>] [REF:<path>]...
+//                            -> STAGE <refs|text|sampling|decode> as each stage starts and STEP <done> <steps> lines,
+//                            then IMAGE key=value ... (times, the budget's split); SIGMAS: as --sigmas; REF: an
+//                            edit's reference images
 //   NEED <width> <height> <n> [REF:<path>]...  the VRAM an image of n prompt ids needs (from the files)
 //                                                                                          -> NEED least_mib=...
 //                            full_mib=... held_mib=... free_mib=... (si::QiNeed)
@@ -60,10 +63,26 @@ std::vector<int32_t> parse_ids(const std::string& s) {
     return ids;
 }
 
-// the REF:<path> words left on a request line: the images read, or (sizes) their sizes only
-std::vector<si::QiRef> read_refs(std::istringstream& ls) {
+// the sampler's sigmas, commas: two or more, from at most 1 down to 0, falling
+std::vector<float> parse_sigmas(const std::string& s) {
+    std::vector<float> sig;
+    std::stringstream ss(s);
+    for (std::string tok; std::getline(ss, tok, ',');)
+        if (!tok.empty()) sig.push_back(std::stof(tok));
+    bool ok = sig.size() >= 2 && sig.front() <= 1.0f && sig.back() == 0.0f;
+    for (size_t i = 1; ok && i < sig.size(); ++i) ok = sig[i] < sig[i - 1];
+    if (!ok) throw std::invalid_argument("sigmas: two or more, falling from at most 1 to 0: " + s);
+    return sig;
+}
+
+// the REF:<path> words left on a request line (and an IMG's SIGMAS:): the images read, or (sizes) their sizes only
+std::vector<si::QiRef> read_refs(std::istringstream& ls, std::vector<float>* sigmas = nullptr) {
     std::vector<si::QiRef> refs;
     for (std::string word; ls >> word;) {
+        if (sigmas != nullptr && word.rfind("SIGMAS:", 0) == 0) {
+            *sigmas = parse_sigmas(word.substr(7));
+            continue;
+        }
         if (word.rfind("REF:", 0) != 0) throw std::invalid_argument("unknown word " + word);
         si::QiRef f;
         std::string err;
@@ -168,7 +187,7 @@ int serve(si::QiPipeline& p) {
                 ls >> r.width >> r.height >> r.seed >> r.drop >> out >> ids;
                 if (!ls || out.empty()) throw std::invalid_argument("IMG <width> <height> <seed> <drop> <out> <ids>");
                 r.ids = parse_ids(ids);
-                r.refs = read_refs(ls);
+                r.refs = read_refs(ls, &r.sigmas);
                 in.stop = false;
                 si::QiTimes t;
                 si::QiPlan pl;
@@ -260,6 +279,7 @@ int main(int argc, char** argv) {
             else if (a == "--width") r.width = std::stoll(val());
             else if (a == "--height") r.height = std::stoll(val());
             else if (a == "--seed") r.seed = std::stoull(val());
+            else if (a == "--sigmas") r.sigmas = parse_sigmas(val());
             else if (a == "--budget-mib") budget = std::stoull(val()) << 20;
             else if (a == "--repeat") repeat = std::stoi(val());
             else if (a == "--serve") serving = true;
@@ -267,8 +287,8 @@ int main(int argc, char** argv) {
         }
         if (dit.empty() || vae.empty() || text.empty() || (!serving && (out.empty() || ids.empty()))) {
             std::fprintf(stderr, "usage: %s --dit F --vae F --text F [--vision F] [--budget-mib M] (--ids 1,2,3 "
-                         "[--drop N] [--width W] [--height H] [--seed S] [--ref IMAGE]... [--repeat N] --out IMAGE.rgba "
-                         "| --serve)\n", argv[0]);
+                         "[--drop N] [--width W] [--height H] [--seed S] [--sigmas 1,...,0] [--ref IMAGE]... "
+                         "[--repeat N] --out IMAGE.rgba | --serve)\n", argv[0]);
             return 2;
         }
         si::QiPipeline p;
