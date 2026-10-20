@@ -12033,6 +12033,10 @@ int main(int argc, char** argv) {
             }
         }
         save_profile("exit");   // #477: QUIT, or the server closed stdin
+        // the GPUs' queues drained before main's locals free their memory, as on SIGTERM (route_stop_signals): a
+        // copy still queued then read or wrote memory the exit had freed (an engine memory fault on the B70's copy
+        // engine, c540ee63d)
+        strata::core::Runtime::finish_all();
         return 0;
     }
 
