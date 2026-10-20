@@ -3,6 +3,7 @@
 // src/image/qi_dit.cpp - see include/strata/image/qi_dit.hpp.
 
 #include "strata/image/qi_dit.hpp"
+#include "strata/image/qi_gguf.hpp"
 
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/core/gpu.hpp"
@@ -92,7 +93,7 @@ QiDit::~QiDit() {
 }
 
 QiDit::W QiDit::upload(const std::string& name) {
-    const TensorInfo* t = g_->find("model.diffusion_model." + name);
+    const TensorInfo* t = find_checked(*g_, "model.diffusion_model." + name);
     if (t == nullptr) throw std::runtime_error("image engine: the DiT has no " + name);
     W w;
     w.k = (int64_t) t->shape[0];
@@ -128,7 +129,7 @@ QiDit::W QiDit::upload(const std::string& name) {
 }
 
 const float* QiDit::upload_f32(const std::string& name, float add) {
-    const TensorInfo* t = g_->find("model.diffusion_model." + name);
+    const TensorInfo* t = find_checked(*g_, "model.diffusion_model." + name);
     if (t == nullptr) throw std::runtime_error("image engine: the DiT has no " + name);
     const auto n = (int64_t) t->elements();
     if (dry_) {
@@ -167,12 +168,12 @@ bool QiDit::open(const std::string& path, void* stream, std::string& err, bool d
         int64_t scratch = 0;
         for (int i = 0;; ++i) {   // the blocks: spans of the mapped file, on the GPU through blocks_stream_
             const std::string p = "transformer_blocks." + std::to_string(i) + ".";
-            if (g_->find("model.diffusion_model." + p + "attn.to_q.weight") == nullptr) break;
+            if (find_checked(*g_, "model.diffusion_model." + p + "attn.to_q.weight") == nullptr) break;
             Block b;
             std::vector<LayerStream::Span> spans;
             auto span = [&](const std::string& name, W& w) {
                 const std::string full = std::string(p).append(name);
-                const TensorInfo* t = g_->find(std::string("model.diffusion_model.").append(full));
+                const TensorInfo* t = find_checked(*g_, std::string("model.diffusion_model.").append(full));
                 if (t == nullptr) throw std::runtime_error(std::string("image engine: the DiT has no ").append(full));
                 w.type = (int) t->type;
                 w.k = (int64_t) t->shape[0];

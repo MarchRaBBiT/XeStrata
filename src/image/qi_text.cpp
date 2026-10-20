@@ -3,6 +3,7 @@
 // src/image/qi_text.cpp - see include/strata/image/qi_text.hpp.
 
 #include "strata/image/qi_text.hpp"
+#include "strata/image/qi_gguf.hpp"
 
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/core/gpu.hpp"
@@ -64,8 +65,8 @@ bool QiText::open(const std::string& path, void* stream, std::string& err, bool 
             sec_w_ = (int) sec->items[2].num();
         }
         if (layers <= 0) throw std::runtime_error("image engine (text): " + path + " has no blocks");
-        const TensorInfo* e = g_->find("token_embd.weight");
-        if (e == nullptr) throw std::runtime_error("image engine (text): no token_embd.weight");
+        const TensorInfo* e = find_checked(*g_, "token_embd.weight");
+        if (e == nullptr || e->shape.size() < 2) throw std::runtime_error("image engine (text): no token_embd.weight");
         embd_type_ = (int) e->type;
         embd_row_bytes_ = tensor_payload_bytes(*e) / e->shape[1];
         embd_ = g_->tensor_data(*e);
@@ -76,7 +77,7 @@ bool QiText::open(const std::string& path, void* stream, std::string& err, bool 
             std::vector<LayerStream::Span> spans;
             auto span = [&](const std::string& name, W* w) {
                 const std::string full = std::string(p).append(name);
-                const TensorInfo* t = g_->find(full);
+                const TensorInfo* t = find_checked(*g_, full);
                 if (t == nullptr) throw std::runtime_error(std::string("image engine (text): the encoder has no ").append(full));
                 if (w != nullptr) {
                     w->type = (int) t->type;
