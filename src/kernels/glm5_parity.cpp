@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: 2026 MistVVK and the XeStrata contributors
 // SPDX-FileCopyrightText: 2023-2026 The ggml authors
-// SPDX-License-Identifier: LGPL-3.0-or-later
+// SPDX-License-Identifier: LGPL-3.0-or-later AND MIT
 // src/kernels/glm5_parity.cpp - GLM-5.3-Flash's kernels (glm5.hpp) against host references written from llama.cpp
 // f9a95ae's graph and ggml CPU operators (MIT License, Copyright (c) 2023-2026 The ggml authors, see
 // third_party/main/ggml/LICENSE): the mHC read, write and mean, the sigmoid router, the KDA gate and step, the clamped

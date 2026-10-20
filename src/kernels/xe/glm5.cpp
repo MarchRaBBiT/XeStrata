@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: 2026 MistVVK and the XeStrata contributors
 // SPDX-FileCopyrightText: 2023-2026 The ggml authors
-// SPDX-License-Identifier: LGPL-3.0-or-later
+// SPDX-License-Identifier: LGPL-3.0-or-later AND MIT
 // src/kernels/xe/glm5.cpp - see include/strata/kernels/glm5.hpp.
 //
 // Transcribed from llama.cpp f9a95ae (src/models/glm5-next.cpp; ggml/src/ggml-cpu/ops.cpp's dsv4_hc_comb,

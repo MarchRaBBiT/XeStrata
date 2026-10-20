@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: 2026 MistVVK and the XeStrata contributors
 // SPDX-FileCopyrightText: 2023-2026 The ggml authors
-// SPDX-License-Identifier: LGPL-3.0-or-later
+// SPDX-License-Identifier: LGPL-3.0-or-later AND MIT
 // include/strata/kernels/glm5.hpp - GLM-5.3-Flash's (glm5-next) own pieces: the mHC streams, the sigmoid router, the
 // KDA gate and step, and the clamped SwiGLU.  The arithmetic follows llama.cpp's src/models/glm5-next.cpp and the ggml
 // CPU operators it uses (ggml_dsv4_hc_comb, ggml_gated_delta_net with a per-channel gate, ggml_swiglu_clamp) at

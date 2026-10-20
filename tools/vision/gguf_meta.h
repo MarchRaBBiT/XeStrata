@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Niko1221 and the Strata contributors
-// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 MistVVK and the XeStrata contributors
+// SPDX-License-Identifier: LGPL-3.0-or-later AND MIT
 // tools/vision/gguf_meta.h - open a model GGUF for its vocabulary only, whatever its weight tensors are.
 //
 // The picture reader needs the text model for one thing: its tokenizer (and the header values that go with it).  llama.cpp's
