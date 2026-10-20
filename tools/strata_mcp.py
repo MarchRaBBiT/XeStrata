@@ -399,8 +399,27 @@ class Strata:
             return s.MODELS, s.FAMILIES, list(s.CONTEXTS), "setup.py"
         return FALLBACK_MODELS, FALLBACK_FAMILIES, FALLBACK_CONTEXTS, "built-in table (setup.py not importable)"
 
-    @staticmethod
-    def sizes_of(models, family) -> list:
+    def plain_family(self, family) -> dict | None:
+        """setup.py's PLAIN_FAMILIES entry (Ornith, llm-jp, Qwen3.6, GLM: a GGUF the engine runs as it is), else None.
+        Their sizes are the entry's "models", not setup.MODELS (Flash-Next's files with packs), so a list from MODELS
+        alone showed them with no sizes (upstream 83f2a2c73 for its Qwen3.6)."""
+        return (getattr(self.setup_module(), "PLAIN_FAMILIES", None) or {}).get(family)
+
+    def size_row(self, models, family, model) -> dict:
+        """One size as a model-table row: setup.MODELS's, or one made from a plain family's entry (the weights' size;
+        setup asks RAM + VRAM of it plus 8 GB, setup_plain)."""
+        fam = self.plain_family(family)
+        if fam is None or model not in fam["models"]:
+            return models[model]
+        d = fam["models"][model]
+        gb = round(d["size"] / 1e9, 1)
+        return {"about": d["about"], "download_gb": gb, "ram_gb": round(gb + 8, 1), "mem_total": True,
+                "vision": False, "experimental": not d.get("tested"), "families": (family,)}
+
+    def sizes_of(self, models, family) -> list:
+        fam = self.plain_family(family)
+        if fam is not None:
+            return list(fam["models"])
         return [m for m in models if family in models[m].get("families", ("qwen", "swift"))]
 
     # ---- paths
@@ -646,13 +665,17 @@ class Strata:
         for f, fd in families.items():
             sizes = []
             for m in self.sizes_of(models, f):
-                d = models[m]
+                d = self.size_row(models, f, m)
                 tag = (fd.get("tag", "") + m).lower()
                 verdict = None
                 if ram is not None:
-                    verdict = "fits" if ram >= d["ram_gb"] else "tight" if ram >= d["ram_gb"] - 8 else "does not fit"
+                    have_gb = ram + vram if d.get("mem_total") else ram   # a plain model: RAM and VRAM together
+                    verdict = "fits" if have_gb >= d["ram_gb"] else "tight" if have_gb >= d["ram_gb"] - 8 \
+                        else "does not fit"
                     try:
-                        if d.get("budget"):
+                        if d.get("mem_total"):          # a plain model: none of Flash-Next's budget or low-RAM modes
+                            pass
+                        elif d.get("budget"):
                             verdict = (("experimental: " if d.get("experimental") else "")
                                        + "part of its experts in RAM, the rest read from the SSD"
                                        if ram >= d["ram_gb"] else "does not fit")
@@ -1105,13 +1128,14 @@ class Tools:
             usable = [g for g in hw.get("gpus", []) if g.get("usable")]
             vram = max((g["vram_gb"] for g in usable), default=12)
             context = 32768 if vram < 14 else 65536 if vram < 20 else 131072
-        if vision in ("yes", "gpu", "cpu") and models[model].get("vision", families[family].get("vision")) is False:
+        row = s.size_row(models, family, model)
+        if vision in ("yes", "gpu", "cpu") and row.get("vision", families[family].get("vision")) is False:
             raise ToolError(f"images are not available with {families[family]['title']} {model} yet: use vision=no")
         target = self.check_data_dir(data_dir) if data_dir else s.data_dir()
         tag = (families[family].get("tag", "") + model)
         have_dir = target / "models" / tag
         partly = have_dir.is_dir() and any(have_dir.glob("*.gguf*"))
-        need = (8 if partly else models[model]["download_gb"] + 8) + (1 if vision in ("yes", "gpu", "cpu") else 0)
+        need = (8 if partly else row["download_gb"] + 8) + (1 if vision in ("yes", "gpu", "cpu") else 0)
         free = s.disk_free(target)
         short = None
         if free is not None and free < need:
@@ -1129,11 +1153,16 @@ class Tools:
         fit = None
         ram = hw.get("ram_gb")
         if ram is not None:
-            need_ram = models[model]["ram_gb"]
-            fit = "fits" if ram >= need_ram else f"needs ~{need_ram} GB of RAM, this PC has {ram:.0f} GB"
+            need_ram = row["ram_gb"]
+            if row.get("mem_total"):                    # a plain model: RAM and the largest card's VRAM together
+                vram = max((g["vram_gb"] for g in hw.get("gpus", []) if g.get("usable")), default=0.0)
+                fit = "fits" if ram + vram >= need_ram else \
+                    f"needs ~{need_ram} GB of RAM and VRAM together, this PC has {ram + vram:.0f} GB"
+            else:
+                fit = "fits" if ram >= need_ram else f"needs ~{need_ram} GB of RAM, this PC has {ram:.0f} GB"
         installed = (s.root / f"{CONFIG}{tag.lower()}.json").exists()
         plan = {"title": f"{families[family]['title']} {model}", "family": family, "model": model,
-                "context": context, "images": vision or "no", "download_gb": models[model]["download_gb"],
+                "context": context, "images": vision or "no", "download_gb": row["download_gb"],
                 "partly_downloaded": partly, "ram": fit, "data_folder": str(target), "disk_free_gb": free,
                 "disk_needed_gb": round(need), "disk_short": short, "already_installed": installed,
                 "setup_command": "./setup.sh " + " ".join(args),
