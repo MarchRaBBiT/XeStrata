@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 Niko1221 and the Strata contributors
+// SPDX-License-Identifier: MIT
 // include/strata/kernels/cpu/tq_cpu.hpp - the trellis expert formats (TQ2_T / TQK6 / TQK7, ggml types 144-146 of the
 // agention llama.cpp fork) on the CPU: decode-and-dot against Q8_0 activations (ggml's block_q8_0), one or several
 // tokens per call, on AVX-512, AVX2 or plain C++.
