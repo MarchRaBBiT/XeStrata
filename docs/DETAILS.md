@@ -1301,6 +1301,7 @@ print(r.choices[0].message.content)
 **Anthropic API:** an `image` block with a `base64` (or `url`) source, as usual.
 
 JPEG, PNG, BMP, GIF, WebP, TIFF and AVIF work (the last ones are converted to PNG first; agents such as omp send WebP).
+An `http(s)://` URL that points to the server's own PC or its LAN (a loopback, link-local or private address), or redirects there, is not fetched. To serve pictures from the LAN, start the server with `STRATA_IMAGE_URL_PRIVATE=1`.
 Chat apps with image upload work the same way.
 
 **How it works inside:** the encoder turns the picture into rows of the same width as the model's word embeddings.

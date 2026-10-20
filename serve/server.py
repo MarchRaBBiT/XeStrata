@@ -2359,6 +2359,40 @@ class StrataEngine:
 IMAGE_URL_MAX = 32 << 20        # an image URL is read up to this (the web app attaches pictures of up to 20 MB)
 
 
+def private_url_host(url: str) -> str | None:
+    """#28: the address an image URL's host resolves to when it is not a public one (loopback, link-local - the cloud
+    metadata address -, private, reserved, multicast), else None.  A request's image URL must not make the server a
+    proxy into its own network; STRATA_IMAGE_URL_PRIVATE=1 allows it (pictures served from the LAN on purpose).  An
+    address that changes between this check and the connection (DNS rebinding) is not caught."""
+    import ipaddress
+    if (os.environ.get("STRATA_IMAGE_URL_PRIVATE") or "").strip() == "1":
+        return None
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    try:
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError):
+        return None                                     # not resolvable: the fetch itself says so
+    for info in infos:
+        addr = ipaddress.ip_address(str(info[4][0]).split("%")[0])
+        if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+            addr = addr.ipv4_mapped
+        if not addr.is_global:
+            return str(addr)
+    return None
+
+
+class _PublicRedirects(urllib.request.HTTPRedirectHandler):
+    """#28: a redirect to a private address is refused as the first URL is (a public URL could bounce inward)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if (addr := private_url_host(newurl)) is not None:
+            raise ValueError(f"the image URL redirects to a private address ({addr}); STRATA_IMAGE_URL_PRIVATE=1 "
+                             "allows it")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def network_path(path: str) -> bool:
     r"""A path to another computer: \\host\share or //host/share (either slash), \\?\UNC\host\..., \\.\UNC\host\...
     or the NT form \??\UNC\host\...  Windows connects to that host at the first look at the path (os.path.isfile is
@@ -2547,10 +2581,25 @@ class Vision:
     @staticmethod
     def download(url: str) -> bytes:
         """An image URL's bytes, at most IMAGE_URL_MAX of them: the whole response was read, so a huge or endless one
-        filled the memory.  One that cannot be read is a ValueError (a 400 that says so), not a dropped connection."""
+        filled the memory.  One that cannot be read is a ValueError (a 400 that says so), not a dropped connection.
+        Vision.download_public: neither the URL nor a redirect may reach a private address (#28)."""
+        return Vision._fetch(url, False)
+
+    @staticmethod
+    def download_public(url: str) -> bytes:
+        """#28: a request's image URL, fetched by a running server (Service.public_urls): only from a public address,
+        redirects included, so the server is no proxy into its own network (STRATA_IMAGE_URL_PRIVATE=1 allows it)."""
+        return Vision._fetch(url, True)
+
+    @staticmethod
+    def _fetch(url: str, public: bool) -> bytes:
         too_big = f"the image URL's file is over {IMAGE_URL_MAX >> 20} MiB"
+        opener = urllib.request.build_opener(_PublicRedirects) if public else urllib.request.build_opener()
+        if public and (addr := private_url_host(url)) is not None:
+            raise ValueError(f"the image URL points to a private address ({addr}): the server does not fetch from "
+                             "its own network for a request; STRATA_IMAGE_URL_PRIVATE=1 allows it")
         try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "strata"}), timeout=60) as r:
+            with opener.open(urllib.request.Request(url, headers={"User-Agent": "strata"}), timeout=60) as r:
                 size = r.headers.get("Content-Length") or ""
                 if size.isdigit() and int(size) > IMAGE_URL_MAX:
                     raise ValueError(too_big)
@@ -3216,6 +3265,14 @@ class Service:
             slots = conversation_slots(engine)
             self.prompts = PromptEncoder(tokenizer, keep=slots) if slots is not None and slots > 0 \
                 else PromptEncoder(tokenizer)
+
+    # #28: the running server (main) sets it: a request's image URLs are fetched only from public addresses
+    public_urls = False
+
+    def download(self, url: str) -> bytes:
+        """A request's image URL (the chat's pictures, a tool's, an edit's references): Vision.download_public on a
+        running server, else Vision.download."""
+        return Vision.download_public(url) if self.public_urls else Vision.download(url)
 
     def loaded(self) -> bool:
         return not hasattr(self.engine, "alive") or self.engine.alive()
@@ -3974,7 +4031,7 @@ class Service:
                         if cancel is not None and cancel.is_set():
                             raise ClientGone()
                         if src.startswith(("http://", "https://")):
-                            src = fetched[item["source"]] = Vision.download(src)   # outside the FIFO, as in prepare()
+                            src = fetched[item["source"]] = self.download(src)   # outside the FIFO, as in prepare()
                         with self._turn(cancel):  # the encoder takes its turn with the requests (see below)
                             self.vision.encode(src)
                     except (ValueError, OSError) as e:
@@ -4015,7 +4072,7 @@ class Service:
             def fetch(src):
                 if cancel is not None and cancel.is_set():
                     raise ClientGone()
-                return fetched[src] if src in fetched else Vision.download(src) \
+                return fetched[src] if src in fetched else self.download(src) \
                     if src.startswith(("http://", "https://")) else src
             images = [fetch(src) for src in images]
             # Encode only while the engine is idle: the engine and the image encoder (a separate process) must not
@@ -5935,7 +5992,7 @@ def make_handler(svc: Service):
                     if not isinstance(url, str) or not url:
                         raise ValueError("images: [{\"image_url\": a data: URL, an http(s) URL or a path}]")
                     self._no_local_sources([url])     # #27: as the chat routes, before anything is read
-                    files.append(Vision.load(url))
+                    files.append(svc.download(url) if url.startswith(("http://", "https://")) else Vision.load(url))
             job = images_api.parse_edit_request(req, [Vision.normalize(d) for d in files], gen.cfg)
             self._image_job(gen, job)
 
@@ -7285,6 +7342,7 @@ def main() -> int:
                                                       and cfg.get("fit_max_tokens") is not False))
     svc.vision_error = vision_error
     svc.vision_fallback = vision_fallback
+    svc.public_urls = True                             # #28: a request's image URL only from a public address
     if a.engine == "strata":                            # the model card's sampling when nothing else is said
         svc.model_arch = card_family(cfg)
     svc.answer_room = cfg.get("answer_room") is not False
