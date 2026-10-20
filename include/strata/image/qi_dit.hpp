@@ -7,7 +7,9 @@
 // images' latent tokens in place of their image pads) and the image's H x W tokens (the latent's 64 channels each).
 // A text token sees the prefix up to itself, a reference image's token the prefix up to the image's end, and their
 // time is 0, so their hidden states, and their K and V in every block, are the same at every step: the first step
-// keeps the blocks' prefix K and V (the prefix cache), and the later ones compute the image's rows alone.
+// keeps the blocks' prefix K and V (the prefix cache), and the later ones compute the image's rows alone.  The cache
+// of the first blocks is in VRAM, as many as the budget gives it room for (set_prefix_vram_blocks); the rest is in
+// pinned RAM and copied in at each step (an edit with many or large reference images).
 #pragma once
 
 #include "strata/image/qi_stream.hpp"
@@ -68,9 +70,11 @@ public:
 
     /// The flow sampler: x (device FP32 [64][H][W], the starting noise) through `sigmas` by Euler's steps.
     /// `step` (if set) is called after each step with (steps done, steps); it returns false to stop (the sampler then
-    /// throws QiStopped).
+    /// throws QiStopped).  `after` (if set) is given x and the step's new sigma first, on the sampler's stream (an
+    /// edit's mask: qi_inpaint_blend).
     void sample(float* x, int64_t H, int64_t W, const std::vector<float>& sigmas,
-                const std::function<bool(int, int)>& step = {});
+                const std::function<bool(int, int)>& step = {},
+                const std::function<void(float*, float)>& after = {});
 
     int64_t channels() const { return in_ch_; }
     int64_t hidden() const { return C_; }
@@ -91,10 +95,15 @@ public:
     void drop_activations();
     /// The GPU memory the activations of a T-token sequence take, the MLP computed `mlp_rows` rows at a time (0: all).
     uint64_t activation_bytes(int64_t T, int64_t mlp_rows = 0) const;
-    /// What a prefix of n rows holds while it is the context: its rows and every block's K and V (the prefix cache).
-    uint64_t prefix_bytes(int64_t n) const {
-        return (uint64_t) n * (uint64_t) C_ * (4 + (uint64_t) 4 * blocks_.size());
-    }
+    /// What a prefix of n rows holds while it is the context: its rows (always in VRAM), and one block's K and V
+    /// (the prefix cache, in VRAM or pinned RAM).
+    uint64_t prefix_row_bytes(int64_t n) const { return (uint64_t) n * (uint64_t) C_ * 4; }
+    uint64_t prefix_kv_bytes(int64_t n) const { return (uint64_t) n * (uint64_t) C_ * 4; }
+    int blocks() const { return (int) blocks_.size(); }
+    /// The blocks whose prefix cache the next set_context puts in VRAM (the first n); the rest's goes to pinned RAM.
+    void set_prefix_vram_blocks(int n) { kv_vram_ = n; }
+    /// Frees the prefix cache kept in pinned RAM (the sampling is done with it: the RAM goes back at once).
+    void drop_host_prefix();
     /// The rows the MLP takes at a time (0: all of them): its 2 x 12288-wide product is the largest activation.
     void set_mlp_rows(int64_t rows);
 
@@ -108,7 +117,7 @@ private:
     struct Block {
         W q, k, v, o, gu, down;   // d: the offset within the block's region (LayerStream)
         uint64_t nq = 0, nk = 0;  // the FP32 norms' offsets
-        uint16_t *pk = nullptr, *pv = nullptr;   // the text rows' K and V (the prefix cache)
+        uint16_t *pk = nullptr, *pv = nullptr;   // the text rows' K and V (the prefix cache), device or pinned host
     };
     W upload(const std::string& name);
     const float* upload_f32(const std::string& name, float add = 0.0f);
@@ -124,6 +133,7 @@ private:
     uint64_t weight_bytes_ = 0;
     bool dry_ = false;
     int64_t C_ = 4096, in_ch_ = 64, heads_ = 32, inter_ = 12288, n_text_ = 0;
+    int kv_vram_ = 1 << 30;   // the blocks whose prefix cache is in VRAM (set_prefix_vram_blocks)
     W t1_, t2_, mod_, nout_, pout_, tin_, tout_, iin_;
     const float* tnorm_ = nullptr;
     std::vector<Block> blocks_;

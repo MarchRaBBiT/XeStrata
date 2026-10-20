@@ -36,7 +36,7 @@ The config's "images" section (written by setup --images, tools/image/qimage.py)
    "vae": "...", "llm": "...Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf", "quant": "Q8_0", "gpu_policy": "auto",
    "reload": "lazy"|"eager", "max_n": 4, "max_side": 2048, "timeout_s": 3600, "uma": false, "out_dir": null,
    "keep_files": 64,
-   "vision": "...mmproj-F16.gguf", "max_refs": 3, "reserve_mib": 512, "spare_mib": 1024, "ssd_offload": false,
+   "vision": "...mmproj-F16.gguf", "max_refs": 10, "reserve_mib": 512, "spare_mib": 1024, "ssd_offload": false,
    "text_encoder": "stock", "text_quant": "Q4_K",
    "quant_lowered": {"from": "Q8_0", "to": "Q6_K", "text_from": "Q8_0", "text_to": "Q4_K", "need_gb": 20.2,
                      "ram_left_gb": 14.0}}
@@ -83,6 +83,8 @@ DROP = 14
 # an edit's reference image in the prompt: one pad, which the engine widens to the image's tokens
 REF_PROMPT = "{sep}<image{i}><|vision_start|><|image_pad|><|vision_end|>"
 REF_MAX_BYTES = 32 << 20
+MAX_REFS = 10                      # Qwen-Image-2.1's own limit (its model card)
+RAM_SPARE_MIB = 2048               # RAM an image job leaves free beside its prefix cache (the OS, the server)
 START_TIMEOUT_S = 600              # the engine's start: the parts opened and a small image made (kernels built)
 
 
@@ -190,15 +192,17 @@ def image_dims(data: bytes) -> tuple[int, int]:
     raise ImageRequestError("a reference image: PNG, JPEG, GIF or BMP")
 
 
-def parse_edit_request(req: dict, images: list[bytes], cfg: dict) -> dict:
+def parse_edit_request(req: dict, images: list[bytes], cfg: dict, mask: bytes | None = None) -> dict:
     """An edit (/v1/images/edits): parse_request's fields with `images` (the reference images' bytes, PNG, JPEG, GIF or
     BMP) as job["refs"].  size "auto" (or none): the first reference's shape at about 1024 x 1024 pixels, its sides
-    multiples of SIZE_STEP."""
+    multiples of SIZE_STEP.  `mask` (OpenAI's): a PNG of the first image's size whose transparent pixels are where it
+    changes, the rest kept as it is (the engine's inpainting), as job["mask"]; refused by a model whose config says
+    "mask": false."""
     if not cfg.get("vision"):
         raise ImageRequestError("edits need the vision encoder: run setup with --images qwen-image-turbo again")
     if not images:
         raise ImageRequestError("image: one reference image or more")
-    max_refs = int(cfg.get("max_refs") or 3)
+    max_refs = int(cfg.get("max_refs") or MAX_REFS)
     if len(images) > max_refs:
         raise ImageRequestError(f"image: at most {max_refs} reference images")
     dims = []
@@ -209,6 +213,8 @@ def parse_edit_request(req: dict, images: list[bytes], cfg: dict) -> dict:
         if w < 16 or h < 16:
             raise ImageRequestError(f"image: {w}x{h} is too small")
         dims.append((w, h))
+    if mask is not None:
+        mask = check_mask(mask, dims[0], cfg)
     if req.get("size") in (None, "auto"):
         w0, h0 = dims[0]
         side = int(cfg.get("max_side") or 2048)
@@ -218,7 +224,33 @@ def parse_edit_request(req: dict, images: list[bytes], cfg: dict) -> dict:
         req = {**req, "size": f"{tw}x{th}"}
     job = parse_request(req, cfg)
     job["refs"] = list(images)
+    if mask is not None:
+        job["mask"] = mask
     return job
+
+
+def check_mask(data: bytes, size: tuple[int, int], cfg: dict) -> bytes:
+    """An edit's mask, checked as OpenAI checks it (a PNG with an alpha channel, the first image's size) -> RGBA PNG
+    bytes the engine reads."""
+    if cfg.get("mask") is False:          # no "mask" (configs before it) is Qwen-Image-2.1, which takes one
+        raise ImageRequestError("mask: this image model does not take a mask")
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ImageRequestError("mask: a PNG with an alpha channel")
+    import io
+    from PIL import Image
+    try:
+        im = Image.open(io.BytesIO(data))
+        im.load()
+    except Exception as e:
+        raise ImageRequestError(f"mask: the PNG could not be read ({e})") from None
+    if "A" not in im.getbands() and "transparency" not in im.info:
+        raise ImageRequestError("mask: a PNG with an alpha channel (its transparent pixels are where the image "
+                                "changes)")
+    if im.size != size:
+        raise ImageRequestError(f"mask: {im.size[0]}x{im.size[1]}, not the image's {size[0]}x{size[1]}")
+    out = io.BytesIO()
+    im.convert("RGBA").save(out, format="PNG")
+    return out.getvalue()
 
 
 def made_size(job: dict) -> tuple[int, int]:
@@ -560,7 +592,8 @@ class ImageGen:
         return job["ids"]
 
     def stage(self, job: dict) -> None:
-        """An edit's reference images into files the engine reads (job["ref_paths"]); unstage removes them."""
+        """An edit's reference images and mask into files the engine reads (job["ref_paths"], job["mask_path"]);
+        unstage removes them."""
         if job.get("refs") and not job.get("ref_paths"):
             work = Path(tempfile.mkdtemp(prefix="refs-", dir=self.dir))
             job["ref_dir"] = str(work)
@@ -569,10 +602,14 @@ class ImageGen:
                 p = work / f"ref_{i}"
                 p.write_bytes(data)
                 job["ref_paths"].append(str(p))
+            if job.get("mask"):
+                p = work / "mask"
+                p.write_bytes(job["mask"])
+                job["mask_path"] = str(p)
 
     @staticmethod
     def unstage(job: dict) -> None:
-        for p in job.pop("ref_paths", []) or []:
+        for p in (job.pop("ref_paths", []) or []) + ([job.pop("mask_path")] if job.get("mask_path") else []):
             with contextlib.suppress(OSError):
                 os.unlink(p)
         if job.get("ref_dir"):
@@ -581,11 +618,13 @@ class ImageGen:
 
     @staticmethod
     def _refs_words(job: dict) -> str:
-        return "".join(f" REF:{p}" for p in job.get("ref_paths") or ())
+        return ("".join(f" REF:{p}" for p in job.get("ref_paths") or ())
+                + (f" MASK:{job['mask_path']}" if job.get("mask_path") else ""))
 
     def need(self, job: dict) -> dict:
         """What the image needs, from the engine (started when it is not running): least_mib, full_mib (every layer
-        resident), held_mib (what it holds now) and free_mib (the device's free VRAM)."""
+        resident), held_mib (what it holds now), free_mib (the device's free VRAM), cap_mib (the most the engine could
+        have) and host_mib (the prefix cache in pinned RAM at cap_mib)."""
         with self.lock:
             self._ready()
             w, h = made_size(job)
@@ -896,6 +935,28 @@ def _client_gone(svc) -> Exception:
     return getattr(sys.modules.get(type(svc).__module__), "ClientGone", RuntimeError)()
 
 
+def check_room(need: dict, ram_mib: int | None) -> None:
+    """An image the GPU cannot make even with the text model unloaded (its least above the engine's cap), or whose
+    prefix cache would not fit the free RAM (`ram_mib`, None: not known): refused before the job, not shrunk (the
+    user's decision, 2026-10-21)."""
+    least, cap, host = (int(need.get(k) or 0) for k in ("least_mib", "cap_mib", "host_mib"))
+    hint = "use fewer or smaller reference images, or a smaller size"
+    if cap and least > cap:
+        raise ImageRequestError(f"this image needs at least {least / 1024:.1f} GiB of VRAM and the GPU has "
+                                f"{cap / 1024:.1f} GiB for images: {hint}")
+    if ram_mib is not None and host > ram_mib - RAM_SPARE_MIB:
+        raise ImageRequestError(f"this image keeps {host / 1024:.1f} GiB of its prompt's cache in RAM and "
+                                f"{max(ram_mib, 0) / 1024:.1f} GiB is free: {hint}")
+
+
+def ram_available_mib() -> int | None:
+    try:
+        import psutil
+        return int(psutil.virtual_memory().available >> 20)
+    except (ImportError, OSError):
+        return None
+
+
 @contextlib.contextmanager
 def gpu_turn(svc, gen: ImageGen, job: dict, cancel: threading.Event | None = None):
     """The image job's turn on the GPU: the service's FIFO (and, with parallel requests, the engine's control lines
@@ -926,6 +987,7 @@ def gpu_turn(svc, gen: ImageGen, job: dict, cancel: threading.Event | None = Non
                 except ImageJobFailed:
                     gen.totals["failed"] += 1
                     raise
+                check_room(need, ram_available_mib())
                 policy = resolve_policy(svc, gen, need)
                 with svc.status_lock:
                     svc.status.update(busy=True, phase="generating an image", started=time.time(),

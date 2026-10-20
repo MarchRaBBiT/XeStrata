@@ -80,6 +80,12 @@ void qi_tokens_latent(const float* tokens, int64_t C, int64_t HW, float* latent,
 /// x += a * v, n elements.
 void qi_axpy(float* x, const float* v, float a, int64_t n, void* stream);
 
+/// An edit with a mask, after a sampler's step to time s: x [C][HW] where m [HW] is 0 (the part kept) becomes the
+/// base image's latent z0 at that time, (1 - s) z0 + s noise (the flow's path from the same noise); where m is 1 it
+/// stays the DiT's.
+void qi_inpaint_blend(float* x, const float* z0, const float* noise, const float* m, float s, int64_t C, int64_t HW,
+                      void* stream);
+
 // --- the vision encoder (Qwen3-VL's ViT, src/image/qi_vision.cpp)
 
 /// y[t, :] += b, T rows of N.

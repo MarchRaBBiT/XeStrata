@@ -5305,7 +5305,7 @@ def body_limit() -> int:
 
 def parse_multipart(ctype: str, body: bytes) -> tuple[dict, list[bytes]]:
     """A multipart/form-data body (OpenAI's /v1/images/edits) -> (its text fields, the bytes of its image or image[]
-    files in order); whole numbers in the fields (n, seed, steps) as ints."""
+    files in order); whole numbers in the fields (n, seed, steps) as ints, the mask file's bytes as "mask"."""
     from email.parser import BytesParser
     from email.policy import HTTP
     msg = BytesParser(policy=HTTP).parsebytes(b"Content-Type: " + ctype.encode("latin-1") + b"\r\n\r\n" + body)
@@ -5319,6 +5319,8 @@ def parse_multipart(ctype: str, body: bytes) -> tuple[dict, list[bytes]]:
         data = raw if isinstance(raw, bytes) else b""
         if name in ("image", "image[]"):
             files.append(data)
+        elif name == "mask":
+            fields["mask"] = data
         elif isinstance(name, str) and name:
             value = data.decode("utf-8", "replace")
             fields[name] = int(value) if name in ("n", "seed", "steps") and value.strip().isdigit() else value
@@ -5977,6 +5979,7 @@ def make_handler(svc: Service):
             ctype = self.headers.get("Content-Type", "") or ""
             if ctype.lower().startswith("multipart/form-data"):
                 req, files = parse_multipart(ctype, body)
+                mask = req.pop("mask", None) or None
             else:
                 req = json.loads(body or b"{}")
                 if not isinstance(req, dict):
@@ -5993,7 +5996,18 @@ def make_handler(svc: Service):
                         raise ValueError("images: [{\"image_url\": a data: URL, an http(s) URL or a path}]")
                     self._no_local_sources([url])     # #27: as the chat routes, before anything is read
                     files.append(svc.download(url) if url.startswith(("http://", "https://")) else Vision.load(url))
-            job = images_api.parse_edit_request(req, [Vision.normalize(d) for d in files], gen.cfg)
+                # the mask as an image is given ({"image_url": ...} or the URL), its alpha kept (not normalized)
+                mask = req.pop("mask", None)
+                if isinstance(mask, dict):
+                    mask = mask.get("image_url") or mask.get("url")
+                if isinstance(mask, dict):
+                    mask = mask.get("url")
+                if mask is not None:
+                    if not isinstance(mask, str) or not mask:
+                        raise ValueError("mask: {\"image_url\": a data: URL, an http(s) URL or a path}")
+                    self._no_local_sources([mask])
+                    mask = svc.download(mask) if mask.startswith(("http://", "https://")) else Vision.load(mask)
+            job = images_api.parse_edit_request(req, [Vision.normalize(d) for d in files], gen.cfg, mask)
             self._image_job(gen, job)
 
         def _image_job(self, gen, job):

@@ -322,17 +322,37 @@ void QiDit::set_context(const float* ctx, int64_t n_ctx, const std::vector<Ref>&
         key_lim_ = alloc<int32_t>(allocs_, n_pre);
         put(key_lim_, lim.data(), lim.size() * 4);
     }
-    for (Block& b : blocks_) {
+    for (size_t bi = 0; bi < blocks_.size(); ++bi) {
+        Block& b = blocks_[bi];
         for (uint16_t** p : {&b.pk, &b.pv}) {
             if (*p != nullptr) {
                 allocs_.erase(std::remove(allocs_.begin(), allocs_.end(), (void*) *p), allocs_.end());
                 gpu::free(*p);
+                *p = nullptr;
             }
-            *p = alloc<uint16_t>(allocs_, n_pre * C_);
+            if ((int) bi < kv_vram_) {
+                *p = alloc<uint16_t>(allocs_, n_pre * C_);
+            } else {   // pinned RAM: the step copies it in (the device reads it no slower than any copy)
+                if (!gpu::alloc_host(p, (size_t) (n_pre * C_) * 2))
+                    throw std::runtime_error(std::string("image engine: pinned RAM for the prefix cache: ") +
+                                             gpu::last_error());
+                allocs_.push_back(*p);
+            }
         }
     }
     rope_H_ = -1;   // the positions changed
     gpu::stream_sync(s_);
+}
+
+void QiDit::drop_host_prefix() {
+    gpu::stream_sync(s_);
+    for (Block& b : blocks_)
+        for (uint16_t** p : {&b.pk, &b.pv})
+            if (*p != nullptr && gpu::is_host_usm(*p)) {
+                allocs_.erase(std::remove(allocs_.begin(), allocs_.end(), (void*) *p), allocs_.end());
+                gpu::free(*p);
+                *p = nullptr;
+            }
 }
 
 void QiDit::step_modulation(float t) {
@@ -464,13 +484,14 @@ void QiDit::drop_activations() {
 }
 
 void QiDit::sample(float* x, int64_t H, int64_t W, const std::vector<float>& sigmas,
-                   const std::function<bool(int, int)>& step) {
+                   const std::function<bool(int, int)>& step, const std::function<void(float*, float)>& after) {
     const int64_t n = in_ch_ * H * W;
     float* v = alloc<float>(allocs_, n);
     const int steps = (int) sigmas.size() - 1;
     for (int i = 0; i < steps; ++i) {
         forward(x, sigmas[(size_t) i] * 1000.0f, H, W, i > 0, v);
         qi_axpy(x, v, sigmas[(size_t) i + 1] - sigmas[(size_t) i], n, s_);
+        if (after) after(x, sigmas[(size_t) i + 1]);
         if (step) {
             gpu::stream_sync(s_);
             if (!step(i + 1, steps)) {

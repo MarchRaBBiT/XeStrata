@@ -4,25 +4,26 @@
 //
 //   strata-image --dit DIT.gguf --vae VAE.safetensors --text TEXT_ENCODER.gguf [--vision MMPROJ.gguf]
 //                [--budget-mib M] (--ids 1,2,3 [--drop N] [--width W] [--height H] [--seed S] [--sigmas 1,...,0]
-//                [--ref IMAGE]... [--repeat N] --out IMAGE.rgba | --serve)
+//                [--ref IMAGE]... [--mask IMAGE] [--repeat N] --out IMAGE.rgba | --serve)
 //
 // One image: --ids, the prompt in the model's chat form, tokenized (the server's tokenizer); --drop, the leading ids of
 // the system turn; --budget-mib, the VRAM the engine may take (default: the free VRAM); --repeat, the image again N
 // times in the process (the cache's effect); --sigmas, the sampler's sigmas from 1 down to the terminal 0, one step
 // between each two (default Turbo's 8 steps; serve/images.py's base_sigmas for the base model); --ref, an edit's
 // reference image (PNG, JPEG, BMP, GIF; its pad in --ids is one <|image_pad|>, which the engine widens to the image's
-// tokens), with the vision encoder (--vision, Qwen3-VL's mmproj).  Writes RGBA8 rows to --out and a line of times
-// and of the budget's split a run.
+// tokens), with the vision encoder (--vision, Qwen3-VL's mmproj); --mask, the edit's mask over the first --ref
+// (OpenAI's: a PNG whose transparent pixels are where the image changes, the rest kept as the reference has it).
+// Writes RGBA8 rows to --out and a line of times and of the budget's split a run.
 //
 // --serve: the engine stays, its layers and the last prompt's states kept between requests, and takes lines on stdin
 // (serve/images.py), one at a time, answering each on stdout:
 //   IMG <width> <height> <seed> <drop> <out path> <ids, commas> [SIGMAS:<sigmas, commas>] [REF:<path>]...
 //                            -> STAGE <refs|text|sampling|decode> as each stage starts and STEP <done> <steps> lines,
 //                            then IMAGE key=value ... (times, the budget's split); SIGMAS: as --sigmas; REF: an
-//                            edit's reference images
-//   NEED <width> <height> <n> [REF:<path>]...  the VRAM an image of n prompt ids needs (from the files)
+//                            edit's reference images; MASK: as --mask
+//   NEED <width> <height> <n> [REF:<path>]... [MASK:<path>]  the VRAM an image of n prompt ids needs (from the files)
 //                                                                                          -> NEED least_mib=...
-//                            full_mib=... held_mib=... free_mib=... (si::QiNeed)
+//                            full_mib=... held_mib=... free_mib=... cap_mib=... host_mib=... (si::QiNeed)
 //   FREE                     the free VRAM and what the engine holds                        -> FREE free_mib=... held_mib=...
 //   BUDGET <MiB>             the VRAM the engine may take (0: the free VRAM at its start)      -> BUDGET budget_mib=...
 //   FIT <MiB>                the budget: what the engine holds and the free VRAM, less <MiB>  -> BUDGET budget_mib=...
@@ -75,27 +76,34 @@ std::vector<float> parse_sigmas(const std::string& s) {
     return sig;
 }
 
-// the REF:<path> words left on a request line (and an IMG's SIGMAS:): the images read, or (sizes) their sizes only
-std::vector<si::QiRef> read_refs(std::istringstream& ls, std::vector<float>* sigmas = nullptr) {
+si::QiRef read_image(const std::string& path) {
+    si::QiRef f;
+    std::string err;
+    f.rgba = si::load_rgba8(path, f.width, f.height, err);
+    if (f.rgba.empty()) throw std::invalid_argument(err);
+    return f;
+}
+
+// the words left on an IMG line: its REF:<path> images (and SIGMAS:, MASK:)
+std::vector<si::QiRef> read_refs(std::istringstream& ls, si::QiRequest& r) {
     std::vector<si::QiRef> refs;
     for (std::string word; ls >> word;) {
-        if (sigmas != nullptr && word.rfind("SIGMAS:", 0) == 0) {
-            *sigmas = parse_sigmas(word.substr(7));
-            continue;
-        }
-        if (word.rfind("REF:", 0) != 0) throw std::invalid_argument("unknown word " + word);
-        si::QiRef f;
-        std::string err;
-        f.rgba = si::load_rgba8(word.substr(4), f.width, f.height, err);
-        if (f.rgba.empty()) throw std::invalid_argument(err);
-        refs.push_back(std::move(f));
+        if (word.rfind("SIGMAS:", 0) == 0) r.sigmas = parse_sigmas(word.substr(7));
+        else if (word.rfind("MASK:", 0) == 0) r.mask = read_image(word.substr(5));
+        else if (word.rfind("REF:", 0) == 0) refs.push_back(read_image(word.substr(4)));
+        else throw std::invalid_argument("unknown word " + word);
     }
     return refs;
 }
 
-std::vector<std::pair<int64_t, int64_t>> ref_sizes(std::istringstream& ls) {
+// a NEED line's: the REF:<path> images' sizes; MASK:<path> sets `mask`
+std::vector<std::pair<int64_t, int64_t>> ref_sizes(std::istringstream& ls, bool& mask) {
     std::vector<std::pair<int64_t, int64_t>> sizes;
     for (std::string word; ls >> word;) {
+        if (word.rfind("MASK:", 0) == 0) {
+            mask = true;
+            continue;
+        }
         int64_t w = 0, h = 0;
         if (word.rfind("REF:", 0) != 0 || !si::image_size(word.substr(4), w, h))
             throw std::invalid_argument("not an image: " + word);
@@ -105,15 +113,16 @@ std::vector<std::pair<int64_t, int64_t>> ref_sizes(std::istringstream& ls) {
 }
 
 std::string plan_kv(const si::QiTimes& t, const si::QiPlan& p) {
-    char b[512];
+    char b[640];
     std::snprintf(b, sizeof b,
                   "text_s=%.3f sampling_s=%.3f decode_s=%.3f budget_mib=%llu blocks_mib=%llu resident_blocks=%d "
                   "layers_mib=%llu resident_layers=%d activations_mib=%llu mlp_rows=%lld vae_mib=%llu vae_tiled=%d "
-                  "text_cached=%d",
+                  "text_cached=%d prefix_kv_mib=%llu resident_kv=%d",
                   t.text, t.sampling, t.decode, (unsigned long long) (p.budget >> 20),
                   (unsigned long long) (p.blocks >> 20), p.resident_blocks, (unsigned long long) (p.layers >> 20),
                   p.resident_layers, (unsigned long long) (p.activations >> 20), (long long) p.mlp_rows,
-                  (unsigned long long) (p.vae >> 20), p.vae_tiled ? 1 : 0, p.text_cached ? 1 : 0);
+                  (unsigned long long) (p.vae >> 20), p.vae_tiled ? 1 : 0, p.text_cached ? 1 : 0,
+                  (unsigned long long) (p.prefix_kv >> 20), p.resident_kv);
     return b;
 }
 
@@ -187,7 +196,7 @@ int serve(si::QiPipeline& p) {
                 ls >> r.width >> r.height >> r.seed >> r.drop >> out >> ids;
                 if (!ls || out.empty()) throw std::invalid_argument("IMG <width> <height> <seed> <drop> <out> <ids>");
                 r.ids = parse_ids(ids);
-                r.refs = read_refs(ls, &r.sigmas);
+                r.refs = read_refs(ls, r);
                 in.stop = false;
                 si::QiTimes t;
                 si::QiPlan pl;
@@ -204,11 +213,14 @@ int serve(si::QiPipeline& p) {
             } else if (op == "NEED") {
                 int64_t w = 0, h = 0, n = 0;
                 ls >> w >> h >> n;
-                if (!ls) throw std::invalid_argument("NEED <width> <height> <n> [REF:<path>]...");
-                const si::QiNeed nd = p.need(n, w, h, ref_sizes(ls));
-                std::printf("NEED least_mib=%llu full_mib=%llu held_mib=%llu free_mib=%llu\n",
+                if (!ls) throw std::invalid_argument("NEED <width> <height> <n> [REF:<path>]... [MASK:<path>]");
+                bool mask = false;
+                const auto sizes = ref_sizes(ls, mask);
+                const si::QiNeed nd = p.need(n, w, h, sizes, mask);
+                std::printf("NEED least_mib=%llu full_mib=%llu held_mib=%llu free_mib=%llu cap_mib=%llu host_mib=%llu\n",
                             (unsigned long long) (nd.least >> 20), (unsigned long long) (nd.full >> 20),
-                            (unsigned long long) (nd.held >> 20), (unsigned long long) (nd.free >> 20));
+                            (unsigned long long) (nd.held >> 20), (unsigned long long) (nd.free >> 20),
+                            (unsigned long long) (nd.cap >> 20), (unsigned long long) (nd.host >> 20));
             } else if (op == "FREE") {
                 size_t free = 0, total = 0;
                 strata::gpu::mem_info(&free, &total);
@@ -273,6 +285,7 @@ int main(int argc, char** argv) {
             else if (a == "--text") text = val();
             else if (a == "--vision") vision = val();
             else if (a == "--ref") ref_paths.push_back(val());
+            else if (a == "--mask") r.mask = read_image(val());
             else if (a == "--out") out = val();
             else if (a == "--ids") ids = val();
             else if (a == "--drop") r.drop = std::stoll(val());
@@ -288,7 +301,7 @@ int main(int argc, char** argv) {
         if (dit.empty() || vae.empty() || text.empty() || (!serving && (out.empty() || ids.empty()))) {
             std::fprintf(stderr, "usage: %s --dit F --vae F --text F [--vision F] [--budget-mib M] (--ids 1,2,3 "
                          "[--drop N] [--width W] [--height H] [--seed S] [--sigmas 1,...,0] [--ref IMAGE]... "
-                         "[--repeat N] --out IMAGE.rgba | --serve)\n", argv[0]);
+                         "[--mask IMAGE] [--repeat N] --out IMAGE.rgba | --serve)\n", argv[0]);
             return 2;
         }
         si::QiPipeline p;
