@@ -27,8 +27,10 @@
 #include "mtmd-helper.h"
 
 #include <algorithm>
+#if !defined(_WIN32)
 #include <fcntl.h>
 #include <unistd.h>
+#endif
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -97,6 +99,7 @@ int main(int argc, char** argv) {
     llama_backend_init();
 
     const auto load_t0 = std::chrono::steady_clock::now();
+#if !defined(_WIN32)   // posix_fadvise; on Windows the loader's reads go as they are (#24)
     // ask the OS for the projector file up front (128 KiB steps) so the loader's sequential reads find it cached;
     // STRATA_READ_AHEAD=0 turns it off, as in the engine
     if (const char* ra = std::getenv("STRATA_READ_AHEAD"); ra == nullptr || std::strtol(ra, nullptr, 10) != 0) {
@@ -108,6 +111,7 @@ int main(int argc, char** argv) {
             close(fd);
         }
     }
+#endif
     // the vocabulary and header only: the weights (and their tensor types, which can be ones llama.cpp does not know,
     // such as Gyro's TQK6 / TQK7) are never touched - see gguf_meta.h (upstream 3fe84ec28)
     std::string how;

@@ -5667,6 +5667,13 @@ def main() -> int:
         fail(f"not enough free disk space in {models_dir}: need ~{need:.0f} GB", "use --models-dir on a bigger drive")
 
     llama, eng, enc, lib_dirs = prepare_engine(a, gpu, vision)
+    # #24: a package takes only the image encoders it carries (the Windows 7z has the CPU one, no Vulkan one)
+    if PACKAGED and vision == "gpu" and not (eng / VEXE[enc]).exists():
+        warn("this package has no GPU image encoder: images are read on the CPU")
+        vision = "cpu"
+    if PACKAGED and vision == "cpu" and not (eng / VEXE["cpu"]).exists():
+        warn("this package has no image encoder: images are off")
+        vision = "none"
 
     # ---- 5. the model files
     step(5, f"downloading {fam['title']} {model}")
