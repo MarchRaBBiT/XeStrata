@@ -1224,6 +1224,12 @@ void PlainModel::finish_experts() {
                     }
             if (st->level_zero_) headroom += st->total_b_ / 2;
         }
+        // and a fifth of the RAM (up to 16 GiB) on a PC whose GPUs are not Level Zero ones: GLM-5.3-Flash UD-IQ1_S's
+        // 53 GiB copy beside 8 GiB on a 62.7 GiB PC went into swap and the GPU's next wait never returned (RX 9060 XT,
+        // ROCm 7.14, five starts, 2026-10-20); with 12 GiB more it ran (41 GiB copied, decode 2.6 tok/s).  Why the swap
+        // with 8 GiB left is not known: dropping the files' cache before and during the copy changed nothing.
+        if (!level_zero_)
+            headroom += std::min<uint64_t>(strata::platform::total_physical_memory() / 5, 16ull << 30);
         // the order the RAM takes them in: the profile's, else each layer's experts in turn
         std::vector<std::pair<int32_t, int32_t>> order = prior_;
         if (order.empty())
