@@ -92,7 +92,7 @@ COMPONENTS = [
 
 # the program's files from the source tree (as cmake/packaging.cmake installs them on Linux)
 APP_FILES = ("setup.py", "chat.py", "requirements.txt")
-APP_DIRS = ("serve", "tools", "data", "third_party/main/outfit", "third_party/main/quantscope")
+APP_DIRS = ("serve", "tools", "ref", "data", "third_party/main/outfit", "third_party/main/quantscope")
 APP_SKIP = ("__pycache__", "test_*", "mcp_fake_server.py", "lint", "vision", "package")
 
 

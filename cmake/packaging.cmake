@@ -136,7 +136,8 @@ install(FILES NOTICE COPYING COPYING.LESSER DESTINATION ${CMAKE_INSTALL_DATAROOT
 
 # ---- the program
 install(FILES setup.py chat.py DESTINATION ${_pkg_share})
-install(DIRECTORY serve tools DESTINATION ${_pkg_share}
+# ref/: load.py, which tools/canonical_xcheck.py (strata_pack.py, the Q2_0 conversion for AVX-512) imports (#22)
+install(DIRECTORY serve tools ref DESTINATION ${_pkg_share}
         FILES_MATCHING PATTERN "*.py" PATTERN "test_*" EXCLUDE PATTERN "mcp_fake_server.py" EXCLUDE
         PATTERN "__pycache__" EXCLUDE PATTERN "lint" EXCLUDE PATTERN "vision" EXCLUDE PATTERN "package" EXCLUDE)
 install(DIRECTORY serve/web DESTINATION ${_pkg_share}/serve)
