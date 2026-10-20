@@ -4307,6 +4307,11 @@ def warm_up(cfg_path: Path) -> None:
         port = sk.getsockname()[1]
     log = STATE / (cfg_path.stem + "-warmup.log")
     base = f"http://127.0.0.1:{port}"
+    # #19: a server with a key answers 401 to a request without it (the warm-up waited out its 15 minutes): the first
+    # of the keys it takes, in its order (STRATA_API_KEY, else "api_key": a string "k1,k2" or a list)
+    key = os.environ.get("STRATA_API_KEY") or cfg.get("api_key") or ""
+    keys = [k.strip() for k in (key if isinstance(key, list) else str(key).split(",")) if str(k).strip()]
+    auth = {"Authorization": f"Bearer {keys[0]}"} if keys else {}
     elog = cfg.get("log")                              # the engine's own log: the prompt's CPU share it measured
     try:
         since = os.path.getsize(elog) if elog and os.path.isfile(elog) else 0
@@ -4325,7 +4330,7 @@ def warm_up(cfg_path: Path) -> None:
                 if proc.poll() is not None:
                     raise RuntimeError(f"the model stopped while starting (see {log.name})")
                 try:
-                    urllib.request.urlopen(base + "/v1/models", timeout=5).read()
+                    urllib.request.urlopen(urllib.request.Request(base + "/v1/models", headers=auth), timeout=5).read()
                     break
                 except (urllib.error.URLError, OSError):
                     if time.time() > deadline:
@@ -4341,7 +4346,7 @@ def warm_up(cfg_path: Path) -> None:
                                                           {"type": "image_url", "image_url": {"url": url}}]}])
             for messages in asks:
                 req = urllib.request.Request(base + "/v1/chat/completions",
-                                             headers={"Content-Type": "application/json"},
+                                             headers={"Content-Type": "application/json", **auth},
                                              data=json.dumps({"messages": messages, "max_tokens": 32,
                                                               "temperature": 0}).encode())
                 json.loads(urllib.request.urlopen(req, timeout=900).read())
@@ -4351,7 +4356,8 @@ def warm_up(cfg_path: Path) -> None:
             notes2 = " ".join(f"Note {i}: the {c} sensor read {i * 11 % 100} at step {i}."
                               for i, c in zip(range(60), ["red", "blue", "green", "amber"] * 15))
             again = [{"role": "user", "content": "Summarize these notes in two sentences.\n" + notes2}]
-            req = urllib.request.Request(base + "/v1/chat/completions", headers={"Content-Type": "application/json"},
+            req = urllib.request.Request(base + "/v1/chat/completions",
+                                         headers={"Content-Type": "application/json", **auth},
                                          data=json.dumps({"messages": again, "max_tokens": 1,
                                                           "temperature": 0}).encode())
             json.loads(urllib.request.urlopen(req, timeout=900).read())
