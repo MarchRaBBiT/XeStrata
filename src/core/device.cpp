@@ -370,31 +370,37 @@ Runtime::Runtime(int ordinal, const sycl::device& device) : ordinal_(ordinal), d
     marks_by_barrier_ = measure_marks();
 }
 
-// A timestamp (submit_profiling_tag, the timing event's record) whose event is still held costs the next wait about
-// 65 us on the B70 with Level Zero (the prompt path holds 384, its streamed ring's: 25 ms on each layer's sync, the
-// prompt at 1,248 against 1,594 tok/s with barriers) and about 2 us on the RTX 4070 with CUDA, where the prompt reads
-// 1% faster with timestamps than with barriers (the 2026-10-09-xe-event-record record).  So the wait after 64 held
-// timestamps is timed on a queue of its own, and events without timing are barriers where it is above 20 us each.
+// A timestamp (submit_profiling_tag, the timing event's record) costs the host its submission and, while its event is
+// held, the next wait; the prompt path holds 384, its streamed ring's.  On the B70 with Level Zero the cost moved
+// between the runtime's versions: with compute-runtime 26.05 the wait, about 90 us a timestamp (the prompt at 1,248
+// against 1,594 tok/s with barriers); with 26.35 the submission, about 11 us (the wait 0.05 us; the prompt at 1,270
+// against 1,748 tok/s, issue #37), and each one maps the event's host memory for the GPU and frees it again, which
+// fragments the driver's address ranges over hours of use.  On the RTX 4070 with CUDA a timestamp costs about 4 us more
+// than a barrier, and the prompt reads 1% faster with timestamps (the 2026-10-09-xe-event-record and
+// 2026-10-21-issue37-event-mark records).  So 64 timestamps and 64 barriers are each submitted and waited for on a
+// queue of its own, and events without timing are barriers where a timestamp costs more than 6 us over a barrier: a
+// wrong barrier costs the prompt about 1%, a wrong timestamp a quarter.  This measure reads 90 to 115 us a timestamp
+// on the B70 with 26.05, 22 to 25 us with 26.35 and 4.1 to 4.3 us on the RTX 4070 (an i7-14700's submissions).
 // STRATA_EVENT_MARK=tag or barrier chooses instead.
 bool Runtime::measure_marks() {
     if (const char* v = std::getenv("STRATA_EVENT_MARK")) return std::strcmp(v, "barrier") == 0;
     constexpr int kMarks = 64;
-    constexpr double kCostUs = 20.0;
+    constexpr double kCostUs = 6.0;
     try {
         sycl::queue q(context_, device_, sycl::property::queue::in_order{});
         std::vector<sycl::event> held(kMarks);
-        auto wait_us = [&q, &held](bool tag) {
+        auto cost_us = [&q, &held](bool tag) {
             q.wait();
+            const auto t0 = std::chrono::steady_clock::now();
             for (auto& e : held)
                 e = tag ? sycl::ext::oneapi::experimental::submit_profiling_tag(q) : q.ext_oneapi_submit_barrier();
-            const auto t0 = std::chrono::steady_clock::now();
             q.ext_oneapi_submit_barrier().wait();
             return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
         };
         double tag = 1e30, barrier = 1e30;
-        for (int round = 0; round < 2; ++round) {
-            tag = std::min(tag, wait_us(true));
-            barrier = std::min(barrier, wait_us(false));
+        for (int round = 0; round < 3; ++round) {
+            tag = std::min(tag, cost_us(true));
+            barrier = std::min(barrier, cost_us(false));
         }
         return tag - barrier > kMarks * kCostUs;
     } catch (const std::exception&) {
