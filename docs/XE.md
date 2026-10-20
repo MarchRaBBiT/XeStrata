@@ -10,7 +10,7 @@ This document records how XeStrata's engine runs on Intel GPUs and how that was 
 How to use it is in the [README](../README.md) and the [details](DETAILS.md); how to build it, what setup does and the packages it needs, in [BUILD](BUILD.md).
 The Japanese version ([XE.ja.md](XE.ja.md)) is the original; this is its translation.
 
-XeStrata xe0.2.0-beta-1 runs Strata's engine on Intel GPUs through Level Zero and SYCL; its version is the upstream version it has integrated and the count of XeStrata's releases on it, from 1, joined by a hyphen (xe0.2.0-beta-1; on an upstream pre-release such as the beta, the deb and rpm packages take "~" for its "-": 0.2.0~beta-1, a version before the release 0.2.0-1, which upgrades it; releases before 2026-10-13 added a number from the second one on: xe0.1.40.2.1).
+XeStrata xe0.2.1.1-1 runs Strata's engine on Intel GPUs through Level Zero and SYCL; its version is the upstream version it has integrated and the count of XeStrata's releases on it, from 1, joined by a hyphen (xe0.2.1.1-1; on an upstream pre-release such as the beta, the deb and rpm packages take "~" for its "-": xe0.2.0-beta-1 is 0.2.0~beta-1, a version before the release 0.2.0-1, which upgrades it; releases before 2026-10-13 added a number from the second one on: xe0.1.40.2.1).
 It is ported from Strata 0.1.24 (`3ce2523c2823687de5372be3af58534f56cbf286`) and carries part of the changes up to 0.1.39 (`6f32ec07`)
 ([Integration through Strata 0.1.38](#integration-through-strata-0138)).
 The same SYCL code is compiled with intel/llvm for NVIDIA GPUs as well (the contrib-llvm build, [Build and run](BUILD.md#build-and-run)).
@@ -29,6 +29,25 @@ A smaller card is checked by making the B70 look like one.
 `STRATA_VRAM_LIMIT_MIB` caps the VRAM the engine sees, `STRATA_MAX_ALLOC_MIB` the largest allocation it assumes, and
 `STRATA_NO_XMX=1` takes the paths without the matrix engines.
 The processor's own graphics (a UHD 770 on the development machine) is a second, real configuration for checks.
+
+## Integration through Strata 0.2.1.1
+
+The changes of upstream Strata 0.2.0-beta to 0.2.1.1 (`9ae93f7b`) are carried into Xe.
+Most of upstream's changes in this range are for the new app, the terminal, Docker and the Mac, and are not carried in (for the same reasons as 0.2.0-beta).
+
+Carried in:
+
+- setup: Meteor Lake's and Arrow Lake-H's LP-E cores count as E-cores; the low-RAM fit counts the draft layer's VRAM (about 1 GB).
+- Downloads: 16 connections by default, four neighbouring pieces per request, a 0-0 range asked of a server whose HEAD gives no length; the MTP fetch goes on over a flaky link and stops with setup.
+- setup: a new `--data-dir` moves no model files by itself and keeps finding the old place (`--move-data`, `--set-default-data-dir`).
+- serve: an engine ended by signal 9 names a finite RLIMIT_RTTIME (PipeWire without rtkit) as the cause.
+- Windows: `strata.exe`, `strata-image.exe` and `strata-device.exe` carry a UTF-8 manifest, so paths with letters outside the ANSI code page arrive intact.
+- `--batch`: a layer split over two NVIDIA GPUs runs the default as one serial group (+12 to 18% in upstream's measurement).
+
+Compared with upstream v0.2.1.1 on the RX 9060 XT (IQ3_XXS's generate): 2.1 to 2.7 times as fast in prefill, 3 to 7% faster in decode.
+Upstream's engine changes do not touch the other GPUs' measured paths (one GPU, the experts in RAM), so the B70 and the RTX 4070 keep the 0.2.0-beta comparison.
+
+Not carried in: the app and the terminal, the Docker distribution, the Mac, upstream's `sycl/`, HIP's integrated-GPU defaults, hipBLASLt tables and the order the GPU queues are opened in (XeStrata's RX 9060 XT prompts stay within 1.5% from start to start: the two speeds upstream fixed do not show), the experts.bin packs' I/O read-ahead and file tier (XeStrata lacks their groundwork), and the Intel GPU picture reader (XeStrata has its Vulkan reader).
 
 ## Integration through Strata 0.2.0-beta
 
