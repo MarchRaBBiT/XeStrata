@@ -196,6 +196,7 @@ The experts kept in the GPU's VRAM are not copied into RAM, so it runs when the 
 | --- | ---: | ---: | ---: |
 | UD-IQ1_S | 93.1 GB | 101 GB | from 12 GB |
 | UD-IQ3_XXS | 120.4 GB | 128 GB | from 12 GB |
+| UD-IQ4_XS | 156.8 GB | 165 GB | from 12 GB |
 
 For the four BETA models, the RAM is about the download plus 8 GB (for GLM-5.3-Flash, the RAM and the VRAM together).
 With less, the experts that neither holds are read from the model file, which is slower.

@@ -254,7 +254,7 @@ setup の最初の質問では、Qwen3.8-Flash-Next とは作りの違う 4 つ�
 - **[Qwen3.6-35B-A3B](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF)**（Qwen、Apache-2.0）: 35B、1 トークンで使うのは 3B の Qwen3.5 系の思考する MoE です。文脈は 256K まで。
   GGUF は Unsloth が MTP の層付きで作った UD-Q4_K_XL・UD-Q6_K_XL・Q8_0 です。
 - **[GLM-5.3-Flash](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF)**（Z.ai、MIT）: 320B、1 トークンで使うのは 18B の思考する MoE です。setup で選べる文脈は 256K まで。
-  注意は KDA（線形の注意）と DSA（選んだトークンだけを見る注意）で、4 本の流れ（mHC）を持ちます。GGUF は Unsloth の UD-IQ1_S・UD-IQ3_XXS です。
+  注意は KDA（線形の注意）と DSA（選んだトークンだけを見る注意）で、4 本の流れ（mHC）を持ちます。GGUF は Unsloth の UD-IQ1_S・UD-IQ3_XXS・UD-IQ4_XS です。
 
 | モデル | 大きさ | ダウンロード |
 | --- | --- | ---: |
@@ -272,6 +272,7 @@ setup の最初の質問では、Qwen3.8-Flash-Next とは作りの違う 4 つ�
 | | Q8_0 | 37.8 GB |
 | GLM-5.3-Flash | **UD-IQ1_S** | 93.1 GB |
 | | **UD-IQ3_XXS** | 120.4 GB |
+| | UD-IQ4_XS | 156.8 GB |
 
 太字は、このリリースで llama.cpp と答えを比べた版です。
 ほかの版も同じ型のテンソルでできていて、その型は太字の版とカーネルの試験で確かめています（setup は「untested」と表示します）。

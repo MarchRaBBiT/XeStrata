@@ -270,7 +270,7 @@ GPU's VRAM and the rest in RAM (the ones VRAM does not hold are handled as for Q
   UD-Q6_K_XL and Q8_0 with the MTP layer.
 - **[GLM-5.3-Flash](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF)** (Z.ai, MIT): a thinking MoE of 320B with 18B
   active per token; setup offers contexts up to 256K. Its attention is KDA (linear attention) and DSA (attention over
-  the tokens it selects), with four residual streams (mHC). The GGUFs are Unsloth's UD-IQ1_S and UD-IQ3_XXS.
+  the tokens it selects), with four residual streams (mHC). The GGUFs are Unsloth's UD-IQ1_S, UD-IQ3_XXS and UD-IQ4_XS.
 
 | Model | Size | Download |
 | --- | --- | ---: |
@@ -288,6 +288,7 @@ GPU's VRAM and the rest in RAM (the ones VRAM does not hold are handled as for Q
 | | Q8_0 | 37.8 GB |
 | GLM-5.3-Flash | **UD-IQ1_S** | 93.1 GB |
 | | **UD-IQ3_XXS** | 120.4 GB |
+| | UD-IQ4_XS | 156.8 GB |
 
 The sizes in bold are the files whose answers this release compared with llama.cpp's.
 The others are made of the same tensor types, checked on those files and in the kernels' tests (setup marks them

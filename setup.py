@@ -496,6 +496,12 @@ _GLM53_IQ1 = _glm53_parts("UD-IQ1_S", [
     (9429984, "909a8a2dedb493c5a694facfd1e0e9a3309ac66fbb9d270c024ff5d12e0d565f"),
     (49621122496, "b99c4dd929601884ff95d9ddeb581a5ef93fd281c37c162e48b2981bf23c0830"),
     (43456692608, "9bb0ff754968d588793d795c715cc2a7d5292280ff9d0df46b7e1edd57da34a1")])
+_GLM53_IQ4 = _glm53_parts("UD-IQ4_XS", [
+    (9429984, "c2f3b6ab98d3df844f322ea376059202d2eaeedcee1f0eff455345b86a137dbd"),
+    (49989334176, "7d64cf0395672c4322012841abec502ea7e20518299bb5e3069003f06f9e6de9"),
+    (49607025280, "7c2c63c9c30f8060428fdf2ac935dbf2ee9ad8f771d62b6ae47a7f7f2c1520e7"),
+    (49486530144, "06c90f191871317c92dd9d25a353b687aed44c50f3ac6c713e9fe410bc2d26dd"),
+    (7729791616, "66ebf9ec85e04d3f44af674ae4f694acbc89cc53db75e42f2f4d3646bf321c0d")])
 PLAIN_FAMILIES: dict[str, dict[str, Any]] = {
     "ornith": {"title": "Ornith-1.5-35B-A3B", "by": "Ornith AI (MIT)",
                "about": "35B, 3B active; a Qwen3.5 MoE: Q4_K_M to BF16, and community GSQ-RCO 3 and 3.5 bits",
@@ -572,6 +578,8 @@ PLAIN_FAMILIES["glm53"] = {
         "UD-IQ1_S": {"repo": _GLM53, "file": _GLM53_IQ1[0]["path"], "parts": _GLM53_IQ1,
                      "size": sum(x["size"] for x in _GLM53_IQ1), "about": "1-bit (Unsloth Dynamic), the smallest",
                      "tested": True},
+        "UD-IQ4_XS": {"repo": _GLM53, "file": _GLM53_IQ4[0]["path"], "parts": _GLM53_IQ4,
+                      "size": sum(x["size"] for x in _GLM53_IQ4), "about": "4-bit (Unsloth Dynamic), the best quality"},
     }}
 FAMILIES.update(PLAIN_FAMILIES)
 
