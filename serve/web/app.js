@@ -199,15 +199,36 @@ $("metrics").innerHTML = METRICS.map((m) => `
         stroke-linecap="round" vector-effect="non-scaling-stroke"/></g>` : ""}</svg>
   </div></div>`).join("");
 
-function spark(id, values, max) {
+// gaps: a missing sample breaks the line (the decode speed while an image job has the GPU), else it counts as 0
+function spark(id, values, max, gaps = false) {
   const svg = $(id);
-  const v = (values || []).map((x) => (x == null ? 0 : x));
+  const raw = values || [];
+  const v = raw.map((x) => (x == null ? 0 : x));
   if (v.length < 2) { svg.querySelector(".line").setAttribute("d", ""); svg.querySelector(".area").setAttribute("d", ""); return; }
   const top = Math.max(max || 0, ...v, 1);
   const pts = v.map((x, i) => [(i / (v.length - 1)) * 100, 30 - (x / top) * 26]);
+  if (gaps && raw.some((x) => x == null)) {
+    let line = "", area = "", run = [];
+    const flush = () => {
+      if (!run.length) return;
+      const d = run.map((p, i) => `${i ? "L" : "M"}${p[0].toFixed(2)},${p[1].toFixed(2)}`).join("");
+      line += d;
+      area += `${d}L${run[run.length - 1][0].toFixed(2)},32L${run[0][0].toFixed(2)},32Z`;
+      run = [];
+    };
+    pts.forEach((p, i) => { if (raw[i] == null) flush(); else run.push(p); });
+    flush();
+    svg.querySelector(".line").setAttribute("d", line);
+    svg.querySelector(".area").setAttribute("d", area);
+    return;
+  }
   const line = pts.map((p, i) => `${i ? "L" : "M"}${p[0].toFixed(2)},${p[1].toFixed(2)}`).join("");
   svg.querySelector(".line").setAttribute("d", line);
   svg.querySelector(".area").setAttribute("d", `${line}L100,32L0,32Z`);
+}
+// an image job's step for the header and the state card: "step 3/8", or its stage before and after the sampling
+function imageStep(img) {
+  return img.stage === "sampling" ? `step ${img.step}/${img.steps}` : img.label;
 }
 function setMetric(key, value, unit, sub) {
   $(`mv-${key}`).innerHTML = value == null ? "–" : `${esc(value)}${unit ? `<small>${esc(unit)}</small>` : ""}`;
@@ -245,9 +266,11 @@ function setPill(state, text, force = false) {
 
 function render(m) {
   const live = m.live || {}, hw = m.hardware || {}, st = m.hardware_static || {}, eng = m.engine || {}, h = m.history || {};
-  const last = (m.requests || [])[0];
+  const last = (m.requests || []).find((r) => r.kind !== "image");   // the chat's last request (image jobs aside)
   // the header pill
-  if (live.state === "reading") {
+  if (live.image) {
+    setPill("generating", `Image · ${imageStep(live.image)}`);
+  } else if (live.state === "reading") {
     const pct = live.prompt_total ? Math.round((100 * live.prompt_read) / live.prompt_total) : null;
     setPill("reading", pct != null ? `Reading prompt · ${pct}%` : "Reading prompt");
   } else if (live.state === "generating") {
@@ -317,11 +340,19 @@ function renderTotals(t) {
 }
 function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept, fail) {
   // model state
-  const on = live.queued > 0 ? "queued" : live.state;
-  for (const b of document.querySelectorAll("#state-badges .st-badge")) b.classList.toggle("on", b.dataset.s === on || b.dataset.s === live.state);
+  const on = live.queued > 0 ? "queued" : live.image ? "generating" : live.state;
+  for (const b of document.querySelectorAll("#state-badges .st-badge")) b.classList.toggle("on", b.dataset.s === on || (!live.image && b.dataset.s === live.state));
   const prog = $("state-progress");
   let label = "Waiting for a request", detail = "", pct = 0;
-  if (live.state === "reading") {
+  if (live.image) {
+    const img = live.image;
+    label = img.label + (img.images > 1 ? ` · image ${img.image} of ${img.images}` : "");
+    delete prog.dataset.tone;
+    pct = 100 * (img.progress || 0);
+    detail = [`step ${img.step}/${img.steps}`, img.step_s != null ? `${fmt(img.step_s, 2)} s/step` : null,
+              `${fmt(img.elapsed_s, 0)} s`, img.size, img.refs ? `${img.refs} reference${img.refs > 1 ? "s" : ""}` : null]
+      .filter(Boolean).join(" · ");
+  } else if (live.state === "reading") {
     label = "Reading prompt";
     prog.dataset.tone = "info";
     if (live.prompt_total) {
@@ -349,14 +380,20 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept, fail)
   $("state-bar").style.width = `${pct}%`;
 
   // the eight cards
-  const speed = live.state === "generating" ? live.tok_s : last ? last.decode_tok_s : null;
-  setMetric("speed", speed == null ? null : fmt(speed, 1), "t/s",
-            live.state === "generating" ? "Decode now" : last ? "Decode last request" : "Decode");
+  if (live.image) {   // an image job: its seconds a step, not a decode rate
+    setMetric("speed", live.image.step_s == null ? null : fmt(live.image.step_s, 2), "s/step",
+              `Image · ${imageStep(live.image)}`);
+  } else {
+    const speed = live.state === "generating" ? live.tok_s : last ? last.decode_tok_s : null;
+    setMetric("speed", speed == null ? null : fmt(speed, 1), "t/s",
+              live.state === "generating" ? "Decode now" : last ? "Decode last request" : "Decode");
+  }
   const prefill = live.state !== "idle" ? live.prefill_tok_s_mean
                 : last && last.prompt_ms > 0 ? Math.max(0, last.prompt_tokens - (last.reused || 0)) / (last.prompt_ms / 1000) : null;
-  setMetric("prefill", prefill == null ? null : fmt(prefill), "t/s",
-            live.state === "reading" ? "Prefill now" : live.state === "generating" ? "Prefill this request" : last ? "Prefill last request" : "Prefill");
-  spark("sp-speed", h.tok_s);
+  if (live.image) setMetric("prefill", null, "t/s", "Image job");
+  else setMetric("prefill", prefill == null ? null : fmt(prefill), "t/s",
+                 live.state === "reading" ? "Prefill now" : live.state === "generating" ? "Prefill this request" : last ? "Prefill last request" : "Prefill");
+  spark("sp-speed", h.tok_s, undefined, true);
   spark("sp-prefill", h.prefill_tok_s_mean);
   // a model split across several cards (issue #112): the cards show their total / mean / hottest, and each card's own
   const per = (f) => (hw.gpus || []).map((g) => `GPU ${g.index} ${f(g)}`).join(" · ");
@@ -424,6 +461,17 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept, fail)
     body.innerHTML = requests.slice(0, reqShowAll ? requests.length : 12).map((r) => {
       const [cls, text] = badge[r.finish] || ["", r.finish || "–"];
       const t = new Date(r.time * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+      if (r.kind === "image") {   // an image job: its size, references and stages in place of the token columns
+        const what = [`${r.edit ? "Edit" : "Image"} ${r.size}`, r.n > 1 ? `${r.n} images` : null,
+                      r.refs ? `${r.refs} reference${r.refs > 1 ? "s" : ""}` : null].filter(Boolean).join(" · ");
+        const stages = r.error ? r.error
+          : [r.text_encode_ms != null ? `text ${fmt(r.text_encode_ms / 1000, 1)} s` : null,
+             r.sampling_s != null ? `sampling ${fmt(r.sampling_s, 1)} s` : null,
+             r.vae_decode_s != null ? `VAE ${fmt(r.vae_decode_s, 1)} s` : null].filter(Boolean).join(" · ");
+        return `<tr><td>${esc(t)}</td><td><span class="st-badge ${cls}">${esc(text)}</span> <span class="st-badge st-badge--reading">Image</span></td>
+          <td colspan="6" class="req-image${r.error ? " req-image--error" : ""}">${esc(what)}${stages ? ` <span class="muted">· ${esc(stages)}</span>` : ""}</td>
+          <td class="num">${fmt(r.seconds != null ? r.seconds : r.duration_s, 1)} s</td></tr>`;
+      }
       const proj = r.projection == null ? "" : ` <span class="st-badge${r.projection ? " st-badge--reading" : ""}" title="experimental speed projection ${r.projection ? "on" : "off"}">${r.projection ? "ESP" : "stock"}</span>`;
       // #588: the VRAM share; the PCIe share (--pcie-frac) beside it when there is one
       const hit = r.hit_rate == null ? "–" : `${(r.hit_rate * 100).toFixed(1)}%` +
