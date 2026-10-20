@@ -226,7 +226,8 @@ The download is the image model, the text encoder (Qwen3-VL-8B Q8_0), the VAE an
 The RAM is what it takes besides the text model: when it is short, setup lowers the text encoder down to Q4_K, then the image model (with `--image-ssd-offload on` it keeps them and reads what does not fit from the SSD).
 More VRAM makes it faster.
 
-Mage-Flow (Microsoft, MIT) comes in one size: the download is the image model (bf16), the text encoder (Qwen3-VL-4B Q8_0) and the VAE, 12.9 GB together, and the RAM about 15 GB.
+Mage-Flow (Microsoft, MIT) has one image model for generation and another for edits: setup installs both, and the engine switches to the edit one for an edit.
+It comes in one size: the download is the two image models (bf16), the text encoder (Qwen3-VL-4B Q8_0), the VAE and the vision encoder for the edits, 21.9 GB together, and the RAM about 16 GB (one image model at a time).
 The engine turns the image model into Q8_0 as it loads it and keeps it in VRAM, what does not fit in pinned RAM, also as Q8_0 (`--image-dit-q8 off` keeps bf16).
 
 Images are made through `POST /v1/images/generations` and `/v1/images/edits` (vLLM-Omni compatible, so OpenAI compatible), the Images tab of the web page, and the chat ([details](docs/DETAILS.md#image-generation-optional)).

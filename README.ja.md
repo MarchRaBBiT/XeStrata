@@ -212,7 +212,8 @@ Qwen-Image-2.1 に `-uncensored` を付けると（`qwen-image-turbo-uncensored`
 RAM の目安は、文章のモデルとは別に要る量です。足りなければ setup は文の読み手を Q4_K まで下げ、それでも足りなければ画像のモデルを下げます（`--image-ssd-offload on` なら下げずに、入らない分を SSD から読みます）。
 VRAM が大きいほど速くなります。
 
-Mage-Flow（Microsoft、MIT）は大きさが 1 つで、ダウンロードは画像のモデル（bf16）、文の読み手（Qwen3-VL-4B の Q8_0）、VAE の合計 12.9 GB、RAM の目安は 15 GB です。
+Mage-Flow（Microsoft、MIT）は生成用と編集用で画像のモデルが別で、setup は両方を入れ、編集のときだけエンジンが差し替えます。
+大きさは 1 つで、ダウンロードは 2 つの画像のモデル（bf16）、文の読み手（Qwen3-VL-4B の Q8_0）、VAE、編集のための画像の読み手の合計 21.9 GB、RAM の目安は 16 GB です（画像のモデルは一度に 1 つ）。
 画像のモデルはエンジンが読み込むときに Q8_0 にして VRAM に置き、入らない分は Q8_0 にしてピン留めした RAM に置きます（`--image-dit-q8 off` で bf16 のまま）。
 
 画像は `POST /v1/images/generations` と `/v1/images/edits`（vLLM-Omni 互換（OpenAI 互換））、Web のページの Images のタブ、チャットから作れます（[詳細](docs/DETAILS.ja.md#画像の生成任意)）。
