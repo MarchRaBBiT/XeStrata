@@ -865,7 +865,10 @@ if hasattr(IM, "ImageEngine"):
         print(json.dumps({"rc": 1, "error": str(e)}))
         sys.exit(0)
     finally:
-        g.close()
+        try:   # the daemon too: it would hold its VRAM through the next measurement (the run is warm already)
+            g.close(shutdown=True)
+        except TypeError:          # an older tree's ImageGen.close() takes no argument
+            g.close()
     Path(job["png"]).write_bytes(pngs[0])
     Path(job["log"]).write_text(json.dumps(fig, indent=1) + "\n")
     print(json.dumps({"rc": 0, "seconds": round(wall, 2), "cold_s": round(cold, 2),
