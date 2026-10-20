@@ -1007,7 +1007,9 @@ const MmqPlan& mmq_plan() {
         for (int64_t l = 0; on && l < layers; ++l) {
             const int gt = lay.fmt[(size_t) l].gu_type, dt = lay.fmt[(size_t) l].d_type;
             // and gate's rows right before up's (the products read them as one matrix)
-            if (!mmq::supported(gt) || !mmq::supported(dt) || lay.fmt[(size_t) l].up_off != mmq::matrix_bytes(gt, 640, N)) {
+            // APR: a Hadamard-folded layer takes the FP16 path, which rotates its rows (the int8 products do not)
+            if (!mmq::supported(gt) || !mmq::supported(dt) || lay.fmt[(size_t) l].up_off != mmq::matrix_bytes(gt, 640, N) ||
+                lay.fmt[(size_t) l].had_gu || lay.fmt[(size_t) l].had_d) {
                 p.fallback = true;
                 continue;
             }
@@ -2692,6 +2694,15 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     } cpu_join{cpu_fut};
                     const int mmq_gt = lay.native ? lay.fmt[(size_t) l].gu_type : 42;
                     const int mmq_dt = lay.native ? lay.fmt[(size_t) l].d_type : 42;
+                    // APR (prism.hadamard): folded gate/up take H (s * x), folded down H (s * h), on the FP16 path
+                    // (mmq_plan gives such a layer no int8 products); the CPU's rows rotate in native_quant_act
+                    const bool had_gu = lay.native && lay.fmt[(size_t) l].had_gu;
+                    const bool had_d = lay.native && lay.fmt[(size_t) l].had_d;
+                    const int had_block = lay.native ? lay.fmt[(size_t) l].had_block : 0;
+                    const float* had_sx = had_gu ? strata::kernels::hadamard_device_signs(lay.fmt[(size_t) l].gu_signs, (int) N)
+                                                 : nullptr;
+                    const float* had_sh = had_d ? strata::kernels::hadamard_device_signs(lay.fmt[(size_t) l].d_signs, 640)
+                                                : nullptr;
                     const size_t mmq_gub = use_mmq ? mmq::matrix_bytes(mmq_gt, 1280, N) : 0;
                     const size_t mmq_db = use_mmq ? mmq::matrix_bytes(mmq_dt, N, 640) : 0;
                     pt.mark(kPfGather, cs);
@@ -2711,6 +2722,9 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         m.bounds_host.to_device(m.bounds_dev, m.cs);
                     } else {
                         gather_rows16(m.mixed_h, m.src_dev, m.Xs, T * K, N, m.cs);
+                        // APR: Hadamard-folded gate/up take H (s * x); Xs is this layer's own gathered copy (rotated in
+                        // FP16 storage, in float arithmetic)
+                        if (had_gu) strata::kernels::hadamard_rows_f16(m.Xs, T * K, N, had_block, had_sx, m.cs);
                         // the grouped products' row bounds, `order`'s first rows and the total
                         m.xb_host.resize(order.size() + 1);
                         for (size_t j = 0; j < order.size(); ++j) m.xb_host[j] = m.off[(size_t) order[j]];
@@ -2736,6 +2750,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                             strata::kernels::iq_gemm_grouped_f16(ffmt->gu_type, m.Xs, fgu.data(), ffmt->n_ff, m.GU, 1280,
                                                                  m.xb_dev + j0, G, maxr, 1280, N, m.cs);
                             swiglu_interleaved(m.GU + r0 * 1280, m.Hh + r0 * 640, nr, m.cs);
+                            if (had_d) strata::kernels::hadamard_rows_f16(m.Hh + r0 * 640, nr, 640, had_block, had_sh, m.cs);
                             pt.mark(kPfGemmD, cs);
                             strata::kernels::iq_gemm_grouped_f16(ffmt->d_type, m.Hh, fd.data(), 0, m.Dm, N,
                                                                  m.xb_dev + j0, G, maxr, N, 640, m.cs);
@@ -2986,6 +3001,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                             strata::kernels::xmx_gemm_grouped(m.Xs, m.dq_gu, GU_ELEMS, m.GU, m.xb_dev + j0, q + 1, maxr,
                                                               1280, N, m.cs);
                         swiglu_interleaved(m.GU + r0 * 1280, m.Hh + r0 * 640, nr, m.cs);
+                        if (had_d) strata::kernels::hadamard_rows_f16(m.Hh + r0 * 640, nr, 640, had_block, had_sh, m.cs);
                         pt.mark(kPfGemmD, cs);
                         if (!Gemm::f16_groups(m.Hh, m.dq_d, D_ELEMS, m.Dm, m.xb_host.data() + j0, q + 1, N, 640, m.cs))
                             strata::kernels::xmx_gemm_grouped(m.Hh, m.dq_d, D_ELEMS, m.Dm, m.xb_dev + j0, q + 1, maxr, N,

@@ -2713,6 +2713,11 @@ bool expert_layout_from_gguf(const std::string& gguf, const std::vector<int64_t>
     }
     try {
         const strata::GgufModel model = strata::GgufModel::open(gguf);
+        if (model.shard(0).metadata().count("prism.hadamard.version")) {   // APR: hadamard.txt comes with a pack only
+            err = "experts from the GGUF: its experts are Hadamard-folded (prism.hadamard); make a pack with "
+                  "tools/iq_pack.py";
+            return false;
+        }
         const int64_t n_layers = (int64_t) moe_blocks.size();
         ExpertLayout L;
         L.native = true;

@@ -70,6 +70,11 @@ bool MoeWindow::init(const MoeWindowShape& shape, const MoeWindowTier& tier, std
         err = "moe window: the expert layout is not this model's";
         return false;
     }
+    for (size_t l = 0; lay.native && l < lay.fmt.size(); ++l)
+        if (lay.fmt[l].had_gu || lay.fmt[l].had_d) {   // APR: only Qwen3.8's verify window rotates its experts' input
+            err = "moe window: Hadamard-folded experts (hadamard.txt) are not supported for this model";
+            return false;
+        }
     if (tier.cache_base == nullptr || tier.blob <= 0) {
         err = "moe window: needs the VRAM expert tier";
         return false;
