@@ -5725,9 +5725,9 @@ def make_handler(svc: Service):
                 self._settings()
                 return
             if path == "/switcher":                     # the web app's model menu: ask the host to swap models
-                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 if not self._own_page("the model can be switched"):   # as /settings: a page elsewhere must not
                     return
+                body = self._body()                     # #26: after the page check, and within body_limit()
                 try:
                     req = json.loads(body or b"{}")
                 except ValueError:
