@@ -863,7 +863,8 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
                         "script). Without confirm=true it only returns the plan (what would be downloaded, disk "
                         "space): show it to the user and call again with confirm=true once they agree. Returns at "
                         "once; call it again (no arguments needed) to see the progress, or with cancel=true to stop "
-                        "it (it resumes later). Defaults: the recommended model and context for this PC, images off. "
+                        "it (it resumes later). Defaults: the recommended model and context for this PC, pictures "
+                        "on where the model can read them. "
                         "After it finishes, start the model with strata_start.",
          "inputSchema": {"type": "object", "additionalProperties": False, "properties": {
              "family": {"type": "string", "enum": list(families),
@@ -874,8 +875,9 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
              "context": {"type": "integer", "enum": contexts,
                          "description": "context length in tokens (more needs more VRAM)"},
              "vision": {"type": "string", "enum": ["no", "yes", "gpu", "cpu"],
-                        "description": "let the model read images (yes = the encoder on the GPU; ~0.9 GB more "
-                                       "download); default no"},
+                        "description": "let the model read images (~0.9 GB more download). Default yes where "
+                                       "the model can read them: yes = the reader for this card (the CPU under 24 GB "
+                                       "of VRAM, the GPU from 24 GB), gpu / cpu = that reader, no = text only"},
              "kv": {"type": "string", "enum": ["int8", "q4_0", "k8v4"],
                     "description": "KV cache precision above 8K context (default int8)"},
              "gpu": {"type": "integer", "minimum": 0, "maximum": 63,
@@ -1129,6 +1131,8 @@ class Tools:
             vram = max((g["vram_gb"] for g in usable), default=12)
             context = 32768 if vram < 14 else 65536 if vram < 20 else 131072
         row = s.size_row(models, family, model)
+        if vision is None:   # upstream 91baead75: pictures on wherever the model reads them (setup picks the reader)
+            vision = "no" if row.get("vision", families[family].get("vision")) is False else "yes"
         if vision in ("yes", "gpu", "cpu") and row.get("vision", families[family].get("vision")) is False:
             raise ToolError(f"images are not available with {families[family]['title']} {model} yet: use vision=no")
         target = self.check_data_dir(data_dir) if data_dir else s.data_dir()

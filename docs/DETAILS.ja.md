@@ -200,7 +200,7 @@ UkisAI による Qwen3.8-Flash-Next のファインチューンで、ずっと�
 エキスパートの gate・up は IQ3_S（1 層は IQ4_XS）、down は IQ4_NL（5 層は Q8_0）で、59.5 GB あります。
 密な部分と、RAM の予算の扱いは、下の UD-Q4_K_XL と同じです（`--resident-budget-gib N`、setup は RAM から 24 GB を引いた値を選びます）。
 RAM が約 80 GB あれば、すべてのエキスパートが RAM に入ります。
-setup は画像を尋ね（既定はオフ）、画像のエンコーダーは元のモデルのものです。
+setup は画像を尋ね（既定はオン）、画像のエンコーダーは元のモデルのものです。
 
 ```sh
 ./setup.sh --setup --family unsloth --model UD-IQ4_XS
@@ -1197,8 +1197,8 @@ Python の標準ライブラリだけを使うので、`.venv` ができる前�
 
 モデルには画像のエンコーダーがあります。
 [`mmproj-Qwen3.8-Flash-Next-BF16.gguf`](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF)（0.9 GB、27 層の ViT と、言語モデルへの射影）です。
-使うかどうかは**任意**です。
-setup の「Images?」に yes と答えるか、`--vision gpu`（または `--vision cpu`）を付けて setup をもう一度実行します。
+使うかどうかは**任意**で、画像を読めるモデルでは setup の「Images?」の既定は yes です（upstream 91baead75）。
+切るには no と答えるか `--vision no` を付けます。後から入れるには `--vision gpu`（または `--vision cpu`）を付けて setup をもう一度実行します。
 yes（`--vision yes`）は、24 GB 以上のカードでは GPU のエンコーダー、それより小さいカードでは CPU のエンコーダーです。GPU のエンコーダーは VRAM を約 1.4 GB 空けておくので、16 GB のカードで文章の速さが 3〜5% 落ちたためです（upstream #2406 の計測）。`--vision gpu` を付ければ、小さいカードでも GPU のエンコーダーです。
 setup はエンコーダーをダウンロードし、小さな補助のプログラム（`strata-vision`、llama.cpp の `mtmd` のライブラリから）をビルドして、起動スクリプトに足します。
 ほかは何も変わりません。

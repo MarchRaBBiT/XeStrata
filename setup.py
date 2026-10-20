@@ -4813,8 +4813,9 @@ def main() -> int:
                     help="KV cache precision above 8K context: int8 (default), q4_0 (half the memory, a little less "
                          "precise) or k8v4 (8-bit keys and 4-bit values: about three quarters of the memory)")
     ap.add_argument("--vision", choices=["yes", "no", "none", "gpu", "cpu"],
-                    help="let the model read images (yes = gpu: the encoder on the GPU, the CPU encoder taking over "
-                         "when it cannot start; cpu = on the CPU only)")
+                    help="let the model read images (on by default where the model can; yes = the reader for this "
+                         "card: the CPU under 24 GB of VRAM, the GPU from 24 GB; gpu = the encoder on the GPU, the CPU "
+                         "encoder taking over when it cannot start; cpu = on the CPU only; no = text only)")
     ap.add_argument("--vision-tokens", type=int, metavar="N",
                     help="the most image tokens a picture becomes (default 1024 with the encoder on the GPU, 300 on "
                          "the CPU): more reads small text and charts better, and takes longer to encode; remembered "
@@ -5389,7 +5390,9 @@ def main() -> int:
             say("  16 GB cards. --vision gpu if you want pictures in under a second.")
         else:
             say("  download; the image encoder runs on the GPU (on the CPU if it cannot start there).")
-        vision = images_encoder("yes", gpu) if ask("Do you want images?", ["y", "n"], "n", a.yes) == "y" else "none"
+        # upstream 91baead75: pictures on by default wherever the model reads them, on every make of card (the reader
+        # follows images_encoder: the CPU under 24 GB of VRAM, the GPU from 24 GB)
+        vision = images_encoder("yes", gpu) if ask("Do you want images?", ["y", "n"], "y", a.yes) == "y" else "none"
     ok("images: " + {"none": "off", "gpu": "on (encoder on the GPU, the CPU encoder as fallback)",
                      "cpu": "on (encoder on the CPU)"}[vision])
     if vision != "none" and MODELS[model].get("vision_untested"):
