@@ -31,10 +31,10 @@ answers, no questions), --setup (install another model / change settings instead
 --host 0.0.0.0 --api-key KEY (reach it from other devices on your network), --experimental-speed-projection on|off
 (EXPERIMENTAL, off by default),
 --models-dir DIR, --gguf-dir DIR (use GGUF files you already have), --check (only check this PC), --check-update
-(whether a newer XeStrata release is out), --images qwen-image-turbo|qwen-image-turbo-uncensored|no (image
-generation: Qwen-Image-2.1-Turbo on XeStrata's image engine, POST /v1/images/generations; -uncensored: its text
-encoder with the refusal direction removed; --image-quant Q4_K_M|Q6_K|Q8_0, --image-ssd-offload on|off,
---image-gpu-policy auto|keep|shrink|unload).
+(whether a newer XeStrata release is out), --images qwen-image-turbo|qwen-image-base|...-uncensored|no (image
+generation on XeStrata's image engine, POST /v1/images/generations: Qwen-Image-2.1-Turbo in 8 steps, or its base
+model Qwen-Image-2.1 in 40; -uncensored: the text encoder with the refusal direction removed; --image-quant
+Q4_K_M|Q6_K|Q8_0, --image-ssd-offload on|off, --image-gpu-policy auto|keep|shrink|unload).
 
 Setup recommends, it never forces: the recommended answers are the defaults (--yes, or Enter), and a bigger choice
 than it recommends - a longer context, a size it thinks will not fit - is kept, with what it risks.  With --yes, an
@@ -3069,8 +3069,8 @@ def text_ram_gb(args: list, ram: float, model: str | None = None) -> float:
 
 
 def setup_images(a, gpu: dict, models_dir: Path, eng: Path, text_gb: float | None = None) -> dict | None:
-    """--images qwen-image-turbo[-uncensored]: Qwen-Image-2.1-Turbo's four files for the image engine in `eng` -> the
-    run config's "images" section (serve/images.py); None for --images no, or when not wanted after all.  `text_gb`:
+    """--images (qimage.IMAGE_MODELS): the image model's four files for the image engine in `eng` -> the run
+    config's "images" section (serve/images.py); None for --images no, or when not wanted after all.  `text_gb`:
     the RAM the text model keeps (text_ram_gb): the denoiser's and the text encoder's quants are the largest whose
     files fit the rest (the user's decision of 2026-10-15), the encoder lowered first (2026-10-19), or the ones asked
     for with --image-ssd-offload on (what does not fit read from the SSD)."""
@@ -3082,17 +3082,18 @@ def setup_images(a, gpu: dict, models_dir: Path, eng: Path, text_gb: float | Non
     if not exe.exists():
         fail(f"the image engine is missing ({exe})", "run setup again to compile the engine (it builds both)")
     asked = a.image_quant or QI.DEFAULT_QUANT
-    enc = QI.IMAGE_MODELS[a.images][1]
+    _, dit, enc = QI.IMAGE_MODELS[a.images]
+    label, steps, _ = QI.DITS[dit]
     tasked = QI.DEFAULT_TEXT_QUANT
     ssd = getattr(a, "image_ssd_offload", None) == "on"
     quant, tquant = asked, tasked
     lowered = None
     if not ssd and text_gb is not None:
         left = ram_gb() - text_gb
-        quant, tquant, fits = QI.fit_ram(left, enc, asked, tasked)
+        quant, tquant, fits = QI.fit_ram(left, enc, asked, tasked, dit)
         if (quant, tquant) != (asked, tasked):
             # kept in the config: the server says it at start and on the web page (the user's decision, 2026-10-15)
-            need = QI.ram_need_gb(asked, enc, tasked)
+            need = QI.ram_need_gb(asked, enc, tasked, dit)
             lowered = {"from": asked, "to": quant, "text_from": tasked, "text_to": tquant,
                        "need_gb": round(need, 1), "ram_left_gb": round(max(left, 0.0), 1)}
             warn(f"image model lowered from {asked} (text encoder {tasked}) to {quant} (text encoder {tquant}): "
@@ -3100,19 +3101,19 @@ def setup_images(a, gpu: dict, models_dir: Path, eng: Path, text_gb: float | Non
                  f"leaves ~{max(left, 0):.0f} GB. --image-ssd-offload on keeps both and reads what does not fit "
                  "from the SSD (slower)")
         if not fits:
-            warn(f"even {quant} with a {tquant} text encoder (~{QI.ram_need_gb(quant, enc, tquant):.0f} GB) does not "
-                 f"fit the ~{max(left, 0):.0f} GB of RAM the text model leaves: images read part of the model from "
-                 "the SSD (slower), and the PC may run short of RAM while one is made")
+            warn(f"even {quant} with a {tquant} text encoder (~{QI.ram_need_gb(quant, enc, tquant, dit):.0f} GB) "
+                 f"does not fit the ~{max(left, 0):.0f} GB of RAM the text model leaves: images read part of the model "
+                 "from the SSD (slower), and the PC may run short of RAM while one is made")
     elif ssd:
         ok(f"image model {quant} (text encoder {tquant}) with SSD offload: what does not fit in RAM is read from "
            "the SSD")
-    say(f"  Image generation: Qwen-Image-2.1-Turbo {quant} on XeStrata's image engine (8 steps; "
+    say(f"  Image generation: {label} {quant} on XeStrata's image engine ({steps} steps; "
         "POST /v1/images/generations)")
     tfile = QI.FILES[QI.text_file(enc, tquant)]
     say(f"  Text encoder: {Path(tfile[1]).name} ({tfile[0]}"
         + (", Qwen3-VL-8B with its refusal direction removed)" if enc == "uncensored" else ")"))
-    say("  " + QI.LICENSE_NOTE)
-    names = QI.file_names(quant, enc, tquant)
+    say("  " + QI.license_note(dit))
+    names = QI.file_names(quant, enc, tquant, dit)
     need = sum(QI.FILES[k][2] for k in names) / 1e9
     if ask(f"Download the image model ({need:.1f} GB) and set up image generation?", ["y", "n"], "y", a.yes) != "y":
         return None
@@ -5025,11 +5026,13 @@ def main() -> int:
                     help="the most image tokens a picture becomes (default 1024 with the encoder on the GPU, 300 on "
                          "the CPU): more reads small text and charts better, and takes longer to encode; remembered "
                          "for this model")
-    ap.add_argument("--images", metavar="qwen-image-turbo|qwen-image-turbo-uncensored|no",
-                    help="image generation (POST /v1/images/generations): Qwen-Image-2.1-Turbo on XeStrata's image "
-                         "engine, its text encoder Unsloth's Qwen3-VL-8B or, -uncensored, AtomicChat's with its "
-                         "refusal direction removed (either Q8_0, lowered first (Q6_K, Q5_K, Q4_K) when the files "
-                         "would not fit the RAM the text model leaves); no = take it out of the config")
+    ap.add_argument("--images", metavar="qwen-image-turbo|qwen-image-base[-uncensored]|no",
+                    help="image generation (POST /v1/images/generations) on XeStrata's image engine: "
+                         "qwen-image-turbo (Qwen-Image-2.1-Turbo, 8 steps) or qwen-image-base (its base model "
+                         "Qwen-Image-2.1, 40 steps by default, about 5 times as long an image); the text encoder "
+                         "Unsloth's Qwen3-VL-8B or, -uncensored, AtomicChat's with its refusal direction removed "
+                         "(either Q8_0, lowered first (Q6_K, Q5_K, Q4_K) when the files would not fit the RAM the "
+                         "text model leaves); no = take it out of the config")
     ap.add_argument("--image-quant", choices=["Q4_K_M", "Q6_K", "Q8_0"],
                     help="the image model's size (default Q8_0, lowered when its files would not fit the RAM the "
                          "text model leaves, after its text encoder; the GPU's memory does not decide it)")

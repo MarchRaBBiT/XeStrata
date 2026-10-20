@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Niko1221 and the Strata contributors
 # SPDX-FileCopyrightText: 2026 MistVVK and the XeStrata contributors
 # SPDX-License-Identifier: LGPL-3.0-or-later AND MIT
-"""serve/images.py - image generation (Qwen-Image-2.1-Turbo) through XeStrata's own image engine, strata-image.
+"""serve/images.py - image generation (Qwen-Image-2.1-Turbo, Qwen-Image-2.1) through XeStrata's own image engine,
+strata-image.
 
 POST /v1/images/generations takes OpenAI's request shape (prompt, size, n, response_format b64_json|url) plus Strata's
 own field seed; POST /v1/images/edits the same with reference images (OpenAI's multipart form, image or image[]; or JSON
@@ -11,8 +12,9 @@ vision encoder reads them into the prompt, the VAE's encoder into the DiT's).  T
 server of the same image model and GPU finds it: a model switch does not lose it): its kernels built once, the
 prompt's text states and the layers that fit in VRAM kept between images, one image a request.  It runs Turbo's
 8 steps (CFG 1, the Euler flow sampler, the model's own sigmas), the image the one stable-diffusion.cpp makes with the
-model card's command for the same seed (within LPIPS 0.03).  A size whose sides are not multiples of 16 (1920x1080)
-is made at the sides rounded up (1920x1088) and its middle cut out.
+model card's command for the same seed (within LPIPS 0.03); the base model ("schedule": "base") the steps asked for
+(default the config's "steps", 40) on its scheduler's sigmas (base_sigmas), CFG 1 as well.  A size whose sides are
+not multiples of 16 (1920x1080) is made at the sides rounded up (1920x1088) and its middle cut out.
 
 The GPU is shared with the text engine one job at a time: an image job takes the service's turn (the FIFO every chat
 request takes), so no chat turn runs on the GPU meanwhile.  The image engine works in the VRAM it is given: what it
@@ -30,24 +32,27 @@ otherwise it lets go of everything but its process (about 200 MiB).  The daemon 
 1800) without a server.
 
 The config's "images" section (written by setup --images, tools/image/qimage.py):
-  {"exe": "engine/strata-image", "diffusion_model": "...Q8_0.gguf", "vae": "...",
-   "llm": "...Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf", "quant": "Q8_0", "gpu_policy": "auto", "reload": "lazy"|"eager",
-   "max_n": 4, "max_side": 2048, "timeout_s": 3600, "uma": false, "out_dir": null, "keep_files": 64,
+  {"exe": "engine/strata-image", "diffusion_model": "...Q8_0.gguf", "schedule": "turbo"|"base", "steps": 8|40,
+   "vae": "...", "llm": "...Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf", "quant": "Q8_0", "gpu_policy": "auto",
+   "reload": "lazy"|"eager", "max_n": 4, "max_side": 2048, "timeout_s": 3600, "uma": false, "out_dir": null,
+   "keep_files": 64,
    "vision": "...mmproj-F16.gguf", "max_refs": 3, "reserve_mib": 512, "spare_mib": 1024, "ssd_offload": false,
    "text_encoder": "stock", "text_quant": "Q4_K",
    "quant_lowered": {"from": "Q8_0", "to": "Q6_K", "text_from": "Q8_0", "text_to": "Q4_K", "need_gb": 20.2,
                      "ram_left_gb": 14.0}}
-  vision: Qwen3-VL's vision encoder (mmproj), for the edits (without it they are refused); max_refs: the reference
-  images an edit takes at most; reserve_mib: VRAM the image engine leaves free when it sizes itself; spare_mib: the
-  free VRAM that must remain after a job under keep for the engine to keep its layers; quant_lowered (only when setup
-  lowered them): the sizes setup took instead of the ones asked for, because the RAM the text model leaves was short
-  (note(): the server's log and the web page say so).
+  schedule: Turbo's own sigmas or the base model's (base_sigmas; no "schedule" is Turbo); steps: the base model's
+  default (a request's "steps", 2 to MAX_STEPS, overrides it); vision: Qwen3-VL's vision encoder (mmproj), for the
+  edits (without it they are refused); max_refs: the reference images an edit takes at most; reserve_mib: VRAM the
+  image engine leaves free when it sizes itself; spare_mib: the free VRAM that must remain after a job under keep for
+  the engine to keep its layers; quant_lowered (only when setup lowered them): the sizes setup took instead of the ones
+  asked for, because the RAM the text model leaves was short (note(): the server's log and the web page say so).
 """
 from __future__ import annotations
 
 import base64
 import collections
 import contextlib
+import math
 import os
 import queue
 import random
@@ -64,6 +69,7 @@ from pathlib import Path
 from typing import Any
 
 TURBO_STEPS = 8
+MAX_STEPS = 100                    # the base model's
 MODEL_NAME = "qwen-image-2.1-turbo"
 POLICIES = ("auto", "keep", "shrink", "unload")
 SIZE_STEP = 16                     # the VAE's 8x and the DiT's 2x2 patches: sides made at a multiple of 16, then cut
@@ -131,13 +137,30 @@ def parse_request(req: dict, cfg: dict) -> dict:
         raise ImageRequestError("output_format: only png")
     w, h = parse_size(req.get("size"), int(cfg.get("max_side") or 2048))
     n = _int_field(req, "n", 1, int(cfg.get("max_n") or 4), 1)
-    if req.get("steps") not in (None, TURBO_STEPS):
+    if cfg.get("schedule") == "base":
+        steps = _int_field(req, "steps", 2, MAX_STEPS, int(cfg.get("steps") or 40))
+    elif req.get("steps") not in (None, TURBO_STEPS):
         raise ImageRequestError(f"steps: Qwen-Image-2.1-Turbo runs its own {TURBO_STEPS}-step schedule only")
+    else:
+        steps = TURBO_STEPS
     seed = _int_field(req, "seed", 0, 2**62, None)
     if seed is None:
         seed = random.SystemRandom().randrange(0, 2**31)
-    return {"prompt": prompt, "width": w, "height": h, "n": n, "steps": TURBO_STEPS, "seed": seed,
+    return {"prompt": prompt, "width": w, "height": h, "n": n, "steps": steps, "seed": seed,
             "response_format": fmt}
+
+
+def base_sigmas(steps: int, width: int, height: int) -> list[float]:
+    """Qwen-Image-2.1's sigmas for `steps` steps of a width x height image (the size the engine makes), and the
+    terminal 0: diffusers' QwenImage21Pipeline with the FlowMatchEulerDiscreteScheduler its scheduler_config sets up
+    (linspace(1, 1/steps), the exponential time shift by mu, a line in the image's tokens from base_shift 0.5 at 256 to
+    max_shift 0.9 at 8192, then stretched to end at shift_terminal 0.02).  An image token is a 16 x 16 pixel square."""
+    seq = (width // SIZE_STEP) * (height // SIZE_STEP)
+    mu = 0.5 + (0.9 - 0.5) / (8192 - 256) * (seq - 256)
+    t = [1.0 - i * (1.0 - 1.0 / steps) / (steps - 1) for i in range(steps)]
+    shifted = [math.exp(mu) / (math.exp(mu) + (1.0 / x - 1.0)) for x in t]
+    scale = (1.0 - shifted[-1]) / (1.0 - 0.02)
+    return [1.0 - (1.0 - x) / scale for x in shifted] + [0.0]
 
 
 def image_dims(data: bytes) -> tuple[int, int]:
@@ -608,11 +631,13 @@ class ImageGen:
                 self._ready()
                 self.stage(job)
                 ids = ",".join(str(i) for i in self.ids(job))
+                sigmas = ("" if self.cfg.get("schedule") != "base" else
+                          " SIGMAS:" + ",".join(f"{x:.7g}" for x in base_sigmas(job["steps"], mw, mh)))
                 for i in range(job["n"]):
                     if cancel is not None and cancel.is_set():
                         self.totals["failed"] += 1
                         raise ImageJobFailed("cancelled (the client left)")
-                    self.progress = (i * TURBO_STEPS, job["n"] * TURBO_STEPS)
+                    self.progress = (i * job["steps"], job["n"] * job["steps"])
                     self._live(image=i + 1, step=0, steps=job["steps"], stage="refs" if job.get("refs") else "text",
                                sampling_at=None)
                     out = work / f"img_{i}.rgba"
@@ -624,7 +649,7 @@ class ImageGen:
                     def stage(name):
                         self._live(stage=name, **({"sampling_at": time.monotonic()} if name == "sampling" else {}))
                     try:
-                        r = self.engine.ask(f"IMG {mw} {mh} {job['seed'] + i} {DROP} {out} {ids}"
+                        r = self.engine.ask(f"IMG {mw} {mh} {job['seed'] + i} {DROP} {out} {ids}{sigmas}"
                                             f"{self._refs_words(job)}", "IMAGE", timeout, cancel, step, stage)
                     except ImageJobFailed as e:
                         self.totals["failed"] += 1
@@ -740,7 +765,7 @@ class ImageGen:
 FILE_REF = re.compile(r"/v1/images/files/([0-9a-f]{32}\.png)")
 TOOLS = [
     {"name": "generate_image",
-     "description": "Make an image from a description with the image model on this computer (Qwen-Image-2.1-Turbo). "
+     "description": "Make an image from a description with the image model on this computer. "
                     "Describe it in detail: the subject, the setting, the style, the light, and any text it shows in "
                     "quotes. The image is shown to the user; the result says where it is.",
      "parameters": {"type": "object", "properties": {

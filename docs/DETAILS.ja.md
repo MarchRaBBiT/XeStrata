@@ -1292,9 +1292,11 @@ setup は画像のモデル、VAE、文の読み手（Qwen3-VL-8B）と、編集
 `--images qwen-image-turbo-uncensored` なら、文の読み手を AtomicChat の Qwen3-VL-8B（拒否の方向を取り除いたもの）に替えます。大きさの選び方は同じです。画像のモデル、VAE、画像の読み手はそのままです。作者の計測では、描けるものは変わらず、絵が全体に少し変わるだけです。
 下げたときは、setup の画面、サーバーの起動時の表示、Web のページ（Images のタブ）がそのことを知らせます。
 同じ種なら、stable-diffusion.cpp がモデルのカードのコマンドで作る画像と同じ画像になります（LPIPS 0.03 以内）。
-Qwen-Image-2.1-Turbo の重みは Qwen Research License で、自由なソフトウェアのライセンスではありません。商用に使う前にそのライセンスを読んでください。
+`--images qwen-image-base` なら、Turbo の元のモデルの Qwen-Image-2.1 で作ります（`qwen-image-base-uncensored` なら文の読み手が上の AtomicChat のものになります）。別のファイルになるのは画像のモデルだけで、VAE、文の読み手、画像の読み手は Turbo と同じものを使います。
+既定は 40 ステップ（Qwen の diffusers の pipeline の既定で、ガイダンスはなし）で、1 枚に Turbo の約 5 倍の時間がかかります。リクエストの `steps`（2〜100）で変えられます。各ステップの sigma は diffusers の scheduler と同じ式で、画像の大きさに合わせてずらします。
+Qwen-Image-2.1-Turbo と Qwen-Image-2.1 の重みは Qwen Research License で、自由なソフトウェアのライセンスではありません。商用に使う前にそのライセンスを読んでください。
 
-サーバーは `POST /v1/images/generations`（OpenAI の images API の形。`seed` も受けます）で画像を作り、Web のページには「Images」のタブが出ます。
+サーバーは `POST /v1/images/generations`（OpenAI の images API の形。`seed` と、Qwen-Image-2.1 では `steps` も受けます）で画像を作り、Web のページには「Images」のタブが出ます。
 `POST /v1/images/edits`（OpenAI の形の multipart で `image` か `image[]`、または JSON の `images: [{"image_url": ...}]`）は、参照画像（3 枚まで、PNG・JPEG・GIF・BMP）を元に画像を作ります。参照画像を書き換えたり、その中の人や物を主題にしたりできます。`size` を `auto` にすると、参照画像の縦横比で約 1024×1024 画素にします。Web のページでも、Images のタブで画像を添付すると編集になります。
 会話からも画像を作れます。`/v1/chat/completions` に `"strata_images": true` を付けると（Web のページは付けます）、モデルに `generate_image` と `edit_image` の道具を渡し、モデルが呼ぶとサーバーが画像を作ってその場に出します。`edit_image` は、会話の最後の画像（添付したものか、会話で作ったもの）を直します。`/v1/responses` では OpenAI の組み込みの `image_generation` の道具を付けると同じことをし、作った画像を `image_generation_call` の項目（`result` に PNG の base64）で返します。
 大きさは一辺 256〜2048 ピクセルです。辺が 16 の倍数でない大きさ（1920×1080 など）は、16 の倍数に切り上げた大きさ（1920×1088）で作って真ん中を切り出し、Web のページはそのことを知らせます。

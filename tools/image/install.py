@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Niko1221 and the Strata contributors
 # SPDX-FileCopyrightText: 2026 MistVVK and the XeStrata contributors
 # SPDX-License-Identifier: LGPL-3.0-or-later AND MIT
-"""tools/image/install.py - image generation (Qwen-Image-2.1-Turbo) for an existing XeStrata install: downloads and
-checks the three model files for the image engine setup compiled with the text engine (engine/strata-image), and writes
-the "images" section into a run config (or prints it), as setup.py --images does inside the normal setup (setup.py's
-setup_images).
+"""tools/image/install.py - image generation (Qwen-Image-2.1-Turbo or Qwen-Image-2.1) for an existing XeStrata
+install: downloads and checks the model files for the image engine setup compiled with the text engine
+(engine/strata-image), and writes the "images" section into a run config (or prints it), as setup.py --images does
+inside the normal setup (setup.py's setup_images).
 
     python tools/image/install.py --config ~/.config/xestrata/xestrata-iq3_xxs.json
     python tools/image/install.py --quant Q6_K --print
@@ -12,7 +12,7 @@ setup_images).
 --gpu-policy auto|keep|shrink|unload: what the text model does during an image job (serve/images.py).
 --quant: the image model's size, lowered (after its text encoder's) when the files would not fit the RAM the config's
 text model leaves, unless --ssd-offload on.
---model qwen-image-turbo|qwen-image-turbo-uncensored: the image model (setup.py --images); -uncensored: its text
+--model qwen-image-turbo|qwen-image-base[-uncensored]: the image model (setup.py --images); -uncensored: its text
 encoder with the refusal direction removed.  The text encoder is Q8_0, or lowered first.
 """
 from __future__ import annotations
@@ -24,6 +24,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+import qimage as QI  # noqa: E402  (beside this file)
 
 
 def main(argv=None) -> int:
@@ -34,10 +35,10 @@ def main(argv=None) -> int:
     ap.add_argument("--gpu-policy", choices=["auto", "keep", "shrink", "unload"], default="auto")
     ap.add_argument("--ssd-offload", choices=["on", "off"],
                     help="on: keep the size even when the RAM is short (the rest read from the SSD)")
-    ap.add_argument("--model", choices=["qwen-image-turbo", "qwen-image-turbo-uncensored"],
-                    default="qwen-image-turbo",
-                    help="qwen-image-turbo (default) or qwen-image-turbo-uncensored: its text encoder (Qwen3-VL-8B) "
-                         "with the refusal direction removed")
+    ap.add_argument("--model", choices=list(QI.IMAGE_MODELS), default=QI.DEFAULT_MODEL,
+                    help="qwen-image-turbo (default: Qwen-Image-2.1-Turbo, 8 steps) or qwen-image-base "
+                         "(Qwen-Image-2.1, 40 steps); -uncensored: the text encoder (Qwen3-VL-8B) with the refusal "
+                         "direction removed")
     ap.add_argument("--print", action="store_true", help="print the images section instead of writing it")
     ap.add_argument("--yes", action="store_true")
     a = ap.parse_args(argv)
