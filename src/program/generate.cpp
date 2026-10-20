@@ -1260,12 +1260,13 @@ private:
 /// #463 without the stall (upstream d69424c9, #764): a verify window takes the adaptive tier's previous swaps only once
 /// they are this many windows old, and then waits for their copies (which have landed by then).  The window that first
 /// computes a swapped-in expert on the GPU depends only on the window count, as with #463's wait, so the answers are as
-/// reproducible.  Default 1 = #463 (the very next window waits for the copies); STRATA_ADAPT_LAG=2 is opt-in.  The batch
-/// paths are not lagged.
+/// reproducible.  Default 2 (upstream 2725c23f7 on sm_86 and sm_60; on XeStrata's GPUs the RTX 4070's decode 59.1 ->
+/// 64.2 tok/s, IQ2_XS, and the B70's equal, IQ3_XXS 1K and 32K within 0.7%, 2026-10-20); STRATA_ADAPT_LAG=1 is #463's
+/// (the very next window waits for the copies).  The batch paths are not lagged.
 int adapt_lag() {
     static const int v = [] {
         const char* e = std::getenv("STRATA_ADAPT_LAG");
-        return e ? std::max(1, (int) std::strtol(e, nullptr, 10)) : 1;
+        return e ? std::max(1, (int) std::strtol(e, nullptr, 10)) : 2;
     }();
     return v;
 }
