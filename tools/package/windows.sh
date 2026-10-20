@@ -99,11 +99,11 @@ for p in Gui Cli; do
   dotnet publish "$src/windows/launcher/$p/$p.fsproj" -c Release -r win-x64 --self-contained false -o /build/launcher
 done
 
-# Python's embeddable distribution and the Windows wheels of requirements.txt (without cmake and ninja, which build
-# the engine from source on Linux) and colorama, which tqdm takes on Windows
+# Python's embeddable distribution and the Windows wheels of requirements.txt (the build helpers are in
+# requirements-build.txt) and colorama, which tqdm takes on Windows
 curl -fsSL -o "/build/python-$python_ver-embed-amd64.zip" \
   "https://www.python.org/ftp/python/$python_ver/python-$python_ver-embed-amd64.zip"
-grep -vE '^(cmake|ninja)==' "$src/requirements.txt" > /build/requirements.txt
+cp "$src/requirements.txt" /build/requirements.txt
 echo colorama >> /build/requirements.txt
 pyver=$(echo "$python_ver" | cut -d. -f1-2)
 python3 -m pip download -q --only-binary=:all: --platform win_amd64 --python-version "$pyver" --implementation cp \

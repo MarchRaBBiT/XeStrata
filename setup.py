@@ -220,8 +220,11 @@ LLAMA_CPP_ZIP = f"https://github.com/ggml-org/llama.cpp/archive/{LLAMA_CPP_COMMI
 
 # KV bytes per context token and attention layer: 8-bit 1056, rotated 4-bit 576, hybrid K8V4 (8-bit K, 4-bit V) 816
 KV_CELL_BYTES = {"q4_0": 576, "k8v4": 816}
-PY_PACKAGES = ["numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "cmake", "ninja", "pillow", "psutil"]
+PY_PACKAGES = ["numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "pillow", "psutil"]
 REQUIREMENTS = ROOT / "requirements.txt"   # the same packages and their dependencies, pinned (upstream #214)
+# the build helpers, installed into .venv only when an engine or image-encoder build finds none (upstream a24253783)
+BUILD_PACKAGES = ["cmake", "ninja"]
+BUILD_REQUIREMENTS = ROOT / "requirements-build.txt"
 
 MODELS: dict[str, dict[str, Any]] = {
     "Q2_0": {"about": "2-bit, the fastest", "download_gb": 66.4, "ram_gb": 48, "arena_gb": 34.0},
@@ -2279,7 +2282,7 @@ def req_name(line: str) -> str:
 
 
 def requirement_lines(path: Path | None = None) -> list[str]:
-    """requirements.txt's requirements, comments and blank lines left out."""
+    """A requirements file's requirements, comments and blank lines left out."""
     lines = []
     for raw in (path or REQUIREMENTS).read_text(encoding="utf-8").splitlines():
         line = raw.split("#", 1)[0].strip()
@@ -2706,10 +2709,16 @@ def vulkan_missing() -> list:
 
 
 def cmake_build(src, bdir, target, defs, env=None):
-    """Configure `src` in `bdir` and build `target` (a name, or a list of names)."""
+    """Configure `src` in `bdir` and build `target` (a name, or a list of names).  The build helpers already there
+    are used (the distribution's, offline too); a missing one is installed from requirements-build.txt."""
+    build_packages = requirement_lines(BUILD_REQUIREMENTS) if BUILD_REQUIREMENTS.exists() else BUILD_PACKAGES
+    missing = [package for package in build_packages if find_tool(req_name(package)) is None]
+    if missing:
+        pip_install(missing, "CMake and Ninja build tools")
     cmake, ninja = find_tool("cmake"), find_tool("ninja")
     if cmake is None or ninja is None:
-        fail("cmake / ninja not found after installing them", "run: .venv python -m pip install cmake ninja")
+        fail("cmake / ninja not found after installing them",
+             "run: .venv python -m pip install -r requirements-build.txt")
     conf = [cmake, "-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={ninja}", "-S", str(src), "-B", str(bdir),
             "-DCMAKE_BUILD_TYPE=Release", *defs]
     # the tools on PATH too: ggml's Vulkan backend configures its shader generator as a separate CMake project
@@ -3989,7 +3998,7 @@ def update_install(have: list) -> int:
         return 0
     if not PACKAGED:
         pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES,
-                    "numpy, jinja2, regex, pyyaml, tqdm, requests, cmake, ninja, pillow, psutil")
+                    "numpy, jinja2, regex, pyyaml, tqdm, requests, pillow, psutil")
     update_installed_engine()
     mtp_done: set = set()
     for cfg_path in have:
@@ -4509,7 +4518,7 @@ def prepare_engine(a, gpu: dict, vision: str) -> tuple[Path, Path, str, list]:
         ok("the distribution's Python packages (installed with XeStrata's package)")
     else:
         pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES,
-                    "numpy, jinja2, regex, pyyaml, tqdm, requests, cmake, ninja, pillow, psutil")
+                    "numpy, jinja2, regex, pyyaml, tqdm, requests, pillow, psutil")
 
     # ---- 4. the engine
     step(4, "the Strata engine")

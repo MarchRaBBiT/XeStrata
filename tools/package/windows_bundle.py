@@ -39,7 +39,7 @@ ONEMATH_DLLS = ("onemath.dll", "onemath_blas_mklgpu.dll")
 # what a Windows PC brings (the Visual C++ runtime, which xestrata.exe checks for) and what must never be carried
 FORBIDDEN = ("vcruntime*.dll", "msvcp*.dll", "concrt*.dll", "ucrtbase*.dll", "api-ms-win-*.dll", "nvcuda.dll",
              "nvml.dll", "cublas*.dll", "cudart*.dll", "mkl_*.dll", "amdhip64*.dll", "amd_comgr*.dll")
-# the Python packages the 7z carries (requirements.txt without the build tools, and colorama, which tqdm takes on
+# the Python packages the 7z carries (requirements.txt, and colorama, which tqdm takes on
 # Windows): a wheel not named here stops the script
 WHEELS = ("numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "pillow", "psutil", "markupsafe", "certifi",
           "charset-normalizer", "charset_normalizer", "idna", "urllib3", "colorama")
