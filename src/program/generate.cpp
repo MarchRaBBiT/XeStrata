@@ -4748,10 +4748,22 @@ int main(int argc, char** argv) {
             bin.batch_mtp = batch_mtp;
             bin.mtp_serial = batch_mtp_serial();
             bin.adapt_async = o.adapt_async == 1;
+            {   // upstream f680a80d8: two NVIDIA cards run --batch faster in one serial group (2x A4000, aggregate tok/s
+                // +12..18% at 2 to 8 slots); every GPU of the split on CUDA, as upstream's NVIDIA build.  Unmeasured
+                // here (no machine with two NVIDIA cards).  STRATA_BATCH_GROUPS_NV_SERIAL=0 keeps the pipeline
+                const char* nv = std::getenv("STRATA_BATCH_GROUPS_NV_SERIAL");
+                bool all_cuda = strata::core::device_info(strata::core::current_device()).backend == "CUDA";
+                for (const auto& st : stages) all_cuda = all_cuda && strata::core::device_info(st->dev).backend == "CUDA";
+                bin.nv_serial_faster = all_cuda && (nv == nullptr || nv[0] != '0');
+            }
             const auto r = strata::program::batch_groups::resolve(bin);
             if (r.from_auto) {
                 o.batch_groups = r.groups;
-                if (r.serial != strata::program::batch_groups::Serial::None)
+                if (r.serial == strata::program::batch_groups::Serial::TwoCardsSerialFaster)
+                    std::fprintf(stderr, "strata generate: --batch-groups auto: 1 group of %d slots - %s; --batch-groups "
+                                         "%d asks for the pipelined groups\n", o.batch,
+                                 strata::program::batch_groups::serial_what(r.serial), r.would_be);
+                else if (r.serial != strata::program::batch_groups::Serial::None)
                     std::fprintf(stderr, "strata generate: --batch-groups auto: 1 group of %d slots - %s does not run "
                                          "in pipelined groups; --batch-groups %d would pipeline them and turn it off\n",
                                  o.batch, strata::program::batch_groups::serial_what(r.serial), r.would_be);
