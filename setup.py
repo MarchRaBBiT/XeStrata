@@ -31,9 +31,10 @@ answers, no questions), --setup (install another model / change settings instead
 --host 0.0.0.0 --api-key KEY (reach it from other devices on your network), --experimental-speed-projection on|off
 (EXPERIMENTAL, off by default),
 --models-dir DIR, --gguf-dir DIR (use GGUF files you already have), --check (only check this PC), --check-update
-(whether a newer XeStrata release is out), --images qwen-image|no (image generation: Qwen-Image-2.1-Turbo on
-XeStrata's image engine, POST /v1/images/generations; --image-quant Q4_K_M|Q6_K|Q8_0, --image-text-encoder
-stock|uncensored, --image-ssd-offload on|off, --image-gpu-policy auto|keep|shrink|unload).
+(whether a newer XeStrata release is out), --images qwen-image-turbo|qwen-image-turbo-uncensored|no (image
+generation: Qwen-Image-2.1-Turbo on XeStrata's image engine, POST /v1/images/generations; -uncensored: its text
+encoder with the refusal direction removed; --image-quant Q4_K_M|Q6_K|Q8_0, --image-ssd-offload on|off,
+--image-gpu-policy auto|keep|shrink|unload).
 
 Setup recommends, it never forces: the recommended answers are the defaults (--yes, or Enter), and a bigger choice
 than it recommends - a longer context, a size it thinks will not fit - is kept, with what it risks.  With --yes, an
@@ -3068,11 +3069,11 @@ def text_ram_gb(args: list, ram: float, model: str | None = None) -> float:
 
 
 def setup_images(a, gpu: dict, models_dir: Path, eng: Path, text_gb: float | None = None) -> dict | None:
-    """--images qwen-image: Qwen-Image-2.1-Turbo's four files for the image engine in `eng` -> the run config's
-    "images" section (serve/images.py); None for --images no, or when not wanted after all.  `text_gb`: the RAM the
-    text model keeps (text_ram_gb): the denoiser's and the text encoder's quants are the largest whose files fit the
-    rest (the user's decision of 2026-10-15), the encoder lowered first (2026-10-19), or the ones asked for with
-    --image-ssd-offload on (what does not fit read from the SSD)."""
+    """--images qwen-image-turbo[-uncensored]: Qwen-Image-2.1-Turbo's four files for the image engine in `eng` -> the
+    run config's "images" section (serve/images.py); None for --images no, or when not wanted after all.  `text_gb`:
+    the RAM the text model keeps (text_ram_gb): the denoiser's and the text encoder's quants are the largest whose
+    files fit the rest (the user's decision of 2026-10-15), the encoder lowered first (2026-10-19), or the ones asked
+    for with --image-ssd-offload on (what does not fit read from the SSD)."""
     if not a.images or a.images == "no":
         return None
     remove_old_image_engine()
@@ -3081,7 +3082,7 @@ def setup_images(a, gpu: dict, models_dir: Path, eng: Path, text_gb: float | Non
     if not exe.exists():
         fail(f"the image engine is missing ({exe})", "run setup again to compile the engine (it builds both)")
     asked = a.image_quant or QI.DEFAULT_QUANT
-    enc = getattr(a, "image_text_encoder", None) or QI.DEFAULT_TEXT_ENCODER
+    enc = QI.IMAGE_MODELS[a.images][1]
     tasked = QI.DEFAULT_TEXT_QUANT
     ssd = getattr(a, "image_ssd_offload", None) == "on"
     quant, tquant = asked, tasked
@@ -3123,9 +3124,8 @@ def setup_images(a, gpu: dict, models_dir: Path, eng: Path, text_gb: float | Non
         dst = QI.local_path(models_dir, name)
         download(QI.file_url(name, hf_endpoint()), dst, f"image model: {Path(path).name}")
         verify_sha256(dst, size, sha)
-    cfg = QI.image_config(quant, exe, models_dir, uma=bool((gpu or {}).get("integrated")),
-                          policy=a.image_gpu_policy or "auto", ssd_offload=ssd, text_encoder=enc,
-                          text_quant=tquant)
+    cfg = QI.image_config(quant, exe, models_dir, model=a.images, uma=bool((gpu or {}).get("integrated")),
+                          policy=a.image_gpu_policy or "auto", ssd_offload=ssd, text_quant=tquant)
     if lowered:
         cfg["quant_lowered"] = lowered
     ok(f"image generation: {quant}, text encoder {tquant}, GPU policy {cfg['gpu_policy']}")
@@ -5025,16 +5025,14 @@ def main() -> int:
                     help="the most image tokens a picture becomes (default 1024 with the encoder on the GPU, 300 on "
                          "the CPU): more reads small text and charts better, and takes longer to encode; remembered "
                          "for this model")
-    ap.add_argument("--images", choices=["qwen-image", "no"],
+    ap.add_argument("--images", metavar="qwen-image-turbo|qwen-image-turbo-uncensored|no",
                     help="image generation (POST /v1/images/generations): Qwen-Image-2.1-Turbo on XeStrata's image "
-                         "engine; no = take it out of the config")
+                         "engine, its text encoder Unsloth's Qwen3-VL-8B or, -uncensored, AtomicChat's with its "
+                         "refusal direction removed (either Q8_0, lowered first (Q6_K, Q5_K, Q4_K) when the files "
+                         "would not fit the RAM the text model leaves); no = take it out of the config")
     ap.add_argument("--image-quant", choices=["Q4_K_M", "Q6_K", "Q8_0"],
                     help="the image model's size (default Q8_0, lowered when its files would not fit the RAM the "
                          "text model leaves, after its text encoder; the GPU's memory does not decide it)")
-    ap.add_argument("--image-text-encoder", choices=["stock", "uncensored"],
-                    help="the image model's text encoder: stock (default: Unsloth's Qwen3-VL-8B) or uncensored "
-                         "(AtomicChat's Qwen3-VL-8B with its refusal direction removed); either Q8_0, lowered first "
-                         "(Q6_K, Q5_K, Q4_K) when the files would not fit the RAM the text model leaves")
     ap.add_argument("--image-ssd-offload", choices=["on", "off"],
                     help="on: keep the image model's and its text encoder's sizes even when the RAM is short, and "
                          "read what does not fit from the SSD (slower); off (default): smaller sizes instead")
@@ -5175,10 +5173,17 @@ def main() -> int:
                          "community format to the data folder's records/; ARGS after it go to that tool (--long, "
                          "--clients N, --compare DIR). --bench is XeStrata's own measurement")
     ap.add_argument("--skip-build", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--image-text-encoder", help=argparse.SUPPRESS)   # removed: --images names the encoder
     a = ap.parse_args()
     if a.license == "contrib-icpx":
         fail("--license contrib-icpx: the contrib-icpx mode (Intel oneAPI's icpx) was removed",
              "use --license contrib (contrib-llvm: intel/llvm, for Intel, AMD and NVIDIA GPUs), or --license free")
+    images = ("no", *_qimage().IMAGE_MODELS)
+    if a.image_text_encoder is not None or (a.images is not None and a.images not in images):
+        fail(f"--images {a.images}: no such choice" if a.image_text_encoder is None
+             else "--image-text-encoder was removed: --images names the text encoder",
+             "use --images " + "|".join(images) + " (qwen-image is qwen-image-turbo, --image-text-encoder "
+             "uncensored is qwen-image-turbo-uncensored)")
     if a.source:
         os.environ["STRATA_SOURCE"] = a.source
     if a.inspect:                                      # upstream #911: headers only, nothing is installed

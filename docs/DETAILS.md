@@ -1310,13 +1310,13 @@ the model uses interleaved M-RoPE.
 
 ## Image generation (optional)
 
-`./setup.sh --images qwen-image` sets up image generation with Qwen-Image-2.1-Turbo beside the text model (upstream 0.1.44).
+`./setup.sh --images qwen-image-turbo` sets up image generation with Qwen-Image-2.1-Turbo beside the text model (upstream 0.1.44).
 Images are made by XeStrata's own image engine, `strata-image`, which setup builds with the text engine: the same SYCL kernels, on every maker's GPU.
 Setup downloads the image model, its VAE, its text encoder (Qwen3-VL-8B) and, for the edits, its vision encoder (Qwen3-VL's mmproj), and adds an `"images"` section to the config.
 The image model is Q8_0 by default. The engine streams from RAM the layers that do not fit in VRAM, so the GPU's memory does not decide the size.
 Its text encoder is Q8_0 by default too. The RAM decides both: when the four files (the vision encoder for the edits among them) and the engine's own (about 20.2 GB with both at Q8_0) do not fit the RAM the text model leaves, setup first lowers the text encoder (Q6_K, Q5_K, Q4_K), and only when that does not fit either takes the largest image model that fits (Q6_K, Q4_K_M), with the largest text encoder that fits beside it.
 With `--image-ssd-offload on` it keeps both sizes chosen and reads what does not fit from the SSD (slower).
-With `--image-text-encoder uncensored` the text encoder is AtomicChat's Qwen3-VL-8B with its refusal direction removed, its size chosen the same way; the image model, the VAE and the vision encoder stay the same. Its authors measured no change in what it can draw, only a small overall shift in the pictures.
+With `--images qwen-image-turbo-uncensored` the text encoder is AtomicChat's Qwen3-VL-8B with its refusal direction removed, its size chosen the same way; the image model, the VAE and the vision encoder stay the same. Its authors measured no change in what it can draw, only a small overall shift in the pictures.
 When setup lowers it, setup, the server at start and the web page (the Images tab) say so.
 With the same seed it makes the image stable-diffusion.cpp makes with the model card's command (within an LPIPS of 0.03).
 Qwen-Image-2.1-Turbo's weights are under the Qwen Research License, not a free software license: read it before any commercial use.

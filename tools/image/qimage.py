@@ -5,7 +5,8 @@
 Hugging Face revisions, and the run config's "images" section for XeStrata's own image engine (strata-image, built
 with the text engine).
 
-setup.py (--images qwen-image) and tools/image/install.py use these pieces; serve/images.py runs the result.
+setup.py (--images qwen-image-turbo[-uncensored]) and tools/image/install.py use these pieces; serve/images.py runs
+the result.
 
   files     the denoiser (DiT) quant (Unsloth's LPIPS vs bf16: Q4_K_M 0.153, Q6_K 0.055, Q8_0 0.036) and the
             Qwen3-VL-8B text encoder's (AtomicChat's LPIPS of the pictures vs a bf16 encoder: Q8_0 0.031, Q6_K
@@ -13,9 +14,9 @@ setup.py (--images qwen-image) and tools/image/install.py use these pieces; serv
             not decide them; the RAM does.  Both Q8_0 when the four files fit the RAM the text model leaves; else
             the encoder is lowered first, then the DiT (fit_ram, the user's decision of 2026-10-19), unless the SSD
             offload is on (then the sizes asked for, the rest read from the SSD).  The encoder is Unsloth's
-            (stock) or, with --image-text-encoder uncensored, AtomicChat's abliterated one (the same tensors, its
-            refusal direction projected out).  The VAE (bf16).  Each file is checked against the SHA-256 the
-            Hugging Face API lists for it at the pinned revision.
+            (--images qwen-image-turbo) or, with --images qwen-image-turbo-uncensored, AtomicChat's abliterated
+            one (the same tensors, its refusal direction projected out).  The VAE (bf16).  Each file is checked
+            against the SHA-256 the Hugging Face API lists for it at the pinned revision.
 """
 from __future__ import annotations
 
@@ -64,8 +65,12 @@ FILES = {
 }
 QUANTS = ("Q4_K_M", "Q6_K", "Q8_0")
 TEXT_QUANTS = ("Q4_K", "Q5_K", "Q6_K", "Q8_0")      # the text encoder's, smallest first like QUANTS
-TEXT_ENCODERS = ("stock", "uncensored")             # --image-text-encoder
+TEXT_ENCODERS = ("stock", "uncensored")
 DEFAULT_TEXT_ENCODER = "stock"
+# setup's --images choices -> (the run config's model_name, the text encoder)
+IMAGE_MODELS = {"qwen-image-turbo": ("qwen-image-2.1-turbo", "stock"),
+                "qwen-image-turbo-uncensored": ("qwen-image-2.1-turbo-uncensored", "uncensored")}
+DEFAULT_MODEL = "qwen-image-turbo"
 LICENSE_NOTE = ("Qwen-Image-2.1-Turbo is under the Qwen Research License (not Apache 2.0): "
                 "https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/main/LICENSE - read it before you use the "
                 "images commercially")
@@ -115,11 +120,11 @@ def local_path(models_dir: Path, name: str) -> Path:
     return Path(models_dir) / MODEL_DIR / Path(FILES[name][1]).name
 
 
-def image_config(quant: str, exe: Path, models_dir: Path, *, uma: bool = False, policy: str = "auto",
-                 ssd_offload: bool = False, text_encoder: str = DEFAULT_TEXT_ENCODER,
-                 text_quant: str = DEFAULT_TEXT_QUANT) -> dict:
-    """The run config's "images" section (serve/images.py reads it)."""
-    return {"model_name": "qwen-image-2.1-turbo", "exe": str(exe), "quant": quant,
+def image_config(quant: str, exe: Path, models_dir: Path, *, model: str = DEFAULT_MODEL, uma: bool = False,
+                 policy: str = "auto", ssd_offload: bool = False, text_quant: str = DEFAULT_TEXT_QUANT) -> dict:
+    """The run config's "images" section for `model` (IMAGE_MODELS; serve/images.py reads it)."""
+    name, text_encoder = IMAGE_MODELS[model]
+    return {"model_name": name, "exe": str(exe), "quant": quant,
             "diffusion_model": str(local_path(models_dir, quant)), "vae": str(local_path(models_dir, "vae")),
             "llm": str(local_path(models_dir, text_file(text_encoder, text_quant))), "text_encoder": text_encoder,
             "text_quant": text_quant,

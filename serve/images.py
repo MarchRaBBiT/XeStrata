@@ -172,7 +172,7 @@ def parse_edit_request(req: dict, images: list[bytes], cfg: dict) -> dict:
     BMP) as job["refs"].  size "auto" (or none): the first reference's shape at about 1024 x 1024 pixels, its sides
     multiples of SIZE_STEP."""
     if not cfg.get("vision"):
-        raise ImageRequestError("edits need the vision encoder: run setup with --images qwen-image again")
+        raise ImageRequestError("edits need the vision encoder: run setup with --images qwen-image-turbo again")
     if not images:
         raise ImageRequestError("image: one reference image or more")
     max_refs = int(cfg.get("max_refs") or 3)

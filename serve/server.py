@@ -5957,7 +5957,7 @@ def make_handler(svc: Service):
             if gen is None:
                 self._json(404, {"error": {"type": "invalid_request_error", "code": "images_not_set_up",
                                            "message": "image generation is not set up on this server (run setup "
-                                                      "with --images qwen-image)"}})
+                                                      "with --images qwen-image-turbo)"}})
                 return
             job = images_api.parse_request(req, gen.cfg)        # ImageRequestError (a ValueError): 400
             self._image_job(gen, job)
@@ -5971,7 +5971,7 @@ def make_handler(svc: Service):
             if gen is None:
                 self._json(404, {"error": {"type": "invalid_request_error", "code": "images_not_set_up",
                                            "message": "image generation is not set up on this server (run setup "
-                                                      "with --images qwen-image)"}})
+                                                      "with --images qwen-image-turbo)"}})
                 return
             body = self._body()
             ctype = self.headers.get("Content-Type", "") or ""

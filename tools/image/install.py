@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later AND MIT
 """tools/image/install.py - image generation (Qwen-Image-2.1-Turbo) for an existing XeStrata install: downloads and
 checks the three model files for the image engine setup compiled with the text engine (engine/strata-image), and writes
-the "images" section into a run config (or prints it), as setup.py --images qwen-image does inside the normal setup
-(setup.py's setup_images).
+the "images" section into a run config (or prints it), as setup.py --images does inside the normal setup (setup.py's
+setup_images).
 
     python tools/image/install.py --config ~/.config/xestrata/xestrata-iq3_xxs.json
     python tools/image/install.py --quant Q6_K --print
@@ -12,7 +12,8 @@ the "images" section into a run config (or prints it), as setup.py --images qwen
 --gpu-policy auto|keep|shrink|unload: what the text model does during an image job (serve/images.py).
 --quant: the image model's size, lowered (after its text encoder's) when the files would not fit the RAM the config's
 text model leaves, unless --ssd-offload on.
---text-encoder stock|uncensored: the text encoder (setup.py --image-text-encoder), Q8_0 or lowered first.
+--model qwen-image-turbo|qwen-image-turbo-uncensored: the image model (setup.py --images); -uncensored: its text
+encoder with the refusal direction removed.  The text encoder is Q8_0, or lowered first.
 """
 from __future__ import annotations
 
@@ -33,8 +34,10 @@ def main(argv=None) -> int:
     ap.add_argument("--gpu-policy", choices=["auto", "keep", "shrink", "unload"], default="auto")
     ap.add_argument("--ssd-offload", choices=["on", "off"],
                     help="on: keep the size even when the RAM is short (the rest read from the SSD)")
-    ap.add_argument("--text-encoder", choices=["stock", "uncensored"],
-                    help="stock (default) or uncensored: Qwen3-VL-8B with its refusal direction removed")
+    ap.add_argument("--model", choices=["qwen-image-turbo", "qwen-image-turbo-uncensored"],
+                    default="qwen-image-turbo",
+                    help="qwen-image-turbo (default) or qwen-image-turbo-uncensored: its text encoder (Qwen3-VL-8B) "
+                         "with the refusal direction removed")
     ap.add_argument("--print", action="store_true", help="print the images section instead of writing it")
     ap.add_argument("--yes", action="store_true")
     a = ap.parse_args(argv)
@@ -43,8 +46,8 @@ def main(argv=None) -> int:
     if a.models_dir is None:
         data, _ = S.data_folder(None)
         a.models_dir = str(data / "models")
-    ns = argparse.Namespace(images="qwen-image", image_quant=a.quant, image_gpu_policy=a.gpu_policy, yes=a.yes,
-                            image_ssd_offload=a.ssd_offload, image_text_encoder=a.text_encoder)
+    ns = argparse.Namespace(images=a.model, image_quant=a.quant, image_gpu_policy=a.gpu_policy, yes=a.yes,
+                            image_ssd_offload=a.ssd_offload)
     path = Path(a.config) if a.config else None
     cfg = json.loads(path.read_text(encoding="utf-8-sig")) if path is not None and path.is_file() else {}
     eng = Path(cfg["exe"]).parent if cfg.get("exe") else ROOT / "engine"     # the text engine's folder
