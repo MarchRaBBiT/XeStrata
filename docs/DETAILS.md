@@ -527,11 +527,14 @@ It takes a file, a folder, a URL, `ms:owner/repo` (ModelScope) or `hf:owner/repo
 A name says little: Unsloth's `UD-IQ3_XXS` stores its routed experts at 3.22 bits per weight, `UD-Q4_K_XL` at 5.10, the original `Q2_0` at 2.25 and `IQ3_S` at 3.33.
 To download from a Hugging Face mirror, set `HF_ENDPOINT` (e.g. `HF_ENDPOINT=https://hf-mirror.com ./setup.sh`):
 the pinned revisions and the checks are the same, and the MTP tensors come from the same host.
+Every model file setup downloads has a fixed size and SHA-256 (upstream e193161de).
+When the server's size is not the pinned one, setup stops before the download; a downloaded file that does not match its SHA-256 is deleted and setup stops.
+When the pinned revision is gone from the repository, setup stops (for testing, `STRATA_ALLOW_UNPINNED=1` takes the current files without the check).
 
 **From ModelScope** (mainland China, upstream #908): every repository setup downloads from (the GSQ-RCO models, Swift 1.5, the Coder, Unsloth's files, and the original checkpoint the MTP draft layer is taken from) is on [ModelScope](https://www.modelscope.cn) under the same name, with the same files.
 Setup never switches to it by itself (a download that fails says how).
 Choose it with `--source modelscope` (`STRATA_SOURCE=modelscope`).
-ModelScope serves a repository's current files (no pinned revision), so each file is checked against the SHA-256 ModelScope publishes for it, and the MTP tensors against the pinned checkpoint's own hashes.
+ModelScope serves a repository's current files (no pinned revision), so each file is checked against its pinned SHA-256 (a file without one against the SHA-256 ModelScope publishes for it), and the MTP tensors against the pinned checkpoint's own hashes.
 The published SHA-256 is ModelScope's own statement: a changed upstream repository would carry its own hash.
 Setup says so when you choose it.
 

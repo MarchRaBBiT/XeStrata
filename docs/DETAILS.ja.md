@@ -508,11 +508,14 @@ setup の手順 5 は、ファイルを置く場所（`XeStrata-data/models/<大
 名前はあてになりません。Unsloth の `UD-IQ3_XXS` はエキスパートを 1 重みあたり 3.22 ビット、`UD-Q4_K_XL` は 5.10 ビット、元の `Q2_0` は 2.25 ビット、`IQ3_S` は 3.33 ビットで保存しています。
 Hugging Face のミラーから取るなら、`HF_ENDPOINT` を設定します（例: `HF_ENDPOINT=https://hf-mirror.com ./setup.sh`）。
 固定したリビジョンと確認は同じで、MTP のテンソルも同じホストから取ります。
+setup がダウンロードするモデルのファイルは、どれも大きさと SHA-256 を固定しています（upstream e193161de）。
+サーバーの大きさが固定したものと違えばダウンロードの前に止まり、ダウンロードしたファイルが SHA-256 と合わなければ消して止まります。
+固定したリビジョンがリポジトリから消えていれば止まります（試験のために `STRATA_ALLOW_UNPINNED=1` を設定すると、確かめずにいまのファイルを取ります）。
 
 **ModelScope から**（中国本土、upstream #908）: setup がダウンロードするリポジトリ（GSQ-RCO のモデル、Swift 1.5、Coder、Unsloth のファイル、MTP の下書きの層を取る元のチェックポイント）は、どれも [ModelScope](https://www.modelscope.cn) に同じ名前・同じファイルであります。
 setup は自分では切り替えません（ダウンロードに失敗したときに案内します）。
 `--source modelscope`（`STRATA_SOURCE=modelscope`）で選びます。
-ModelScope はリポジトリのいまのファイルを出す（リビジョンを固定できない）ので、各ファイルを ModelScope が公開する SHA-256 で確かめ、MTP のテンソルは固定したチェックポイントのハッシュで確かめます。
+ModelScope はリポジトリのいまのファイルを出す（リビジョンを固定できない）ので、各ファイルを固定した SHA-256 で（固定のないファイルは ModelScope が公開する SHA-256 で）確かめ、MTP のテンソルは固定したチェックポイントのハッシュで確かめます。
 公開されている SHA-256 は ModelScope 自身の申告なので、元のリポジトリが変われば、そのハッシュも変わります。
 setup は、選んだときにそう言います。
 
