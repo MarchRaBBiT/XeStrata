@@ -10,7 +10,7 @@ SPDX-License-Identifier: LGPL-3.0-or-later
 エンジンが GPU に求めること、移植した計算と検証の一覧をまとめます。
 使い方は [README](../README.ja.md) と [詳しい説明](DETAILS.ja.md)、ビルドの方法、setup の振る舞い、要るパッケージは [BUILD](BUILD.ja.md) にあります。
 
-XeStrata xe0.1.45-1 は、Strata のエンジンを Level Zero と SYCL で Intel の GPU に移したものです。版は、取り込んだ upstream の版と、その版での XeStrata のリリースの回数（1 から）を「-」でつないだものです（xe0.1.45-1。2026-10-13 より前のリリースは、2 回目から末尾に番号を足していました: xe0.1.40.2.1）。
+XeStrata xe0.2.0-beta-1 は、Strata のエンジンを Level Zero と SYCL で Intel の GPU に移したものです。版は、取り込んだ upstream の版と、その版での XeStrata のリリースの回数（1 から）を「-」でつないだものです（xe0.2.0-beta-1。upstream のベータ版のような先行の版は、deb と rpm のパッケージの版で「-」を「~」にします: 0.2.0~beta-1。正式版の 0.2.0-1 より前の版として扱われ、そのまま上げられます。2026-10-13 より前のリリースは、2 回目から末尾に番号を足していました: xe0.1.40.2.1）。
 移植の元は Strata 0.1.24（`3ce2523c2823687de5372be3af58534f56cbf286`）で、その後 0.1.39（`6f32ec07`）までの変更の一部を取り込んでいます
 （[Strata 0.1.38 の取り込み](#strata-0138-の取り込み)）。
 同じ SYCL のコードを、intel/llvm で NVIDIA の GPU 向けにもコンパイルします（contrib-llvm のビルド、[ビルド](BUILD.ja.md#ビルド)）。
@@ -31,6 +31,33 @@ Qwen3.8 の prompt は、xmx_gemm が動く GPU では FP16 の経路のまま�
 `STRATA_VRAM_LIMIT_MIB` はエンジンから見える VRAM を、`STRATA_MAX_ALLOC_MIB` は想定する最大の確保量を制限し、
 `STRATA_NO_XMX=1` は XMX を使わない経路を選ばせます。
 CPU 内蔵のグラフィックス（開発機では UHD 770）は、確認用の 2 つ目の実機として使います。
+
+## Strata 0.2.0-beta の取り込み
+
+upstream の Strata 0.1.45 から 0.2.0-beta（`3d1fb480`）までの変更を Xe に移しています。
+正式な 0.2.0 が出たら、その差分を足します。
+
+移したものの主なものは次のとおりです。
+
+- Gyro-S と Gyro-M（agentionai）: trellis 量子化の型（TQ2_T・TQK6・TQK7）と、エキスパートの Hadamard の回転。CPU（AVX2・AVX-512）と GPU（decode と prompt）で計算し、setup の一覧に載せる。pack の版は xs2。
+- setup: ダウンロードするモデルのファイルを大きさと SHA-256 で固定する。大きなファイルは複数の接続でダウンロードする。ビルドの道具（cmake・ninja）は実行時の requirements から分ける。SSD でも RAM に余裕があれば `--ple-io ram` を付ける。画像を読めるモデルでは画像を既定で入にする。
+- serve: 文脈に収まらない `max_tokens` は、400 にせず残りの余地まで縮める（`--no-fit-max-tokens` で以前のように断る）。
+- CPU のプールの既定のワーカーを、32 本とコンテナの CPU の割り当てまでにする。cgroup の RAM の判定では、きれいなページキャッシュを回収できるものに数える。
+- 適応の段で入れ替えたエキスパートは、既定で 2 つ目の窓から使う（`STRATA_ADAPT_LAG=2`、RTX 4070 で decode +8.6%）。
+- 画像の読み手（strata-vision）は、文章のモデルの語彙とヘッダーだけを読む（Gyro の型のファイルでも開ける）。
+
+この取り込みの間に XeStrata の側で直したもの:
+
+- VRAM のエキスパートの入れ替えの位置で窓を切るのは、CPU と GPU で丸めが違う層があるモデルだけにする（`STRATA_ADAPT_CUT=0|1`）。Qwen3.8 の 4 つのファイルはすべての層が CPU と GPU で同じビットになるので、窓を切らない。同じ文で decode は RTX 4070 で 59.3 → 61.3、B70 で 80.5 → 86.9 tok/s。
+
+upstream v0.2.0-beta と 3 社の GPU で比べました（generate は 5 つのモデルファイル、serve、通常使用、画像の生成）。
+IQ3_XXS の generate では、B70 は upstream の `sycl/` 版より prefill が 1.7〜3.0 倍、decode が 18〜38% 速いです。
+RTX 4070 は prefill が 1.02〜1.14 倍、decode が 23〜34% 速いです。RX 9060 XT は prefill が 2.1〜2.7 倍、decode は同等から 8% 速いです。
+画像の生成（1024x1024、8 ステップ）は、XeStrata が B70 で 7.6 秒、RTX 4070 で 13.9 秒、RX 9060 XT で 22.5 秒、upstream がそれぞれ 52.0 秒、26.6 秒、73.7 秒です。
+
+移していないのは、upstream の新しいアプリ（`apps/`）とターミナル（`strata_cli`・`strata_control`）、配布の変更（インストーラー、署名つきの配信、エンジンの部品の更新）、NVFP4、upstream の `sycl/`、
+CUDA と HIP だけの速さの経路（sm_120 の切り替えなど）、HIP の仮想メモリでの `--kv-grow`（intel/llvm の HIP のアダプターに仮想メモリの拡張がない）、
+GGUF をその場で読む省 RAM の形（写さずに使うエキスパートと I/O の先読み）、upstream の試験の道具と記録です。
 
 ## Strata 0.1.45 の取り込み
 

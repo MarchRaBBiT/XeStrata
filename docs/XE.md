@@ -10,7 +10,7 @@ This document records how XeStrata's engine runs on Intel GPUs and how that was 
 How to use it is in the [README](../README.md) and the [details](DETAILS.md); how to build it, what setup does and the packages it needs, in [BUILD](BUILD.md).
 The Japanese version ([XE.ja.md](XE.ja.md)) is the original; this is its translation.
 
-XeStrata xe0.1.45-1 runs Strata's engine on Intel GPUs through Level Zero and SYCL; its version is the upstream version it has integrated and the count of XeStrata's releases on it, from 1, joined by a hyphen (xe0.1.45-1; releases before 2026-10-13 added a number from the second one on: xe0.1.40.2.1).
+XeStrata xe0.2.0-beta-1 runs Strata's engine on Intel GPUs through Level Zero and SYCL; its version is the upstream version it has integrated and the count of XeStrata's releases on it, from 1, joined by a hyphen (xe0.2.0-beta-1; on an upstream pre-release such as the beta, the deb and rpm packages take "~" for its "-": 0.2.0~beta-1, a version before the release 0.2.0-1, which upgrades it; releases before 2026-10-13 added a number from the second one on: xe0.1.40.2.1).
 It is ported from Strata 0.1.24 (`3ce2523c2823687de5372be3af58534f56cbf286`) and carries part of the changes up to 0.1.39 (`6f32ec07`)
 ([Integration through Strata 0.1.38](#integration-through-strata-0138)).
 The same SYCL code is compiled with intel/llvm for NVIDIA GPUs as well (the contrib-llvm build, [Build and run](BUILD.md#build-and-run)).
@@ -29,6 +29,33 @@ A smaller card is checked by making the B70 look like one.
 `STRATA_VRAM_LIMIT_MIB` caps the VRAM the engine sees, `STRATA_MAX_ALLOC_MIB` the largest allocation it assumes, and
 `STRATA_NO_XMX=1` takes the paths without the matrix engines.
 The processor's own graphics (a UHD 770 on the development machine) is a second, real configuration for checks.
+
+## Integration through Strata 0.2.0-beta
+
+The changes of upstream Strata 0.1.45 to 0.2.0-beta (`3d1fb480`) are carried into Xe.
+When the release 0.2.0 is out, what it adds is carried in as well.
+
+The main ones:
+
+- Gyro-S and Gyro-M (agentionai): the trellis quantizations (TQ2_T, TQK6, TQK7) and the experts' Hadamard rotation, computed on the CPU (AVX2, AVX-512) and the GPU (decode and prompt), and listed by setup. The pack version is xs2.
+- setup: the model files it downloads are pinned by size and SHA-256; large files are downloaded over several connections; the build tools (cmake, ninja) are apart from the run-time requirements; `--ple-io ram` also on an SSD when the RAM has room; pictures on by default for the models that read them.
+- serve: a `max_tokens` that does not fit in the context is shortened to the room left instead of answered with 400 (`--no-fit-max-tokens` refuses it as before).
+- The CPU pool's default workers are at most 32 and the container's CPU quota; the cgroup RAM check counts the clean page cache as reclaimable.
+- The adaptive tier's swapped-in experts are used from the second window by default (`STRATA_ADAPT_LAG=2`, decode +8.6% on the RTX 4070).
+- The picture reader (strata-vision) reads only the text model's vocabulary and header (so a file of Gyro's types opens).
+
+Fixed on XeStrata's side meanwhile:
+
+- The windows are cut at the positions of the VRAM experts' swaps only for a model with a layer that the CPU and the GPU round differently (`STRATA_ADAPT_CUT=0|1`). Every layer of Qwen3.8's four files gives the same bits on the CPU and the GPU, so their windows are not cut: on one text, decode 59.3 -> 61.3 tok/s on the RTX 4070 and 80.5 -> 86.9 on the B70.
+
+Compared with upstream v0.2.0-beta on the three makers' GPUs (generate on five model files, serve, everyday use, image generation).
+In IQ3_XXS's generate, the B70 is 1.7 to 3.0 times as fast in prefill as upstream's `sycl/` port and 18 to 38% faster in decode;
+the RTX 4070 1.02 to 1.14 times in prefill and 23 to 34% faster in decode; the RX 9060 XT 2.1 to 2.7 times in prefill and equal to 8% faster in decode.
+Image generation (1024x1024, 8 steps) takes XeStrata 7.6 s on the B70, 13.9 s on the RTX 4070 and 22.5 s on the RX 9060 XT, upstream 52.0 s, 26.6 s and 73.7 s.
+
+Not carried in: upstream's new app (`apps/`) and terminal (`strata_cli`, `strata_control`), the changes to distribution (installers, signed delivery, engine part updates), NVFP4, upstream's `sycl/`,
+the CUDA- and HIP-only speed paths (the sm_120 switches and others), `--kv-grow` on HIP's virtual memory (intel/llvm's HIP adapter lacks the virtual memory extension),
+the low-RAM form that reads the GGUF in place (experts used without a copy, I/O read-ahead), and upstream's test tools and records.
 
 ## Integration through Strata 0.1.45
 
