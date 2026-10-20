@@ -3352,7 +3352,7 @@ def load_settings() -> dict:
 def save_settings(s: dict) -> None:
     try:
         settings_path().parent.mkdir(parents=True, exist_ok=True)
-        settings_path().write_text(json.dumps(s, indent=1), encoding="utf-8")
+        write_private(settings_path(), json.dumps(s, indent=1))
     except OSError as e:
         warn(f"could not save {settings_path()} ({e})")
 
@@ -3595,12 +3595,26 @@ def model_config_files(folder: Path) -> list:
     return [p for p in folder.glob("xestrata-*.json") if not p.name.endswith(".shared-settings.json")]
 
 
+def write_private(path: Path, text: str) -> None:
+    """`text` into `path`, written whole (a temporary file moved over the old one) and readable by this user only
+    (#33: a run config holds the server's api_key, and the umask's 0644 let every local account read it)."""
+    tmp = path.with_name(path.name + ".tmp")
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
+        f.write(text)
+    os.chmod(tmp, 0o600)                               # a .tmp left from before keeps its own mode through O_CREAT
+    os.replace(tmp, path)
+
+
+def copy_private(src: Path, dst: Path) -> None:
+    """A copy of `src` readable by this user only (#33: the .bak of a run config holds its api_key too)."""
+    shutil.copyfile(src, dst)
+    os.chmod(dst, 0o600)
+
+
 def write_config(path: Path, cfg: dict):
     """A run config, written whole or not at all (upstream #459): to a temporary file first, then moved over the old
     one, so a setup stopped half-way (a closed window, a full disk) never leaves an empty config behind."""
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
+    write_private(path, json.dumps(cfg, indent=1))
 
 
 def readable_config(path: Path) -> bool:
@@ -4617,7 +4631,7 @@ def write_setup_config(cfg_path: Path, cfg: dict, source: Path | None = None, gp
     if cfg_path.is_file() and old != cfg:
         bak = cfg_path.with_name(cfg_path.name + ".bak")
         try:
-            shutil.copyfile(cfg_path, bak)
+            copy_private(cfg_path, bak)
         except OSError as e:
             warn(f"could not keep a copy of the earlier {cfg_path.name} ({e.strerror or e})")
             bak = None

@@ -172,8 +172,11 @@ def save(path: str | Path, cfg: dict) -> Path:
     path = Path(path)
     bak = path.with_name(path.name + ".bak")
     shutil.copyfile(path, bak)
+    os.chmod(bak, 0o600)                               # #33: the config and its copy hold the api_key: this user's only
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
+        f.write(json.dumps(cfg, indent=1))
+    os.chmod(tmp, 0o600)
     os.replace(tmp, path)
     return bak
 
