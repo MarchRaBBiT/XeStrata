@@ -751,11 +751,32 @@ def run(cmd, cwd=None, env=None, check=True, quiet=False):
     r = subprocess.run([str(c) for c in cmd], cwd=cwd, env=env,
                        stdout=subprocess.PIPE if quiet else None, stderr=subprocess.STDOUT if quiet else None,
                        text=True)
+    env = dict(os.environ if env is None else env)
+    env.setdefault("STRATA_EXIT_WITH_PARENT", "1")     # mtp_fetch.py ends with setup (upstream #3257: a cancel left it)
     if check and r.returncode != 0:
         if quiet and r.stdout:
             say(r.stdout[-4000:])
         fail(f"command failed (exit {r.returncode}): {Path(str(cmd[0])).name}")
     return r
+
+
+def fetch_mtp(mtp: Path, env: dict, tries: int = 3):
+    """The ~5 GB of MTP tensors (tools/mtp_fetch.py).  A timeout or a dropped connection stops one run, not the
+    install (upstream #3214 #3193): it is run again, and each run continues where the last one stopped."""
+    cmd = [sys.executable, str(ROOT / "tools" / "mtp_fetch.py"), "fetch", "--out", str(mtp)]
+    env = {**env, "STRATA_SOURCE": model_source()}
+    for n in range(1, tries + 1):
+        r = run(cmd, env=env, check=False)
+        rc = 0 if r is None else r.returncode              # (a test double answers None)
+        if rc == 0:
+            return
+        if n < tries:
+            warn(f"the draft layer's download stopped (exit {rc}); trying again, it continues where it stopped "
+                 f"({n + 1} of {tries})")
+            time.sleep(5)
+    fail(f"the draft layer's download keeps stopping (exit {rc}): the connection to Hugging Face is slow or drops",
+         "run setup again - what is downloaded is kept. If it still stops, set STRATA_SOURCE=modelscope "
+         "(setup --source modelscope) to read the same files from ModelScope")
 
 
 def out(cmd):
@@ -5657,8 +5678,7 @@ def main() -> int:
     if corrupt or not (rt / "experts.bin").exists():
         say("  The MTP draft layer (speculative decoding, ~2x faster output) comes from the original Qwen checkpoint:")
         say("  only its ~5 GB of MTP tensors are downloaded.")
-        run([sys.executable, str(ROOT / "tools" / "mtp_fetch.py"), "fetch", "--out", str(mtp)],
-            env={**env, "STRATA_SOURCE": model_source()})
+        fetch_mtp(mtp, env)
         run([sys.executable, str(ROOT / "tools" / "mtp_pack.py"), "--src", str(mtp), "--experts", "q2_0",
              "--out", str(mtp / "mtp-q2_0.gguf")], env=env)
         run([sys.executable, str(ROOT / "tools" / "mtp_rt.py"), "--gguf", str(mtp / "mtp-q2_0.gguf"), "--out", str(rt)],
