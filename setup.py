@@ -3178,13 +3178,19 @@ def kv_streaming_wanted(model, ctx, kv, ram) -> bool:
     return ctx >= 65536 and ram >= MODELS[model]["ram_gb"] + kv_streaming_ram_gb(ctx, kv) + 1
 
 
+#: The draft layer (MTP) takes about 1 GB of graphics memory out of the expert cache (upstream 671f4573d): its files
+#: and the draft head (809 + 184 MiB in the engine's start log on the B70 and the RTX 4070, Qwen3.8, 2026-10-20).
+MTP_VRAM_GB = 1.0
+
+
 def low_ram_gpu_gb(model, vram_gb, ctx=32768, kv="int8") -> float:
     """About how many GB of the model's experts the GPU's cache holds: its VRAM less ~5 GB for the dense weights,
     buffers and a 32K context's KV cache (upstream's figure, not measured on an Arc card: unverified), less the KV
-    cache of a longer context (in VRAM in the low-RAM mode: its RAM has no room for KV streaming)."""
+    cache of a longer context (in VRAM in the low-RAM mode: its RAM has no room for KV streaming) and ~1 GB for the
+    draft layer."""
     kv_tok = 13 * KV_CELL_BYTES.get(kv, 1056)           # bytes per context token: 12 QSA layers + the draft layer
     longer = max(0, ctx - 32768) * kv_tok / 1e9
-    return max(0.0, min(MODELS[model]["arena_gb"], vram_gb - 5 - longer))
+    return max(0.0, min(MODELS[model]["arena_gb"], vram_gb - 5 - MTP_VRAM_GB - longer))
 
 
 def low_ram_gpu_share(model, vram_gb, ctx=32768, kv="int8") -> float:
@@ -3202,7 +3208,7 @@ def low_ram_resident(model, ram, vram_gb, ctx=32768, kv="int8") -> bool:
 
 def low_ram_fits(model, ram, vram_gb) -> bool:
     """In the low-RAM mode: the experts the GPU does not hold fit the RAM left beside the rest (as file cache)."""
-    return ram - 6 + max(0.0, vram_gb - 5) >= MODELS[model]["arena_gb"]
+    return ram - 6 + max(0.0, vram_gb - 5 - MTP_VRAM_GB) >= MODELS[model]["arena_gb"]
 
 
 def model_file(fam: dict, model: str, i: int) -> str:
