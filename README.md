@@ -114,6 +114,8 @@ To add another model later, run `xestrata --setup`.
 | Coder | **IQ1_M** | 58 GB | 32 GB | fast | good at code, weaker elsewhere |
 | Unsloth | **UD-IQ4_XS** | 94 GB | 48 GB | slow with less than about 80 GB of RAM | between IQ3_S and UD-Q4_K_XL |
 | Unsloth (experimental) | **UD-Q4_K_XL** | 111 GB | 48 GB | slowest | best |
+| Gyro | **Gyro-S** | 58 GB | 28 GB of RAM and VRAM | slow | below the 2-3-bit sizes |
+| Gyro | **Gyro-M** | 92 GB | 35 GB of RAM and VRAM | slow | about IQ3_XXS |
 
 All of the model's experts ([How it works](#how-it-works)) are kept in RAM. With less RAM than that but a GPU with a
 lot of VRAM, it runs in the **low-RAM mode**: the experts are read from the model files instead of copied into RAM
@@ -135,6 +137,10 @@ The two Unsloth files read the experts that do not fit the RAM from the SSD whil
 - **[Unsloth's UD-Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF)** (experimental): a 4-bit file
   of the original. Its experts take 77 GB, and it is slower than the 2-3-bit sizes
   ([details](docs/DETAILS.md#or-unsloths-ud-q4_k_xl-experimental)).
+- **[Gyro](https://huggingface.co/agentionai/Qwen3.8-Flash-Next-Gyro-GGUF)**: agentionai's quantization of the original.
+  Its experts are stored in trellis formats (TQ1_0, TQ2_0), for PCs with little memory: Gyro-S needs 28 GB and Gyro-M
+  35 GB of RAM and VRAM together. The files also hold the n-gram table, so the downloads are larger. The model's
+  license is Qwen's.
 
 OrcaRouter's Flash-Next Uncensored IQ3_XXS is not in setup's menu.
 How to convert it is in [docs/ORCA.md](docs/ORCA.md).

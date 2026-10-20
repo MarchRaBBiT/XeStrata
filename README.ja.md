@@ -110,6 +110,8 @@ RAM がそれより少ない PC では、Qwen3.8-Flash-Next の Coder（32 GB）
 | Coder | **IQ1_M** | 58 GB | 32 GB | 速い | コードでは良い、ほかは弱い |
 | Unsloth | **UD-IQ4_XS** | 94 GB | 48 GB | RAM が約 80 GB より少ないと遅い | IQ3_S と UD-Q4_K_XL の間 |
 | Unsloth（実験的） | **UD-Q4_K_XL** | 111 GB | 48 GB | いちばん遅い | いちばん良い |
+| Gyro | **Gyro-S** | 58 GB | RAM と VRAM で 28 GB | 遅い | 2〜3 ビットの大きさより低い |
+| Gyro | **Gyro-M** | 92 GB | RAM と VRAM で 35 GB | 遅い | IQ3_XXS くらい |
 
 モデルのエキスパート（[しくみ](#しくみ)）は、すべて RAM に置きます。RAM が目安より少なくても、GPU の VRAM が大きければ
 **省 RAM モード**で動きます。このモードでは、エキスパートを RAM にコピーせずにモデルのファイルから読みます
@@ -127,6 +129,9 @@ Unsloth の 2 つは、RAM に入りきらないエキスパートを答えて�
   エキスパートが 59.5 GB あり、RAM が約 80 GB 以上あればすべて RAM に置けます（[詳細](docs/DETAILS.ja.md#unsloth-の-ud-iq4_xs)）。
 - **[Unsloth の UD-Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF)**（実験的）: 元のモデルの 4 ビット版です。
   エキスパートが 77 GB あり、2〜3 ビットの大きさより遅くなります（[詳細](docs/DETAILS.ja.md#unsloth-の-ud-q4_k_xl実験的)）。
+- **[Gyro](https://huggingface.co/agentionai/Qwen3.8-Flash-Next-Gyro-GGUF)**: agentionai による元のモデルの量子化です。
+  エキスパートを trellis の形式（TQ1_0・TQ2_0）で格納し、メモリの少ない PC 向けです。要るメモリは RAM と VRAM の合計で、Gyro-S は 28 GB、Gyro-M は 35 GB です。
+  ファイルには n-gram の表も入っているので、ダウンロードは大きくなります。モデルのライセンスは Qwen のものです。
 
 OrcaRouter の Flash-Next Uncensored IQ3_XXS は、setup のメニューにはありません。
 変換の手順は [docs/ORCA.ja.md](docs/ORCA.ja.md) にあります。
