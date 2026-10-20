@@ -38,6 +38,7 @@
 #include "strata/kernels/cpu/pool.hpp"
 #include "strata/platform/aux_cpus.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
+#include "strata/kernels/cpu/canon_expert.hpp"
 #include "strata/kernels/ngram.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 #include "strata/kernels/s2_expert_grouped.hpp"
@@ -1276,6 +1277,24 @@ int adapt_lag() {
 /// would take an expert the host already evicted as resident (upstream 3f2db5e2's case: the evicted expert computed on
 /// the CPU from no activation, or read from a slot being refilled).  set_always_publish turns both off.
 bool adapt_device_table_lags() { return adapt_nowait() || adapt_lag() > 1; }
+
+/// Whether a decode window ends at the adaptive tier's next position (#152).  A swap moves experts between the CPU and
+/// the GPU, and the window is cut there so every row sees the same residency whatever the window size - needed only
+/// where the two sides round differently: a layer canon_layer accepts gives the same bits on either side (78dfd31d2),
+/// so a pack of such layers only (Qwen3.8's four files) keeps its full windows.  The cut cost the RTX 4070 8% more
+/// windows on one text at temperature 0.7 (97 against 89 rounds, 2026-10-20).  STRATA_ADAPT_CUT=0|1 forces it.
+bool adapt_cuts_windows() {
+    static const bool v = [] {
+        const char* e = std::getenv("STRATA_ADAPT_CUT");
+        if (e && *e) return e[0] != '0';
+        const auto& lay = strata::kernels::cpu::expert_layout();
+        if (!lay.native || lay.fmt.empty()) return true;
+        for (const auto& f : lay.fmt)
+            if (f.had_gu || !strata::kernels::cpu::canon_layer(f)) return true;
+        return false;
+    }();
+    return v;
+}
 
 /// STRATA_TRACE=1: the VRAM left at a step of the startup (finds what fills the card after the cache is sized)
 void mem_mark(const char* where) {
@@ -11441,7 +11460,7 @@ int main(int argc, char** argv) {
                         chain_n = policy.chain(T, p_mtp, chain_n, cm);
                     }
                 }
-                if (adapt_period > 0) {   // the window ends at the adaptive tier's next position
+                if (adapt_period > 0 && adapt_cuts_windows()) {   // the window ends at the adaptive tier's next position
                     const int lim = (int) std::min<int64_t>(S, (p / adapt_period + 1) * adapt_period - p);
                     T = std::min(T, lim);
                     chain_n = std::max(0, std::min(chain_n, lim - T));
@@ -12411,7 +12430,7 @@ int main(int argc, char** argv) {
         if (o.adapt_every > 0 && o.adapt_swaps > 0) drive.d.usage.assign((size_t) (g.n_layers * g.n_expert), 0.0f);
         // the adaptive tier at fixed positions of the text: it counts the routing of the rows whose input was the
         // text (Verifier::add_routing) and swaps when a window ends on a multiple of 4 x --adapt-every tokens, the
-        // windows cut there.  Counted per window (every row, the rejected drafts' too) and swapped every N windows,
+        // windows cut there where the CPU and the GPU round differently (adapt_cuts_windows).  Counted per window (every row, the rejected drafts' too) and swapped every N windows,
         // which experts ran on the CPU and which on the GPU (they round differently) depended on the drafting, and a
         // greedy text with windows of 4 parted from the one with windows of 1 by the fifth token (2026-10-16, RTX 4070).
         // The cut windows cost decode 1.3% there (16 prompts on one text: 57.2 -> 56.5 tok/s); every 32 or 64 tokens
@@ -12602,7 +12621,8 @@ int main(int argc, char** argv) {
             // its end the window takes only the rows that fit (the admission checked the prompt and max_new, which a
             // full window can overrun)
             int room = (int) std::min<int64_t>(o.spec, o.max_context - p);
-            if (adapt_period > 0) room = (int) std::min<int64_t>(room, (p / adapt_period + 1) * adapt_period - p);
+            if (adapt_period > 0 && adapt_cuts_windows())
+                room = (int) std::min<int64_t>(room, (p / adapt_period + 1) * adapt_period - p);
             T = std::min(T, room);
             // --lookup-chain: what followed an earlier occurrence of the context + the MTP's drafts, after them
             int chain_n = 0, cm = 0;
