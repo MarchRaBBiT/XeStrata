@@ -1282,7 +1282,10 @@ bool adapt_device_table_lags() { return adapt_nowait() || adapt_lag() > 1; }
 /// the GPU, and the window is cut there so every row sees the same residency whatever the window size - needed only
 /// where the two sides round differently: a layer canon_layer accepts gives the same bits on either side (78dfd31d2),
 /// so a pack of such layers only (Qwen3.8's four files) keeps its full windows.  The cut cost the RTX 4070 8% more
-/// windows on one text at temperature 0.7 (97 against 89 rounds, 2026-10-20).  STRATA_ADAPT_CUT=0|1 forces it.
+/// windows on one text at temperature 0.7 (97 against 89 rounds, 2026-10-20).  What it gives up: serve's prompts from
+/// the second turn on are not computed in the canonical rows, so there the swaps' timing changes the rounding and a
+/// greedy chat can differ from run to run (the fourth turn did on the RTX 4070, 1K, 2026-10-20; cut, two runs gave the
+/// same text).  STRATA_ADAPT_CUT=0|1 forces it.
 bool adapt_cuts_windows() {
     static const bool v = [] {
         const char* e = std::getenv("STRATA_ADAPT_CUT");
