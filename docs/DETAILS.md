@@ -322,7 +322,7 @@ The engine's options (added to the settings' `args`):
 | `--adapt-mib-per-token N` | the swaps copy at most N MiB for each token read since the last one (default 48; 0: no bound) |
 | `--mmap-experts` | read the experts from the model file instead of loading them into RAM |
 | `--no-pcie-split` | the CPU computes every expert VRAM does not hold |
-| `--pool-workers N` | the CPU threads that compute experts (default one fewer than the physical cores) |
+| `--pool-workers N` | the CPU threads that compute experts (default one fewer than the physical cores, at most 32; in a Linux container with a CPU quota (cgroup), at most one fewer than the quota) |
 | `--prompt-chunk N` | the most tokens prefill computes at once (default 4096; 0: none at once) |
 | `--max-t N` | the decode window's most tokens (default 8) |
 | `--spec N` | the most tokens of a window checking the MTP layer's drafts (default 3: two drafts; 0: off) |
