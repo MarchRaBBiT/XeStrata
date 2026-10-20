@@ -427,6 +427,8 @@ The model files go next to the folder so that a new copy of XeStrata, unpacked e
 The place is remembered per user (`~/.config/xestrata/settings.json`); `--data-dir` chooses another.
 To move the files later, move the folder yourself and run `./setup.sh --setup --data-dir <new place>` once:
 setup finds the files there and writes the configs again.
+Given a new place with `--data-dir` while model files are elsewhere, setup leaves them where they are and uses them there, and the new place takes the new downloads (it asks whether to move them when it can ask).
+`--move-data` moves them into the new place; `--set-default-data-dir` remembers the new place without moving anything.
 
 ---
 

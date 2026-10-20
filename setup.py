@@ -3457,10 +3457,30 @@ def data_folder_path(requested: str | None, settings: dict) -> Path:
         Path(settings["data_dir"]) if settings.get("data_dir") else default_data_dir()
 
 
-def data_folder(requested: str | None) -> tuple:
-    """(the data folder, folders on other drives that still hold model files).  Moves the model files of this folder
-    and of earlier Strata folders on the same drive into the data folder, and points their configs there."""
+def library_size_gb(folder: Path) -> float:
+    """The GB of model files (models, packs, mtp) in a data folder."""
+    return sum(folder_size(folder / d) for d in ("models", "packs", "mtp") if (folder / d).exists()) / 1e9
+
+
+def same_folder(a: Path, b: Path) -> bool:
+    """The same folder, however it is spelled (a different case, a short 8.3 name, a link)."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def data_folder(requested: str | None, move: bool = False, yes: bool = True, set_default: bool = False) -> tuple:
+    """(the data folder, folders that still hold model files and are used where they are).
+
+    Without --data-dir, or with the folder in use: moves the model files of this folder and of earlier Strata folders
+    on the same drive into the data folder, and points their configs there.  upstream 9d2cb4f6d: a --data-dir that
+    names a NEW folder moves nothing by itself.  When model files already exist elsewhere (the remembered data folder
+    among them), they are kept where they are and found from there, and the new folder takes the new downloads (the
+    answer with --yes or when nobody can answer); `move` (--move-data, or the answer "move") moves them in.  Only a
+    move, --set-default-data-dir, or a PC with no model files changes the remembered data folder."""
     settings = load_settings()
+    remembered = data_folder_path(None, settings)
     dest = data_folder_path(requested, settings)
     try:
         dest.mkdir(parents=True, exist_ok=True)
@@ -3469,9 +3489,32 @@ def data_folder(requested: str | None) -> tuple:
             fail(f"cannot use {dest} for the model files ({e})", "choose another folder with --data-dir")
         warn(f"cannot use {dest} for the model files ({e}): keeping them in {ROOT}")
         dest = ROOT
+    sources = [*([] if PACKAGED else [ROOT]), *other_installs(settings)]
+    if requested and not same_folder(dest, remembered):
+        sources.append(remembered)
+        held: list = []
+        for folder in sources:
+            if not same_folder(folder, dest) and has_data(folder) and not any(same_folder(folder, h) for h in held):
+                held.append(folder)
+        movable = [f for f in held if same_drive(f, dest)]
+        if movable and not move and not yes:
+            gb = sum(library_size_gb(f) for f in movable)
+            size = f"{gb:.0f} GB" if gb >= 10 else f"{gb:.1f} GB"
+            say()
+            say(f"  Your models are in {', '.join(str(f) for f in movable)} ({size}).")
+            say(f"  keep) leave them there and use {dest} only for new downloads")
+            say(f"  move) move your {size} of models to {dest}")
+            move = ask(f"Move your {size} of models to the new folder, or use it only for new downloads?",
+                       ["keep", "move"], "keep", False) == "move"
+        if held and not move:
+            for folder in held:
+                say(f"  your model files stay in {folder}; {dest} is used for new downloads")
+            if set_default:
+                save_settings({**settings, "data_dir": str(dest)})
+            return dest, held
     elsewhere = []
-    for folder in [*([] if PACKAGED else [ROOT]), *other_installs(settings)]:
-        if folder == dest or not has_data(folder):
+    for folder in dict.fromkeys(sources):
+        if same_folder(folder, dest) or not has_data(folder):
             continue
         if not same_drive(folder, dest):
             elsewhere.append(folder)                    # another drive: used where it is (no 70 GB copy)
@@ -4973,6 +5016,11 @@ def main() -> int:
                                       "keys: key1,key2")
     ap.add_argument("--data-dir", help="where the model files go (~70-120 GB): default XeStrata-data next to this "
                                        "folder, remembered for every Strata folder on this PC")
+    ap.add_argument("--move-data", action="store_true",
+                    help="with --data-dir: move the model files already on this PC into the new folder (without it "
+                         "nothing is moved: the old files stay usable and the new folder gets the new downloads)")
+    ap.add_argument("--set-default-data-dir", action="store_true",
+                    help="with --data-dir: remember the new folder as the data folder without moving anything")
     ap.add_argument("--models-dir", help="where the GGUF files go (default: <data folder>/models)")
     ap.add_argument("--gguf-dir", help="use GGUF files you already have (a folder with every shard: "
                                        "<name>-00001-of-0000N.gguf ... -0000N-of-0000N.gguf)")
@@ -5125,7 +5173,7 @@ def main() -> int:
     if a.check and not (a.bench or a.bench_verbose or a.bench_original_compat is not None or a.update):
         data, elsewhere = data_folder_path(a.data_dir, load_settings()), []
     else:
-        data, elsewhere = data_folder(a.data_dir)      # the model files: in the data folder, found from any copy
+        data, elsewhere = data_folder(a.data_dir, a.move_data, a.yes, a.set_default_data_dir)   # found from any copy
     roots = [data, *elsewhere]
     if a.models_dir is None:
         a.models_dir = str(data / "models")
