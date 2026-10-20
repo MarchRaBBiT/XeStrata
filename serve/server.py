@@ -2537,6 +2537,8 @@ class Vision:
                              "file://host/...) are not read")
         if path and os.path.isfile(path):
             try:
+                if os.path.getsize(path) > IMAGE_URL_MAX:   # #27: not pulled into memory whole (a model file, a log)
+                    raise ValueError(f"the image file is over {IMAGE_URL_MAX >> 20} MiB")
                 return Path(path).read_bytes()
             except OSError as e:
                 raise ValueError(f"the image could not be read from {path} ({e})") from None
@@ -5932,6 +5934,7 @@ def make_handler(svc: Service):
                         url = url.get("url")
                     if not isinstance(url, str) or not url:
                         raise ValueError("images: [{\"image_url\": a data: URL, an http(s) URL or a path}]")
+                    self._no_local_sources([url])     # #27: as the chat routes, before anything is read
                     files.append(Vision.load(url))
             job = images_api.parse_edit_request(req, [Vision.normalize(d) for d in files], gen.cfg)
             self._image_job(gen, job)
@@ -6086,8 +6089,11 @@ def make_handler(svc: Service):
             in (["*"]: every page) could name any file and, CORS allowing, read what the model says about it.  data:
             and http(s) images are the page's own to send; files come from Strata's own page, a trusted origin or a
             client that is no browser.  ValueError (a 400)."""
-            if self._foreign_origin() and any(not src.startswith(("data:", "http://", "https://"))
-                                              for src in images_of(messages)):
+            self._no_local_sources(images_of(messages))
+
+        def _no_local_sources(self, sources):
+            """_no_local_images for a list of image sources (the chat routes', and #27 /v1/images/edits')."""
+            if self._foreign_origin() and any(not src.startswith(("data:", "http://", "https://")) for src in sources):
                 raise ValueError("a web page of another origin cannot have a file on this computer read as an "
                                  "image: send it as a data: URL (or add the page's origin to the config's "
                                  "trusted_origins)")
