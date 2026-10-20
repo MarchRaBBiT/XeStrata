@@ -6,8 +6,8 @@ project(XeStrata LANGUAGES CXX)
 if(NOT CMAKE_SYSTEM_NAME MATCHES "^(Linux|Windows)$")
   message(FATAL_ERROR "XeStrata builds for Linux and Windows")
 endif()
-set(STRATA_UPSTREAM_VERSION "0.1.45")
-set(STRATA_UPSTREAM_COMMIT "a0116b2")
+set(STRATA_UPSTREAM_VERSION "0.2.0-beta")
+set(STRATA_UPSTREAM_COMMIT "3d1fb48")
 # XeStrata's version follows the upstream version it has integrated, marked "xe" so it is not taken for upstream's.
 # XESTRATA_REVISION counts XeStrata's releases on that upstream version from 1, as a Debian revision does, and the
 # version is <upstream>-<revision> everywhere: the version name (the tag, what the engine says) xe<upstream>-<revision>
@@ -16,6 +16,10 @@ set(STRATA_UPSTREAM_COMMIT "a0116b2")
 set(XESTRATA_REVISION 1)
 set(XESTRATA_VERSION "${STRATA_UPSTREAM_VERSION}-${XESTRATA_REVISION}")
 set(STRATA_VERSION_NAME "xe${XESTRATA_VERSION}")
+# The packages' version: an upstream pre-release (0.2.0-beta) with "~" for its "-" (0.2.0~beta), which deb and rpm
+# sort before the release it leads to (0.2.0), so the release's package upgrades it.  The version name keeps the "-":
+# a git tag cannot hold a "~".
+string(REPLACE "-" "~" XESTRATA_PACKAGE_UPSTREAM "${STRATA_UPSTREAM_VERSION}")
 add_compile_definitions(STRATA_VERSION="${STRATA_VERSION_NAME}"
   STRATA_BACKEND="xe" STRATA_UPSTREAM_VERSION="${STRATA_UPSTREAM_VERSION}"
   STRATA_UPSTREAM_COMMIT="${STRATA_UPSTREAM_COMMIT}")

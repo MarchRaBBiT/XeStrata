@@ -167,7 +167,7 @@ install(CODE "
 
 # ---- CPack
 set(CPACK_PACKAGE_NAME xestrata)
-set(CPACK_PACKAGE_VERSION ${STRATA_UPSTREAM_VERSION})
+set(CPACK_PACKAGE_VERSION ${XESTRATA_PACKAGE_UPSTREAM})
 set(CPACK_PACKAGE_VENDOR "MistVVK and the XeStrata contributors")
 set(CPACK_PACKAGE_CONTACT "MistVVK <jffyc82pzv@privaterelay.appleid.com>")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Qwen3.8-Flash-Next on a PC: a GPU, system RAM and the CPU")
