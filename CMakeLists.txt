@@ -951,6 +951,14 @@ if(STRATA_NATIVE_EXPERTS)
       add_test(NAME native_expert_parity_${pair_name} COMMAND native_expert_parity --synthetic ${pair})
       set_tests_properties(native_expert_parity_${pair_name} PROPERTIES TIMEOUT 120)
     endforeach()
+    # APR (prism.hadamard, upstream fbf045eb6): a Hadamard-folded expert, the GPU rotation (float and the prompt path's
+    # FP16) against the CPU's, and the folded expert on the GPU and the CPU against the float reference
+    foreach(pair q4_K/q8_0 iq3_xxs/iq4_nl)
+      string(REPLACE "/" "_" pair_name "${pair}")
+      add_test(NAME native_expert_parity_hadamard_${pair_name}
+               COMMAND native_expert_parity --synthetic-hadamard ${pair})
+      set_tests_properties(native_expert_parity_hadamard_${pair_name} PROPERTIES TIMEOUT 120)
+    endforeach()
     # a pair native_expert_supported refuses on purpose (IQ4_NL gate/up) is refused, not run
     add_test(NAME native_expert_parity_refuses_iq4_nl_gate COMMAND native_expert_parity --synthetic iq4_nl/q8_0)
     set_tests_properties(native_expert_parity_refuses_iq4_nl_gate PROPERTIES WILL_FAIL TRUE)
@@ -967,6 +975,16 @@ if(STRATA_BUILD_TESTS)
   target_link_libraries(expert_multi_test PRIVATE strata_kernels_cpu)
   add_test(NAME expert_multi_test COMMAND expert_multi_test)
   set_tests_properties(expert_multi_test PROPERTIES SKIP_RETURN_CODE 77)   # a CPU without the AVX-512 kernel
+  if(STRATA_NATIVE_EXPERTS)
+    # the CPU trellis kernels (tq_cpu.hpp, Gyro; upstream d0a02fe42): AVX2 / AVX-512 vs the scalar kernel bit for bit,
+    # plain and with the Hadamard rotation; against ggml-cpu's vec_dot and to_float only on a ggml with the trellis
+    # types (agention's fork); `tq_cpu_parity --bench` is the micro-benchmark
+    add_executable(tq_cpu_parity src/kernels/cpu/tq_cpu_parity.cpp)
+    target_link_libraries(tq_cpu_parity PRIVATE strata_kernels_cpu)
+    add_test(NAME tq_cpu_parity COMMAND tq_cpu_parity)
+    add_test(NAME tq_cpu_parity_avx2 COMMAND ${CMAKE_COMMAND} -E env STRATA_FORCE_AVX2=1 $<TARGET_FILE:tq_cpu_parity>)
+    set_tests_properties(tq_cpu_parity tq_cpu_parity_avx2 PROPERTIES TIMEOUT 300)
+  endif()
 
   add_executable(expert_parity src/kernels/cpu/expert_parity.cpp)
   target_link_libraries(expert_parity PRIVATE strata_kernels_cpu)
