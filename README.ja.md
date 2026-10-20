@@ -187,6 +187,31 @@ GSQ-RCO の 2 つは、pfeifferj による[コミュニティの再現](https://
 BETA の 4 つの RAM の目安は、ダウンロードの大きさに約 8 GB を足したものです（GLM-5.3-Flash は RAM と VRAM の合計）。
 それより少ないと、RAM と VRAM に入らないエキスパートをモデルのファイルから読むので、遅くなります。
 
+### 画像の生成（任意）
+
+文章のモデルとは別に、画像を作るモデルを入れられます（`xestrata --setup` に `--images` を付けます）。
+どの文章のモデルとも組み合わせられ、画像は XeStrata 自身の画像のエンジンが作ります。
+
+| `--images` | モデル | 速さ | 向いていること |
+| --- | --- | --- | --- |
+| `qwen-image-turbo` | [Qwen-Image-2.1-Turbo](https://huggingface.co/unsloth/Qwen-Image-2.1-Turbo-GGUF) | 速い（8 ステップ） | ふだんの画像の生成と編集（**おすすめ**） |
+| `qwen-image-base` | [Qwen-Image-2.1](https://huggingface.co/unsloth/Qwen-Image-2.1-GGUF) | 遅い（40 ステップ、Turbo の約 5 倍） | Turbo の元のモデル。ステップ数を変えられる |
+
+`-uncensored` を付けると（`qwen-image-turbo-uncensored` など）、文の読み手が AtomicChat の拒否の方向を取り除いた Qwen3-VL-8B になります。
+
+| 画像のモデルの大きさ（`--image-quant`） | ダウンロード | RAM の目安 | VRAM |
+| --- | ---: | ---: | ---: |
+| Q8_0（既定） | 18.2 GB | 20 GB | 4 GB から |
+| Q6_K | 16.8 GB | 19 GB | 4 GB から |
+| Q4_K_M | 14.8 GB | 17 GB | 4 GB から |
+
+ダウンロードは、画像のモデル、文の読み手（Qwen3-VL-8B の Q8_0）、VAE、編集のための画像の読み手の合計です。
+RAM の目安は、文章のモデルとは別に要る量です。足りなければ setup は文の読み手を Q4_K まで下げ、それでも足りなければ画像のモデルを下げます（`--image-ssd-offload on` なら下げずに、入らない分を SSD から読みます）。
+VRAM が大きいほど速くなります。
+
+画像は `POST /v1/images/generations` と `/v1/images/edits`（OpenAI の形）、Web のページの Images のタブ、チャットから作れます（[詳細](docs/DETAILS.ja.md#画像の生成任意)）。
+Qwen-Image-2.1 の重みは Qwen Research License で、自由なソフトウェアのライセンスではありません。
+
 ## インストール
 
 ### Podman

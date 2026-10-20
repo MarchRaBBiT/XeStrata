@@ -201,6 +201,31 @@ The experts kept in the GPU's VRAM are not copied into RAM, so it runs when the 
 For the four BETA models, the RAM is about the download plus 8 GB (for GLM-5.3-Flash, the RAM and the VRAM together).
 With less, the experts that neither holds are read from the model file, which is slower.
 
+### Image generation (optional)
+
+Besides the text model, a model that makes images can be installed (`xestrata --setup` with `--images`).
+It goes with any text model, and the images are made by XeStrata's own image engine.
+
+| `--images` | Model | Speed | Good for |
+| --- | --- | --- | --- |
+| `qwen-image-turbo` | [Qwen-Image-2.1-Turbo](https://huggingface.co/unsloth/Qwen-Image-2.1-Turbo-GGUF) | fast (8 steps) | everyday images and edits (**recommended**) |
+| `qwen-image-base` | [Qwen-Image-2.1](https://huggingface.co/unsloth/Qwen-Image-2.1-GGUF) | slow (40 steps, about 5 times Turbo) | the model Turbo was made from; its steps can be changed |
+
+With `-uncensored` (`qwen-image-turbo-uncensored` and so on), the text encoder is AtomicChat's Qwen3-VL-8B with its refusal direction removed.
+
+| Image model size (`--image-quant`) | Download | RAM (about) | VRAM |
+| --- | ---: | ---: | ---: |
+| Q8_0 (default) | 18.2 GB | 20 GB | from 4 GB |
+| Q6_K | 16.8 GB | 19 GB | from 4 GB |
+| Q4_K_M | 14.8 GB | 17 GB | from 4 GB |
+
+The download is the image model, the text encoder (Qwen3-VL-8B Q8_0), the VAE and the vision encoder for the edits together.
+The RAM is what it takes besides the text model: when it is short, setup lowers the text encoder down to Q4_K, then the image model (with `--image-ssd-offload on` it keeps them and reads what does not fit from the SSD).
+More VRAM makes it faster.
+
+Images are made through `POST /v1/images/generations` and `/v1/images/edits` (OpenAI's shapes), the Images tab of the web page, and the chat ([details](docs/DETAILS.md#image-generation-optional)).
+Qwen-Image-2.1's weights are under the Qwen Research License, not a free software license.
+
 ## Install
 
 ### Podman
