@@ -87,7 +87,20 @@ In short, for when it is not there:
 - What changed, as what now works or is faster, in concrete terms (numbers where measured), ranked, at most five items a group.
 - No preamble, recap or closing, no tangents; facts only, no plans or alternatives (the stage line excepted).
 
-Each section starts with a line of the stage: 先行報: upstream との速さの比較は後で足す / Preliminary: the speed comparison with upstream follows.
+Each section starts with the IGC warning below (the user's decision, 2026-10-21; AGENTS.md, "Intel Graphics Compiler"), then a line of the stage: 先行報: upstream との速さの比較は後で足す / Preliminary: the speed comparison with upstream follows.
+The warning stays while Ubuntu 26.04 or Debian 13 ships an IGC from 2.27 to 2.30; the user decides when it goes.
+It names Podman and Fedora 44 as the way out, no other distribution's.
+
+```markdown
+> [!WARNING]
+> **Intel Arc B-series, Lunar Lake and Panther Lake on Linux:** the Intel graphics compiler (IGC) 2.27 to 2.30, which Ubuntu 26.04 and Debian 13 ship, miscompiles some GPU code. XeStrata turns the affected optimization off by itself, at a cost of up to 10% in the decode of short prompts. For full speed, install with **Podman** (below; its image brings a fixed IGC), or use **Fedora 44**.
+```
+
+```markdown
+> [!WARNING]
+> **Linux の Intel Arc B シリーズ・Lunar Lake・Panther Lake:** Ubuntu 26.04 と Debian 13 が入れる Intel のグラフィックスのコンパイラー（IGC）2.27〜2.30 は、GPU のコードの一部を誤ってコンパイルします。XeStrata は該当する最適化を自動で切るので動きますが、短い prompt の decode が最大 10% 遅くなります。本来の速さで使うには、**Podman** で入れる（下の手順。中の IGC は直った版です）か、**Fedora 44** を使ってください。
+```
+
 Show the notes to the user.
 
 ## 6. The AMD engines
