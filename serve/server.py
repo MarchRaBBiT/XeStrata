@@ -3646,7 +3646,9 @@ class Service:
         """The hardware sampler behind GET /metrics (serve/telemetry.py), recording this server's tok/s too."""
         if getattr(self, "telemetry", None) is None:
             from serve.telemetry import Telemetry
-            self.telemetry = Telemetry(extra=lambda: {"tok_s": self._tok_s(), "tok_s_mean": self._tok_s_mean(),
+            # an image job's seconds are no tok/s: the speed history has a gap there, not zeros
+            self.telemetry = Telemetry(extra=lambda: {"tok_s": None if self._image_running() else self._tok_s(),
+                                                      "tok_s_mean": self._tok_s_mean(),
                                                       "prefill_tok_s_mean": self._prefill_tok_s_mean()},
                                        gpu_pci=getattr(self, "gpu_pci", None),
                                        split_pci=getattr(self, "split_pci", None))
@@ -3654,6 +3656,9 @@ class Service:
                 # #1317: the quick frozen-engine check does not end an engine whose GPU is busy (a long prompt chunk on
                 # a slow card keeps the GPU at work while the host thread sleeps)
                 self.engine.gpu_busy = lambda: (self.telemetry.snapshot()["now"].get("gpu_util") or 0) >= 10
+
+    def _image_running(self) -> bool:
+        return self.images is not None and self.images.job is not None
 
     def _tok_s(self):
         """tok/s over the last RATE_WINDOW_S seconds.  Returns 0.0 while nothing is generating.  With parallel requests:
@@ -3766,14 +3771,20 @@ class Service:
                 live["state"] = "generating"
         if hasattr(self.engine, "replica_view"):        # opt-in replicas: each one's state and requests routed to it
             live["replicas"] = self.engine.replica_view()
+        image = self.images.live() if self.images is not None else None
+        if image is not None:                           # an image job in the GPU's turn: its stage and steps
+            live["image"] = image
+        # the image jobs that ended beside the chat's requests, newest first (the Monitor's Requests table); the
+        # conversation cache counts the chat's only
+        rows = sorted(hist + (self.images.recent() if self.images is not None else []), key=lambda r: r["time"])
         engine = {"model": self.model, "max_context": self.reported_ctx(), "images": self.vision is not None,
                   **dict(getattr(self.engine, "info", {}) or {})}
         tel = (self.telemetry.snapshot() if getattr(self, "telemetry", None)
                else {"now": {}, "history": {}, "static": {}})
         parked = self.conv_log.poll(getattr(self.engine, "log_path", None), getattr(self.engine, "log_start", None))
-        return {"engine": engine, "live": live, "requests": hist[::-1][:None if all_requests else 12],
+        return {"engine": engine, "live": live, "requests": rows[::-1][:None if all_requests else 12],
                 "conversation_cache": conversation_cache_view(engine, hist, totals, parked),
-                "requests_kept": len(hist), "totals": totals, "hardware": tel["now"],
+                "requests_kept": len(rows), "totals": totals, "hardware": tel["now"],
                 "hardware_static":
                 tel["static"], "history": tel["history"], "time": now,
                 "engine_failure": self.engine_failure}

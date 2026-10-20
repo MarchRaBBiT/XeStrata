@@ -46,6 +46,7 @@ The config's "images" section (written by setup --images, tools/image/qimage.py)
 from __future__ import annotations
 
 import base64
+import collections
 import contextlib
 import os
 import queue
@@ -400,9 +401,10 @@ class ImageEngine:
             self.close()
             raise ImageJobFailed(f"the image engine is gone ({e}); its log: {self.log_path}") from e
 
-    def ask(self, line: str, want: str, timeout: float, cancel: threading.Event | None = None, step=None) -> dict:
+    def ask(self, line: str, want: str, timeout: float, cancel: threading.Event | None = None, step=None,
+            stage=None) -> dict:
         """Send a request line and wait for its answer (the line starting with `want`) -> its fields; STEP lines go to
-        `step`.  ImageJobFailed on ERROR."""
+        `step`, STAGE lines (refs, text, sampling, decode) to `stage`.  ImageJobFailed on ERROR."""
         self.send(line)
         t0 = time.monotonic()
         while True:
@@ -411,6 +413,9 @@ class ImageEngine:
                 if step is not None:
                     done, steps = got.split()[1:3]
                     step(int(done), int(steps))
+            elif got.startswith("STAGE "):
+                if stage is not None:
+                    stage(got[6:].strip())
             elif got.startswith(want):
                 return _kv(got)
             elif got.startswith("ERROR"):
@@ -468,6 +473,10 @@ class ImageGen:
         self.totals = {"images": 0, "jobs": 0, "seconds": 0.0, "failed": 0}
         self.last: dict | None = None              # the last job's figures (/v1/status)
         self.progress: tuple | None = None         # (step, steps) of the running job
+        # the job in the GPU's turn as the Monitor shows it (live()), and the jobs that ended, newest last (recent()):
+        # the one record of an image job's progress, which /metrics reads
+        self.job: dict | None = None
+        self.ended: collections.deque[dict] = collections.deque(maxlen=100)
 
     def note(self) -> str | None:
         """What the user is told about this setup at start and on the web page: the sizes of the image model and its
@@ -604,13 +613,19 @@ class ImageGen:
                         self.totals["failed"] += 1
                         raise ImageJobFailed("cancelled (the client left)")
                     self.progress = (i * TURBO_STEPS, job["n"] * TURBO_STEPS)
+                    self._live(image=i + 1, step=0, steps=job["steps"], stage="refs" if job.get("refs") else "text",
+                               sampling_at=None)
                     out = work / f"img_{i}.rgba"
 
                     def step(done, steps, i=i):
                         self.progress = (i * steps + done, job["n"] * steps)
+                        self._live(step=done, steps=steps)
+
+                    def stage(name):
+                        self._live(stage=name, **({"sampling_at": time.monotonic()} if name == "sampling" else {}))
                     try:
                         r = self.engine.ask(f"IMG {mw} {mh} {job['seed'] + i} {DROP} {out} {ids}"
-                                            f"{self._refs_words(job)}", "IMAGE", timeout, cancel, step)
+                                            f"{self._refs_words(job)}", "IMAGE", timeout, cancel, step, stage)
                     except ImageJobFailed as e:
                         self.totals["failed"] += 1
                         why = "cancelled (the client left)" if str(e) == "stopped" else str(e)
@@ -660,6 +675,54 @@ class ImageGen:
             data.append(item)
         return {"created": int(time.time()), "data": data, "model": self.model,
                 "output_format": "png", "size": f"{job['width']}x{job['height']}", "strata": figures}
+
+    # ---- the progress the Monitor shows (/metrics' live.image) and the jobs that ended (its Requests table)
+    STAGE_LABELS = {"waiting": "Making room on the GPU", "refs": "Reading the reference images",
+                    "text": "Reading the prompt", "sampling": "Sampling", "decode": "Decoding the image (VAE)"}
+
+    def begin(self, job: dict) -> None:
+        """The job has the GPU's turn (gpu_turn): from here it is the running job."""
+        self.job = {"started": time.time(), "t0": time.monotonic(), "stage": "waiting", "image": 1, "images": job["n"],
+                    "step": 0, "steps": job["steps"], "size": f"{job['width']}x{job['height']}",
+                    "refs": len(job.get("refs") or ()), "edit": bool(job.get("refs")), "sampling_at": None}
+
+    def _live(self, **kw) -> None:
+        if self.job is not None:
+            self.job.update(kw)
+
+    def live(self) -> dict | None:
+        """The running job's stage, step n of the steps, the seconds so far and a step, its size and image i of n, and
+        its overall progress (0..1: each image a share; its sampling by the steps, the stages around it at their
+        boundaries)."""
+        j = dict(self.job) if self.job is not None else None
+        if j is None:
+            return None
+        now = time.monotonic()
+        stage, done, steps = j["stage"], j["step"], max(1, j["steps"])
+        step_s = round((now - j["sampling_at"]) / done, 2) if j["sampling_at"] is not None and done > 0 else None
+        within = {"waiting": 0.0, "refs": 0.02, "text": 0.05, "sampling": 0.1 + 0.8 * done / steps,
+                  "decode": 0.9}.get(stage, 0.0)
+        frac = (j["image"] - 1 + within) / max(1, j["images"])
+        return {"stage": stage, "label": self.STAGE_LABELS.get(stage, stage), "step": done, "steps": j["steps"],
+                "image": j["image"], "images": j["images"], "size": j["size"], "refs": j["refs"], "edit": j["edit"],
+                "elapsed_s": round(now - j["t0"], 1), "step_s": step_s, "progress": round(min(1.0, frac), 3)}
+
+    def end(self, error: str | None, cancelled: bool = False) -> None:
+        """The running job ended: one row of the Monitor's Requests table (the time it got the GPU, its size, the
+        references, the seconds and each stage's, done or the error)."""
+        j, self.job = self.job, None
+        if j is None:
+            return
+        last = self.last if error is None and self.last is not None else {}
+        self.ended.append({"kind": "image", "time": j["started"], "duration_s": round(time.monotonic() - j["t0"], 1),
+                           "finish": "stop" if error is None else "cancel" if cancelled else "error",
+                           "error": None if cancelled else error,
+                           "size": j["size"], "n": j["images"], "refs": j["refs"], "edit": j["edit"],
+                           "seconds": last.get("seconds"), "text_encode_ms": last.get("text_encode_ms"),
+                           "sampling_s": last.get("sampling_s"), "vae_decode_s": last.get("vae_decode_s")})
+
+    def recent(self) -> list[dict]:
+        return list(self.ended)
 
     def status(self) -> dict:
         out = {"enabled": True, "model": self.model, "engine": "strata-image", "quant": self.cfg.get("quant"),
@@ -815,11 +878,13 @@ def gpu_turn(svc, gen: ImageGen, job: dict, cancel: threading.Event | None = Non
     with svc.status_lock:
         svc.status["queued"] += 1
     queued = True
+    error: str | None = None
     try:
         with svc._turn(cancel):
             with svc.status_lock:
                 svc.status["queued"] -= 1
             queued = False
+            gen.begin(job)
             ctl = getattr(svc.engine, "ctl", None) if getattr(svc.engine, "batch", 0) else None
             if ctl is not None:
                 while not ctl.acquire(timeout=0.25):
@@ -854,7 +919,11 @@ def gpu_turn(svc, gen: ImageGen, job: dict, cancel: threading.Event | None = Non
             finally:
                 if ctl is not None:
                     ctl.release()
+    except BaseException as e:
+        error = str(e) or type(e).__name__
+        raise
     finally:
+        gen.end(error, cancelled=cancel is not None and cancel.is_set())
         if queued:
             with svc.status_lock:
                 svc.status["queued"] -= 1
