@@ -297,8 +297,11 @@ def check_range(status, content_range, start, end):
 
 
 def pinned():
-    """The tensors' hashes are the pinned revision's: they apply when this run reads that revision."""
-    return REPO == PINNED
+    """The tensors' hashes (SHA256, the pinned revision's) apply: whenever this run asks for the pinned revision -
+    from Hugging Face, ModelScope, or (STRATA_ALLOW_UNPINNED=1, resolve_repo) the current files that replaced it, which
+    must still be the same bytes (#31: that path used to drop every check).  Not when STRATA_MTP_REVISION names
+    another revision: the table is not that one's."""
+    return REVISION == PINNED_REVISION
 
 
 def sha256_of(path):
@@ -441,6 +444,9 @@ def fetch(out, only):
             os.remove(path)                         # wrong bytes (#327): the whole tensor again, once
             attempt += 1
             if attempt > 1:
+                if "/resolve/main/" in REPO and REPO != PINNED:   # STRATA_ALLOW_UNPINNED=1's current files (#31)
+                    sys.exit("%s: sha256 %s is not the pinned checkpoint's %s - the repository's current files have "
+                             "changed since this version pinned them: update XeStrata" % (r["name"], digest, want))
                 sys.exit("%s: sha256 %s is not the checkpoint's %s - the download source sends wrong data (a mirror "
                          "that ignores Range requests?)" % (r["name"], digest, want))
             print("%s: wrong bytes (sha256 %s...), fetching it again" % (r["name"], digest[:12]), file=sys.stderr)
