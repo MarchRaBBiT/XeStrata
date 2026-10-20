@@ -74,7 +74,11 @@ MODEL_NAME = "qwen-image-2.1-turbo"
 POLICIES = ("auto", "keep", "shrink", "unload")
 SIZE_STEP = 16                     # the VAE's 8x and the DiT's 2x2 patches: sides made at a multiple of 16, then cut
 MIN_SIDE = 256
-FILE_NAME = re.compile(r"^[0-9a-f]{32}\.png$")
+FILE_NAME = re.compile(r"^[0-9a-f]{32}\.(png|jpeg|webp)$")
+# OpenAI's output_format -> the file's MIME type (Pillow writes jpeg and webp; PNG is png_rgba's)
+FORMATS = {"png": "image/png", "jpeg": "image/jpeg", "webp": "image/webp"}
+# OpenAI's quality -> the base model's steps (None: the config's); Turbo keeps its 8 whatever it says
+QUALITY_STEPS = {"low": 20, "medium": 30, "standard": 30, "high": None, "hd": None, "auto": None}
 # the model's prompt (stable-diffusion.cpp's Qwen-Image template): the system turn, whose DROP leading ids' states the
 # DiT does not take, then the user's prompt as plain text
 PROMPT_HEAD = "<|im_start|>system\nComprehend and analyze the provided prompt.<|im_end|>\n<|im_start|>user\n"
@@ -122,8 +126,10 @@ def _int_field(req: dict, key: str, lo: int, hi: int, default):
 
 
 def parse_request(req: dict, cfg: dict) -> dict:
-    """The fields of one /v1/images/generations request, checked.  Unknown OpenAI fields (quality, style, user,
-    background, moderation) are accepted and ignored; an output format other than PNG is refused."""
+    """The fields of one /v1/images/generations request, checked.  output_format png, jpeg or webp
+    (output_compression 0-100, the quality jpeg and webp are written at); quality low, medium or high (the base model's
+    steps, QUALITY_STEPS; an explicit steps wins).  Unknown OpenAI fields (style, user, background, moderation) are
+    accepted and ignored."""
     prompt = req.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         raise ImageRequestError("prompt: a non-empty string")
@@ -134,13 +140,18 @@ def parse_request(req: dict, cfg: dict) -> dict:
     fmt = req.get("response_format") or "b64_json"
     if fmt not in ("b64_json", "url"):
         raise ImageRequestError("response_format: b64_json or url")
-    out_fmt = req.get("output_format")
-    if out_fmt not in (None, "png"):
-        raise ImageRequestError("output_format: only png")
+    out_fmt = req.get("output_format") or "png"
+    if out_fmt not in FORMATS:
+        raise ImageRequestError("output_format: png, jpeg or webp")
+    compression = _int_field(req, "output_compression", 0, 100, 100)
+    quality = req.get("quality")
+    if quality is not None and quality not in QUALITY_STEPS:
+        raise ImageRequestError("quality: low, medium, high or auto")
     w, h = parse_size(req.get("size"), int(cfg.get("max_side") or 2048))
     n = _int_field(req, "n", 1, int(cfg.get("max_n") or 4), 1)
     if cfg.get("schedule") == "base":
-        steps = _int_field(req, "steps", 2, MAX_STEPS, int(cfg.get("steps") or 40))
+        steps = _int_field(req, "steps", 2, MAX_STEPS,
+                           QUALITY_STEPS.get(quality or "auto") or int(cfg.get("steps") or 40))
     elif req.get("steps") not in (None, TURBO_STEPS):
         raise ImageRequestError(f"steps: Qwen-Image-2.1-Turbo runs its own {TURBO_STEPS}-step schedule only")
     else:
@@ -149,7 +160,24 @@ def parse_request(req: dict, cfg: dict) -> dict:
     if seed is None:
         seed = random.SystemRandom().randrange(0, 2**31)
     return {"prompt": prompt, "width": w, "height": h, "n": n, "steps": steps, "seed": seed,
-            "response_format": fmt}
+            "response_format": fmt, "output_format": out_fmt, "output_compression": compression}
+
+
+def encode_image(png: bytes, fmt: str, compression: int) -> bytes:
+    """A made image (png_rgba's PNG) in OpenAI's output_format: PNG as it is, jpeg (no alpha: on white) and webp at
+    `compression` as their quality (Pillow)."""
+    if fmt == "png":
+        return png
+    import io
+    from PIL import Image
+    im = Image.open(io.BytesIO(png))
+    if fmt == "jpeg":
+        bg = Image.new("RGB", im.size, (255, 255, 255))
+        bg.paste(im, mask=im.split()[-1])
+        im = bg
+    out = io.BytesIO()
+    im.save(out, format=fmt.upper(), quality=compression)
+    return out.getvalue()
 
 
 def base_sigmas(steps: int, width: int, height: int) -> list[float]:
@@ -251,6 +279,26 @@ def check_mask(data: bytes, size: tuple[int, int], cfg: dict) -> bytes:
     out = io.BytesIO()
     im.convert("RGBA").save(out, format="PNG")
     return out.getvalue()
+
+
+def ref_size(ref_w: int, ref_h: int) -> tuple[int, int]:
+    """The size the engine works an edit's reference image at (qi_ref_size in src/image/qi_pipeline.cpp): diffusers'
+    calculate_dimensions(1024 * 1024, its width over its height)."""
+    ratio = ref_w / ref_h
+    vw = math.sqrt(1024 * 1024 * ratio)
+    return max(32, round(vw / 32) * 32), max(32, round(vw / ratio / 32) * 32)
+
+
+def usage(job: dict) -> dict:
+    """OpenAI's usage of an image job, in the image engine's tokens: the prompt's ids (the model's chat form) and the
+    reference images' DiT tokens in, the made images' DiT tokens out (a token a 16 x 16 pixel square)."""
+    mw, mh = made_size(job)
+    text = len(job.get("ids") or ())
+    sizes = (ref_size(*image_dims(r)) for r in job.get("refs") or ())
+    refs = sum((w // SIZE_STEP) * (h // SIZE_STEP) for w, h in sizes)
+    out = job["n"] * (mw // SIZE_STEP) * (mh // SIZE_STEP)
+    return {"input_tokens": text + refs, "output_tokens": out, "total_tokens": text + refs + out,
+            "input_tokens_details": {"text_tokens": text, "image_tokens": refs}}
 
 
 def made_size(job: dict) -> tuple[int, int]:
@@ -565,8 +613,8 @@ class ImageGen:
                 pass
 
     def _prune(self) -> None:
-        """Keep the newest keep_files PNGs of response_format url (the oldest go)."""
-        files = sorted((p for p in self.dir.glob("*.png") if FILE_NAME.match(p.name)), key=lambda p: p.stat().st_mtime)
+        """Keep the newest keep_files images of response_format url (the oldest go)."""
+        files = sorted((p for p in self.dir.iterdir() if FILE_NAME.match(p.name)), key=lambda p: p.stat().st_mtime)
         for p in files[:max(0, len(files) - self.keep_files)]:
             with contextlib.suppress(OSError):
                 p.unlink()
@@ -721,24 +769,27 @@ class ImageGen:
         self.last = figures
         return images, figures
 
-    def store(self, data: bytes) -> str:
-        """Keep one PNG for response_format url -> its file name (32 random hex digits: the name is the access)."""
-        name = secrets.token_hex(16) + ".png"
+    def store(self, data: bytes, fmt: str = "png") -> str:
+        """Keep one image for response_format url -> its file name (32 random hex digits: the name is the access, and
+        the output_format)."""
+        name = f"{secrets.token_hex(16)}.{fmt}"
         (self.dir / name).write_bytes(data)
         self._prune()
         return name
 
     def response(self, images: list[bytes], job: dict, figures: dict, base_url: str) -> dict:
         data = []
+        fmt = job.get("output_format") or "png"
         for i, png in enumerate(images):
             item = {"revised_prompt": job["prompt"], "seed": job["seed"] + i}
+            img = encode_image(png, fmt, job.get("output_compression", 100))
             if job["response_format"] == "url":
-                item["url"] = f"{base_url}/v1/images/files/{self.store(png)}"
+                item["url"] = f"{base_url}/v1/images/files/{self.store(img, fmt)}"
             else:
-                item["b64_json"] = base64.b64encode(png).decode("ascii")
+                item["b64_json"] = base64.b64encode(img).decode("ascii")
             data.append(item)
-        return {"created": int(time.time()), "data": data, "model": self.model,
-                "output_format": "png", "size": f"{job['width']}x{job['height']}", "strata": figures}
+        return {"created": int(time.time()), "data": data, "model": self.model, "output_format": fmt,
+                "size": f"{job['width']}x{job['height']}", "usage": usage(job), "strata": figures}
 
     # ---- the progress the Monitor shows (/metrics' live.image) and the jobs that ended (its Requests table)
     STAGE_LABELS = {"waiting": "Making room on the GPU", "refs": "Reading the reference images",
@@ -801,7 +852,7 @@ class ImageGen:
 
 
 # ------------------------------------------------------------------------------------------- chat's image tools
-FILE_REF = re.compile(r"/v1/images/files/([0-9a-f]{32}\.png)")
+FILE_REF = re.compile(r"/v1/images/files/([0-9a-f]{32}\.(?:png|jpeg|webp))")
 TOOLS = [
     {"name": "generate_image",
      "description": "Make an image from a description with the image model on this computer. "
@@ -849,7 +900,7 @@ class ImageTools:
 
     def _image(self, which: str) -> bytes | None:
         """The image an edit takes: a /v1/images/files/ link (or its file name), else the conversation's last."""
-        m = FILE_REF.search(which or "") or re.fullmatch(r"([0-9a-f]{32}\.png)", which or "")
+        m = FILE_REF.search(which or "") or re.fullmatch(r"([0-9a-f]{32}\.(?:png|jpeg|webp))", which or "")
         if m:
             return self._file(m.group(1))
         if self.made:

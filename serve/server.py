@@ -5305,7 +5305,8 @@ def body_limit() -> int:
 
 def parse_multipart(ctype: str, body: bytes) -> tuple[dict, list[bytes]]:
     """A multipart/form-data body (OpenAI's /v1/images/edits) -> (its text fields, the bytes of its image or image[]
-    files in order); whole numbers in the fields (n, seed, steps) as ints, the mask file's bytes as "mask"."""
+    files in order); whole numbers in the fields (n, seed, steps, output_compression) as ints, the mask file's bytes
+    as "mask"."""
     from email.parser import BytesParser
     from email.policy import HTTP
     msg = BytesParser(policy=HTTP).parsebytes(b"Content-Type: " + ctype.encode("latin-1") + b"\r\n\r\n" + body)
@@ -5323,7 +5324,8 @@ def parse_multipart(ctype: str, body: bytes) -> tuple[dict, list[bytes]]:
             fields["mask"] = data
         elif isinstance(name, str) and name:
             value = data.decode("utf-8", "replace")
-            fields[name] = int(value) if name in ("n", "seed", "steps") and value.strip().isdigit() else value
+            whole = name in ("n", "seed", "steps", "output_compression") and value.strip().isdigit()
+            fields[name] = int(value) if whole else value
     return fields, files
 
 
@@ -5704,7 +5706,7 @@ def make_handler(svc: Service):
                     return
                 body = f.read_bytes()
                 self.send_response(200)
-                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Type", images_api.FORMATS[f.suffix[1:]])
                 self.send_header("Cache-Control", "private, max-age=86400")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
