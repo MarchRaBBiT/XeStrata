@@ -205,6 +205,10 @@ inline bool env_off(const char* name) {
     const char* v = std::getenv(name);
     return v != nullptr && std::strtol(v, nullptr, 10) == 0;
 }
+inline bool env_on(const char* name) {
+    const char* v = std::getenv(name);
+    return v != nullptr && std::strtol(v, nullptr, 10) != 0;
+}
 inline bool hc_in_region() { static const bool v = !env_off("STRATA_PREFILL_HC_IN_REGION"); return v; }
 inline bool xs_in_dm() { static const bool v = !env_off("STRATA_PREFILL_XS_IN_DM"); return v; }
 // Experts dequantized (FP16) before one grouped product: G of them take G x 9.4 MiB (--prefill-experts)
@@ -1620,7 +1624,7 @@ const char* const kPfNames[kPfCount] = {"embed+steps", "hc read", "gdn", "qsa pr
                                         "gemm gate/up", "gemm down", "combine", "ple", "kv stage", "gdn conv+gates",
                                         "gdn recurrence", "gdn out proj"};
 struct PfTimer {
-    bool on = std::getenv("STRATA_PREFILL_TIMING") != nullptr;
+    bool on = env_on("STRATA_PREFILL_TIMING");
     std::vector<strata::gpu::Event*> ev;
     std::vector<int> ph;
     size_t used = 0;
