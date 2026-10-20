@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <map>
+#include <cstdlib>
 #include <mutex>
 #include <optional>
 
@@ -191,12 +192,77 @@ void* alloc_device(size_t bytes) {
     } catch (const std::exception& e) { fail("alloc_device", e); return nullptr; }
 }
 
+namespace {
+std::mutex g_pin_mu;
+void* g_pin_soft = nullptr;
+void* g_pin_hard = nullptr;
+void* host_usm(size_t bytes) {
+    try {
+        return sycl::malloc_host(bytes, rt().context());
+    } catch (const std::exception&) { return nullptr; }
+}
+}  // namespace
+
 void* alloc_host(size_t bytes) {
     try {
         void* p = sycl::malloc_host(bytes, rt().context());
+        if (p == nullptr) {   // the hard reserve back, once
+            void* hard = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(g_pin_mu);
+                std::swap(hard, g_pin_hard);
+            }
+            if (hard != nullptr) {
+                free(hard);
+                std::fprintf(stderr, "strata: pinned memory: %zu bytes refused, the reserve given back for them\n", bytes);
+                p = sycl::malloc_host(bytes, rt().context());
+            }
+        }
         if (!p) g_error = "alloc_host: " + std::to_string(bytes) + " bytes refused";
         return p;
     } catch (const std::exception& e) { fail("alloc_host", e); return nullptr; }
+}
+
+void pin_reserve_take() {
+    uint64_t mib = 0;
+    if (const char* e = std::getenv("STRATA_PIN_RESERVE_MIB"); e != nullptr && *e != '\0') {
+        mib = std::strtoull(e, nullptr, 10);
+    } else {
+#if defined(_WIN32)
+        try {
+            if (rt().device().get_backend() == sycl::backend::ext_oneapi_cuda) mib = 640;
+        } catch (const std::exception&) { mib = 0; }
+#endif
+    }
+    if (mib == 0) return;
+    std::lock_guard<std::mutex> lock(g_pin_mu);
+    if (g_pin_soft != nullptr || g_pin_hard != nullptr) return;
+    auto take = [](uint64_t want) -> void* {
+        for (uint64_t b = want << 20; b >= (16ull << 20); b /= 2)
+            if (void* p = host_usm((size_t) b)) return p;
+        return nullptr;
+    };
+    g_pin_soft = take(mib);
+    g_pin_hard = take(std::max<uint64_t>(mib / 4, 64));
+}
+
+void pin_reserve_release_soft() {
+    void* p = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_pin_mu);
+        std::swap(p, g_pin_soft);
+    }
+    if (p != nullptr) free(p);
+}
+
+void pin_reserve_release() {
+    pin_reserve_release_soft();
+    void* p = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_pin_mu);
+        std::swap(p, g_pin_hard);
+    }
+    if (p != nullptr) free(p);
 }
 
 void free(const void* p) {

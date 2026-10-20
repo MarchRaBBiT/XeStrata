@@ -317,6 +317,7 @@ bool PlainModel::load(const PlainOptions& opt, std::string& err) {
         next_.push_back(std::move(st));
     }
     finish_experts();
+    strata::gpu::pin_reserve_release();   // loaded: the pinned memory's last reserve goes back
     for (size_t i = 0; i < next_.size(); ++i)   // the rounds in turn, a share of the interval apart
         next_[i]->adapt_phase_ = (int64_t) (i + 1) * std::max(opt_.adapt_every, 1) / (int64_t) (next_.size() + 1);
     for (PlainModel* st : chain()) {
@@ -933,7 +934,10 @@ bool PlainModel::open_experts(std::string& err) {
         if (in_ram_) {
             auto arena = std::make_unique<ArenaExpertSource>();
             arena->set_gguf(opt_.gguf);
-            if (!arena->open(std::string(), L, E, /*threads=*/6, err)) return false;
+            strata::gpu::pin_reserve_take();   // the pinned buffers after the arena keep their room (gpu.hpp)
+            const bool arena_ok = arena->open(std::string(), L, E, /*threads=*/6, err);
+            strata::gpu::pin_reserve_release_soft();
+            if (!arena_ok) return false;
             if (!arena->ram_warning().empty())
                 std::fprintf(stderr, "strata plain: WARNING: %s\n", arena->ram_warning().c_str());
             std::fprintf(stderr, "strata plain: experts in RAM, %.2f GiB at %.2f GiB/s\n",

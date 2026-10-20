@@ -4864,7 +4864,10 @@ int main(int argc, char** argv) {
     } else {
         arena_src.set_gguf(o.native_preset);   // plan v0.3 P6: a native pack may take its experts from shard 1
         if (multi_gpu) strata::core::arena_copy_devices(split_devs);   // their register_on (below) reads its pieces
-        if (!arena_src.open(o.pack, g.n_layers, g.n_expert, /*threads=*/6, err, o.shared_expert_arena)) {
+        strata::gpu::pin_reserve_take();   // the pinned buffers after the arena keep their room (gpu.hpp)
+        const bool arena_ok = arena_src.open(o.pack, g.n_layers, g.n_expert, /*threads=*/6, err, o.shared_expert_arena);
+        strata::gpu::pin_reserve_release_soft();
+        if (!arena_ok) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
         }
@@ -8556,6 +8559,7 @@ int main(int argc, char** argv) {
                 }).detach();
         }
         strata::core::progress_at("idle");
+        strata::gpu::pin_reserve_release();   // the engine is up: the pinned memory's last reserve goes back
         std::printf("READY %lld stop\n", (long long) o.max_context);   // "stop": this engine honours STOP
         std::fflush(stdout);
         std::string line;
