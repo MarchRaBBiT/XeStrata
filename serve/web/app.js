@@ -1274,5 +1274,6 @@ $("img-form").onsubmit = async (ev) => {
     toast("error", "No image", String(e.message || e), 8000);
   } finally {
     $("img-go").disabled = false;
+    $("img-ref").value = "";   // the reference images go with this job only: the next Generate is a new image
   }
 };
