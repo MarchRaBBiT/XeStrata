@@ -14,8 +14,9 @@
 //
 // --serve: the engine stays, its layers and the last prompt's states kept between requests, and takes lines on stdin
 // (serve/images.py), one at a time, answering each on stdout:
-//   IMG <width> <height> <seed> <drop> <out path> <ids, commas> [REF:<path>]...   -> STEP <done> <steps> lines,
-//                            then IMAGE key=value ... (times, the budget's split); REF: an edit's reference images
+//   IMG <width> <height> <seed> <drop> <out path> <ids, commas> [REF:<path>]...   -> STAGE <refs|text|sampling|decode>
+//                            as each stage starts and STEP <done> <steps> lines, then IMAGE key=value ... (times, the
+//                            budget's split); REF: an edit's reference images
 //   NEED <width> <height> <n> [REF:<path>]...  the VRAM an image of n prompt ids needs (from the files)
 //                                                                                          -> NEED least_mib=...
 //                            full_mib=... held_mib=... free_mib=... (si::QiNeed)
@@ -175,6 +176,9 @@ int serve(si::QiPipeline& p) {
                     std::printf("STEP %d %d\n", done, steps);
                     std::fflush(stdout);
                     return !in.stop.load();
+                }, [](const char* stage) {   // the server's progress (serve/images.py)
+                    std::printf("STAGE %s\n", stage);
+                    std::fflush(stdout);
                 });
                 write_file(out, img);
                 std::printf("IMAGE %s\n", plan_kv(t, pl).c_str());

@@ -91,8 +91,11 @@ public:
                 const std::vector<std::pair<int64_t, int64_t>>& refs = {});
 
     /// RGBA8 [height][width][4] of the request.  `step`: the DiT's progress (QiDit::sample), false to stop.
+    /// `stage`: each stage as it starts ("refs", the references through the vision encoder and the VAE's encoder;
+    /// "text", the prompt through the text encoder; "sampling"; "decode", the VAE's decoder).
     std::vector<uint8_t> generate(const QiRequest& r, QiTimes* times = nullptr, QiPlan* plan = nullptr,
-                                  const std::function<bool(int, int)>& step = {});
+                                  const std::function<bool(int, int)>& step = {},
+                                  const std::function<void(const char*)>& stage = {});
 
 private:
     QiPlan plan(int64_t T, int64_t h, int64_t w, int64_t n_ids = 0);

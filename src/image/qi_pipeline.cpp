@@ -279,7 +279,8 @@ void QiPipeline::edit_refs(const QiRequest& r, std::vector<int32_t>& ids, std::v
 }
 
 std::vector<uint8_t> QiPipeline::generate(const QiRequest& r, QiTimes* times, QiPlan* plan_out,
-                                          const std::function<bool(int, int)>& step) {
+                                          const std::function<bool(int, int)>& step,
+                                          const std::function<void(const char*)>& stage) {
     using clock = std::chrono::steady_clock;
     if (r.width % 16 != 0 || r.height % 16 != 0 || r.width <= 0 || r.height <= 0)
         throw std::invalid_argument("image engine: the size must be a multiple of 16");
@@ -299,7 +300,11 @@ std::vector<uint8_t> QiPipeline::generate(const QiRequest& r, QiTimes* times, Qi
             for (float* p : z) gpu::free(p);
         }
     } free_z{ref_z};
-    if (!r.refs.empty()) edit_refs(r, ids, vouts, te_images, dit_refs, ref_z);
+    if (!r.refs.empty()) {
+        if (stage) stage("refs");
+        edit_refs(r, ids, vouts, te_images, dit_refs, ref_z);
+    }
+    if (stage) stage("text");
     const std::vector<int32_t>& all_ids = r.refs.empty() ? r.ids : ids;
     const int64_t n_ctx = (int64_t) all_ids.size() - r.drop;
     int64_t n_pre = n_ctx;
@@ -328,8 +333,10 @@ std::vector<uint8_t> QiPipeline::generate(const QiRequest& r, QiTimes* times, Qi
     std::vector<float> out((size_t) (4 * HW));
     try {
         gpu::copy(x, noise.data(), (size_t) n * 4);
+        if (stage) stage("sampling");
         dit_->sample(x, h, w, r.sigmas.empty() ? turbo_sigmas() : r.sigmas, step);
         const auto t2 = clock::now();
+        if (stage) stage("decode");
         // the VAE beside the DiT's activations when it fits there; else they give way to it
         uint64_t vae_room = p.vae > p.activations ? p.vae - p.activations : 0;
         if (vae_->scratch_bytes(h, w) > vae_room) {
