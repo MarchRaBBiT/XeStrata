@@ -55,7 +55,7 @@ WHEELS = ("numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "pillow", "p
 COMPONENTS = [
     ("XeStrata", "version", "LGPL-3.0-or-later (with MIT parts: NOTICE)", "https://github.com/MistVVK/XeStrata",
      [], ["xestrata.exe", "xestrata-cli.exe", "xestrata.dll", "xestrata-cli.dll", "Xestrata.Launcher.Core.dll",
-          *(f"app/engine/{e}" for e in ENGINE_EXES)]),
+          *(f"app/engine/{e}" for e in ENGINE_EXES), f"app/engine/{AOTRITON_DLLS[0]}"]),
     ("oneMath (XeStrata's fork)", "onemath", "Apache-2.0", "https://github.com/MistVVK/oneMath", ["onemath:LICENSE"],
      [f"app/engine/{d}" for d in ONEMATH_DLLS]),
     ("rocBLAS's, hipBLASLt's and hipblas-common's headers (compiled into onemath_blas_rocblas.dll)",
