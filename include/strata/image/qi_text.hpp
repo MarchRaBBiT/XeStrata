@@ -44,6 +44,9 @@ public:
     std::vector<float> encode(const std::vector<int32_t>& ids, const std::vector<Image>& images = {});
     /// Whether encode applies the model's final RMS norm (output_norm.weight): Mage-Flow takes the states after it.
     void set_final_norm(bool on);
+    /// Whether an image's tokens take plain positions, each its index like the text's (Mage-Flow's encoder passes
+    /// them so), not Qwen3-VL's M-RoPE ones by the image's rows and columns (Qwen-Image's).
+    void set_flat_positions(bool on) { flat_positions_ = on; }
 
     int64_t hidden() const { return C_; }
     /// The layers' bytes (in the file) and the two slots a streamed walk takes at least.
@@ -78,7 +81,7 @@ private:
     int64_t C_ = 4096, heads_ = 32, kv_heads_ = 8, head_dim_ = 128, inter_ = 12288;
     float theta_ = 5e6f, eps_ = 1e-6f;
     int embd_type_ = 0;
-    bool final_norm_ = false;
+    bool final_norm_ = false, flat_positions_ = false;
     std::vector<float> out_norm_;   // output_norm.weight (host), read when set_final_norm(true)
     uint64_t embd_row_bytes_ = 0;
     const uint8_t* embd_ = nullptr;   // the token embeddings in the mapped file (rows gathered per prompt)

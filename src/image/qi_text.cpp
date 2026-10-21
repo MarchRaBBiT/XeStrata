@@ -176,7 +176,8 @@ std::vector<float> QiText::encode(const std::vector<int32_t>& ids, const std::ve
     if (T == 0) return {};
     ensure(T);
     // the positions: each token its index, the images' tokens (time, row, column) from their first index, the tokens
-    // after an image moved on by its longer side less its count (Qwen3-VL's M-RoPE, as stable-diffusion.cpp builds it)
+    // after an image moved on by its longer side less its count (Qwen3-VL's M-RoPE, as stable-diffusion.cpp builds it);
+    // with flat positions every token its index
     std::vector<int32_t> pos3;
     int32_t* dpos = nullptr;
     std::vector<float*> ds;   // the images' DeepStack blocks on the GPU, image by image, layer by layer
@@ -187,16 +188,18 @@ std::vector<float> QiText::encode(const std::vector<int32_t>& ids, const std::ve
         for (const Image& im : images) {
             if (im.index < 0 || im.index + im.rows > T || im.rows != im.grid_h * im.grid_w)
                 throw std::invalid_argument("image engine (text): an image's tokens do not fit the prompt");
-            const int64_t end = im.index + im.rows, next = im.index + std::max(im.grid_h, im.grid_w) + offset;
-            for (int64_t t = end; t < T; ++t)
-                for (int a = 0; a < 3; ++a) pos3[(size_t) (a * T + t)] = (int32_t) (next + t - end);
-            for (int64_t r = 0; r < im.rows; ++r) {
-                const int64_t base = im.index + offset;
-                pos3[(size_t) (im.index + r)] = (int32_t) base;
-                pos3[(size_t) (T + im.index + r)] = (int32_t) (base + r / im.grid_w);
-                pos3[(size_t) (2 * T + im.index + r)] = (int32_t) (base + r % im.grid_w);
+            if (!flat_positions_) {
+                const int64_t end = im.index + im.rows, next = im.index + std::max(im.grid_h, im.grid_w) + offset;
+                for (int64_t t = end; t < T; ++t)
+                    for (int a = 0; a < 3; ++a) pos3[(size_t) (a * T + t)] = (int32_t) (next + t - end);
+                for (int64_t r = 0; r < im.rows; ++r) {
+                    const int64_t base = im.index + offset;
+                    pos3[(size_t) (im.index + r)] = (int32_t) base;
+                    pos3[(size_t) (T + im.index + r)] = (int32_t) (base + r / im.grid_w);
+                    pos3[(size_t) (2 * T + im.index + r)] = (int32_t) (base + r % im.grid_w);
+                }
+                offset += std::max(im.grid_h, im.grid_w) - im.rows;
             }
-            offset += std::max(im.grid_h, im.grid_w) - im.rows;
             for (const float* d : im.deepstack) {
                 float* g = alloc<float>(allocs_, im.rows * C_);
                 gpu::copy(g, d, (size_t) (im.rows * C_) * 4);
