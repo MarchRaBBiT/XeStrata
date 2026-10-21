@@ -803,6 +803,8 @@ if(STRATA_ENABLE_XE)
               -DCMAKE_INSTALL_PREFIX=${_strata_aot_dir} -DAOTRITON_NOIMAGE_MODE=ON -DAOTRITON_NO_PYTHON=ON
               -DAOTRITON_HIP_WINDOWS=${_strata_aot_hip_win} -Dliblzma_DIR=${_strata_xz_dir}/lib/cmake/liblzma
               -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH
+            BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR>
+            INSTALL_COMMAND ${CMAKE_COMMAND} --install <BINARY_DIR>
             DEPENDS strata_xz
             BUILD_BYPRODUCTS ${_strata_aot_dir}/lib/aotriton_v2.lib)
         endif()
