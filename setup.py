@@ -2567,7 +2567,7 @@ def check_shards(shards):
                  f"delete {s.name} and its .done mark and run setup again")
 
 
-def verify_sha256(s: Path, size: int, sha: str) -> None:
+def verify_sha256(s: Path, size: int, sha: str, own: bool = False) -> None:
     """A shard's size and SHA-256 against the pinned values (the Unsloth file); the result is kept in its finish mark,
     so the minutes of hashing 111 GB happen once.  A wrong file is deleted, so the next run downloads it again."""
     m = s.with_name(s.name + ".done")
@@ -2575,6 +2575,9 @@ def verify_sha256(s: Path, size: int, sha: str) -> None:
         return
     have = s.stat().st_size if s.exists() else -1
     if have != size:
+        if own:                                        # --gguf-dir: the person's own file is never deleted by setup
+            fail(f"{s.name} is {have:,} bytes; the published file is {size:,}",
+                 "it may be cut short or another version; your file was left as it is. Copy the whole published file into the folder")
         fail(f"{s.name} is {have:,} bytes, not {size:,}", "delete it and run setup again (the download restarts)")
     say(f"  checking {s.name} (SHA-256, {size / 1e9:.1f} GB) ...")
     h = hashlib.sha256()
@@ -2585,6 +2588,9 @@ def verify_sha256(s: Path, size: int, sha: str) -> None:
                 break
             h.update(b)
     if h.hexdigest() != sha:
+        if own:
+            fail(f"{s.name} does not match the published file (SHA-256 {h.hexdigest()}, expected {sha})",
+                 "it may be damaged or another version; your file was left as it is. Copy the whole published file into the folder")
         s.unlink(missing_ok=True)
         m.unlink(missing_ok=True)
         fail(f"{s.name} has the wrong SHA-256 ({h.hexdigest()}, expected {sha}): deleted",
@@ -5129,7 +5135,7 @@ def setup_plain(a, family: str, fam: dict, gpu: dict, chosen: list, sel: list, f
     for x, n in zip(parts, names_of):
         if not ((models_dir / n).exists() and (done(models_dir / n) or a.gguf_dir)):
             download(hf(d["repo"]) + x["path"], models_dir / n)
-        verify_sha256(models_dir / n, x["size"], x["sha256"])
+        verify_sha256(models_dir / n, x["size"], x["sha256"], own=bool(a.gguf_dir))
     more = f" and {len(parts) - 1} more beside it" if len(parts) > 1 else ""
     ok(f"model file present: {gguf}{more}")
 
@@ -6073,7 +6079,7 @@ def main() -> int:
     check_shards(shards)
     for s in shards:                                   # the experimental Unsloth file: pinned sizes and SHA-256
         if s.name in fam.get("sha256", {}):
-            verify_sha256(s, *fam["sha256"][s.name])
+            verify_sha256(s, *fam["sha256"][s.name], own=bool(a.gguf_dir))
     ok("model files present")
     mmproj = Path(a.models_dir) / fam["mmproj"]
     if not mmproj.exists():
