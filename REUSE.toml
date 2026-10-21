@@ -74,6 +74,21 @@ SPDX-FileCopyrightText = "Advanced Micro Devices, Inc."
 SPDX-License-Identifier = "MIT"
 
 [[annotations]]
+path = ["third_party/main/aotriton/LICENSE.aiter"]
+SPDX-FileCopyrightText = "Advanced Micro Devices, Inc."
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = ["third_party/main/aotriton/LICENSE.FlyDSL"]
+SPDX-FileCopyrightText = "2025 FlyDSL Project Contributors"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = ["third_party/main/aotriton/LICENSE.triton"]
+SPDX-FileCopyrightText = ["2018-2020 Philippe Tillet", "2020-2022 OpenAI"]
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
 path = ["third_party/main/intel-llvm/LICENSE.TXT"]
 SPDX-FileCopyrightText = "The LLVM project contributors"
 SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"

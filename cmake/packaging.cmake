@@ -150,6 +150,14 @@ endif()
 if(_strata_aotriton_lib)
   install(FILES third_party/main/aotriton/LICENSE DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/${STRATA_PACKAGE_NAME}
           RENAME LICENSE.aotriton)
+  foreach(part aiter FlyDSL triton)   # what its kernels' images can carry parts of
+    install(FILES third_party/main/aotriton/LICENSE.${part}
+            DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/${STRATA_PACKAGE_NAME} RENAME LICENSE.aotriton-${part})
+  endforeach()
+endif()
+if(_strata_cudnn_frontend)   # compiled into the image engine
+  install(FILES third_party/main/cudnn-frontend/LICENSE.txt
+          DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/${STRATA_PACKAGE_NAME} RENAME LICENSE.cudnn-frontend)
 endif()
 install(FILES NOTICE COPYING COPYING.LESSER DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/${STRATA_PACKAGE_NAME})
 

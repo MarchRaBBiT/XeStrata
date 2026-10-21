@@ -774,6 +774,7 @@ if(STRATA_ENABLE_XE)
                    NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING CUDNN_FRONTEND_SKIP_JSON_LIB)
       set_property(SOURCE src/image/qi_sdpa.cpp APPEND PROPERTY COMPILE_OPTIONS -w)   # its headers' own warnings
       target_link_libraries(strata_image PRIVATE ${CMAKE_DL_LIBS})
+      set(_strata_cudnn_frontend ON)   # its license text goes with the packages
     else()
       message(STATUS "cuDNN's headers (cudnn.h) not found: the image attention on NVIDIA GPUs takes XeStrata's own "
                      "kernel (STRATA_CUDNN_ROOT gives cuDNN's folder)")
