@@ -11,6 +11,7 @@
 #include "strata/image/pipeline.hpp"
 #include "strata/image/qi_kernels.hpp"
 #include "strata/image/safetensors.hpp"
+#include "strata/kernels/bf16_bits.hpp"
 #include "strata/kernels/f16_bits.hpp"
 
 #include <sycl/sycl.hpp>
@@ -33,7 +34,7 @@ namespace mf_dit_detail {
 namespace syclex = sycl::ext::oneapi::experimental;
 using strata::kernels::f16_from_f32;
 
-constexpr int kTypeF16 = 1, kTypeQ8_0 = 8, kTypeBF16 = 30;
+constexpr int kTypeF16 = 1, kTypeQ8_0 = 8;
 constexpr float kEps = 1e-6f;
 
 sycl::queue& q_of(void* s) { return core::Runtime::get().stream(s); }
@@ -283,6 +284,14 @@ void gate_add(float* x, const float* h, const float* gate, int64_t T, int64_t C,
     });
 }
 
+// p's n bf16 values rewritten in place as FP16, saturated at FP16's largest (a weight past it is not Mage-Flow's)
+void bf16_to_f16_inplace(uint16_t* p, int64_t n, sycl::queue& q) {
+    q.parallel_for(sycl::range<1>((size_t) n), [=](sycl::id<1> id) {
+        const float v = kernels::f32_from_bf16(p[id[0]]);
+        p[id[0]] = f16_from_f32(sycl::clamp(v, -65504.f, 65504.f));
+    });
+}
+
 void fill_i32(int32_t* p, int64_t n, int32_t v, void* s) {
     q_of(s).parallel_for(sycl::range<1>((size_t) n), [=](sycl::id<1> id) { p[id[0]] = v; });
 }
@@ -394,7 +403,7 @@ bool MfDit::open(const std::string& path, void* stream, std::string& err, bool d
                 it.w->n = t.shape[0];
                 it.w->k = t.shape[1];
                 if (it.w->k % 32 != 0) throw std::runtime_error("image engine (Mage-Flow DiT): columns not 32s");
-                it.w->type = q8_ ? kTypeQ8_0 : kTypeBF16;
+                it.w->type = q8_ ? kTypeQ8_0 : kTypeF16;   // FP16: the file's bf16, rewritten on the GPU
                 it.w->row_bytes = q8_ ? (uint64_t) (it.w->k / 32 * 34) : (uint64_t) it.w->k * 2;
                 if (q8_) qbytes += it.w->row_bytes * (uint64_t) it.w->n;
                 vbytes += (uint64_t) it.w->n * 4;
@@ -449,6 +458,15 @@ bool MfDit::open(const std::string& path, void* stream, std::string& err, bool d
             F_ = b.imlp1.n;
         }
         if (blocks_.empty()) throw std::runtime_error("image engine (Mage-Flow DiT): no transformer blocks");
+        if (!q8_)   // each block's weights, as they reach the GPU (resident, or a streamed slot): bf16 to FP16
+            blocks_stream_.set_prepare([this](int i, uint8_t* d) {
+                sycl::queue& q = q_of(s_);
+                const Block& b = blocks_[(size_t) i];
+                for (const W* w : {&b.imod, &b.tmod, &b.q, &b.k, &b.v, &b.tq, &b.tk, &b.tv, &b.o, &b.to, &b.imlp1,
+                                   &b.imlp2, &b.tmlp1, &b.tmlp2})
+                    bf16_to_f16_inplace(reinterpret_cast<uint16_t*>(d + reinterpret_cast<uintptr_t>(w->d)),
+                                        w->n * w->k, q);
+            });
         if (dry_) return true;
         if (!gemm_.init(s_, scratch, err)) return false;
         blocks_stream_.configure(blocks_stream_.total(), s_);   // all resident until a budget is set

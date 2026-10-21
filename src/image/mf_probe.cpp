@@ -242,7 +242,7 @@ int dit(const std::string& path, const std::string& dir, bool q8, const std::str
     std::string err;
     auto t0 = std::chrono::steady_clock::now();
     if (!d.open(path, s, err, false, q8)) throw std::runtime_error(err);
-    std::printf("open (%s): %.1f s\n", q8 ? "Q8_0" : "bf16", seconds_since(t0));
+    std::printf("open (%s): %.1f s\n", q8 ? "Q8_0" : "FP16", seconds_since(t0));
     std::vector<int64_t> ns, ts;
     const auto noise = npy<float>(dir + "/noise.npy", &ns);   // [1][128][h][w]
     const int64_t Cl = ns[1], h = ns[2], w = ns[3], HW = h * w, C = d.hidden();

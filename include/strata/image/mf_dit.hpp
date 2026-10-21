@@ -9,10 +9,13 @@
 // text rows not), and adds each stream's projection and MLP (GELU, tanh form) back through its gates.  The text stream
 // changes with the time, so nothing of it is kept between steps beyond its input projection.
 //
-// The weights come from the bf16 safetensors (Comfy-Org/Mage-Flow's files as they are).  With q8 (the default) each
-// block is quantized to Q8_0 on the host as it is read, once, and the file's pages are dropped from the page cache;
-// without it the bf16 bytes are read in place from the mapped file.  The products dequantize the weights to FP16 and
-// take FP16 activations (rows scaled into FP16's range, mf_dit.cpp): not q8_mma's int8 activations, which the image
+// The weights come from the bf16 safetensors (Comfy-Org/Mage-Flow's files as they are).  With q8 each block is
+// quantized to Q8_0 on the host as it is read, once, and the file's pages are dropped from the page cache: half the
+// VRAM and the bytes a streamed block moves, the products dequantizing it to FP16 each time.  Without it the bf16 bytes
+// go from the mapped file to the GPU as they are and are rewritten there to FP16 in place (the same two bytes, the few
+// values past FP16's range saturated), which the products take as they are: no dequantization, the matrix units fed
+// straight (MfPipeline takes this when the blocks fit in VRAM).  The products take FP16 activations (rows scaled into
+// FP16's range, mf_dit.cpp): not q8_mma's int8 activations, which the image
 // stream's outlier channels (1e5 among values of 1) cost too much (RTX 4070, Turbo's 4 steps from the same noise: the
 // final latent's cosine to the reference 0.955 with them, 0.992 with FP16 on the B70, 0.996 in bf16).  The blocks go to
 // the GPU through a LayerStream: those that fit stay, the rest are streamed.
@@ -46,7 +49,8 @@ public:
     MfDit(const MfDit&) = delete;
     MfDit& operator=(const MfDit&) = delete;
 
-    /// `q8`: the blocks as Q8_0 (the default) or bf16 as the file has them.  `dry`: read for its sizes only.
+    /// `q8`: the blocks as Q8_0 (the default), else FP16 on the GPU from the file's bf16.  `dry`: read for its sizes
+    /// only.
     bool open(const std::string& path, void* stream, std::string& err, bool dry = false, bool q8 = true);
 
     /// Context i (0: the prompt, 1: the negative prompt) from the text encoder's states [rows][2560] (host FP32, the
@@ -72,6 +76,7 @@ public:
 
     int64_t hidden() const { return C_; }
     int64_t latent_channels() const { return in_ch_; }
+    bool q8() const { return q8_; }
     int64_t text_dim() const { return txt_dim_; }
     uint64_t block_bytes() const { return blocks_stream_.total(); }
     uint64_t block_min() const { return blocks_stream_.min_budget(); }
