@@ -718,7 +718,7 @@ A `--reasoning-effort` in `args` is moved there by the server, with a note.
 The levels are instructions the model was trained with, not a hard token limit:
 on easy questions all three think briefly, on hard ones `high` thinks longest and is most accurate.
 
-- **A hard thinking budget (opt-in).** `"reasoning_budget_tokens": N` in a request (OpenAI or Anthropic) caps the thinking at N tokens.
+- **A hard thinking budget (opt-in).** `"reasoning_budget_tokens": N` (or llama.cpp's `"thinking_budget_tokens": N`, which clients written for llama-server send) in a request (OpenAI or Anthropic) caps the thinking at N tokens.
   When it gets there the server ends it with a short wrap-up line and `</think>`, and the model answers from there.
   The engine continues from what it already holds, so nothing is read again.
   The wrap-up is part of the thinking the client sees and counts as output tokens.
