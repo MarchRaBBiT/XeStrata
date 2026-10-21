@@ -5,6 +5,8 @@
 //
 //   strata-image-mf-probe text TEXT_ENCODER.gguf GOLDEN_DIR
 //   strata-image-mf-probe vae VAE.safetensors GOLDEN_DIR   (golden_vae.py's vae_cond, vae_s, vae_img)
+//   strata-image-mf-probe vae-enc VAE.safetensors GOLDEN_DIR   (golden_edit.py's ref0_pix: its posterior's mean,
+//       log-variance and, with the run's own noise, the sample)
 //   strata-image-mf-probe dit DIT.safetensors GOLDEN_DIR [q8|bf16 [VAE.safetensors OUT.f32]]
 //       (block 0, the first velocity, the final latent; with the VAE the image as FP32 [3][H][W] to OUT.f32)
 //
@@ -258,15 +260,68 @@ int dit(const std::string& path, const std::string& dir, bool q8, const std::str
 
 }  // namespace
 
+// the VAE's encoder on golden_edit.py's first reference: the posterior's moments, and the sample with the run's noise
+int vae_enc(const std::string& path, const std::string& dir) {
+    void* s = strata::core::Runtime::get().create_stream();
+    strata::image::MfVae v;
+    std::string err;
+    if (!v.open(path, s, err) || !v.open_encoder(err)) throw std::runtime_error(err);
+    std::vector<int64_t> ps, ms;
+    const auto pix = npy<float>(dir + "/ref0_pix.npy", &ps);    // [3][H][W]
+    const auto mean = npy<float>(dir + "/ref0_mean.npy", &ms);  // [1][128][h][w]
+    const auto lv = npy<float>(dir + "/ref0_logvar.npy");
+    const auto zg = npy<float>(dir + "/ref0_z.npy");
+    const int64_t Z = ms[1], h = ms[2], w = ms[3], HW = h * w;
+    float* rgb = put(pix);
+    float* mom = nullptr;
+    if (!strata::gpu::alloc_device(&mom, (size_t) (HW * 2 * Z) * 4)) throw std::runtime_error("GPU memory");
+    v.encode_moments(rgb, h, w, mom);   // warm
+    const auto t0 = std::chrono::steady_clock::now();
+    v.encode_moments(rgb, h, w, mom);
+    std::printf("encode %lld x %lld: %.1f ms\n", (long long) ps[2], (long long) ps[1], 1e3 * seconds_since(t0));
+    const auto m = fetch(mom, (size_t) (HW * 2 * Z));
+    std::vector<float> gm((size_t) (HW * Z)), gl((size_t) (HW * Z));
+    for (int64_t p = 0; p < HW; ++p)
+        for (int64_t c = 0; c < Z; ++c) {
+            gm[(size_t) (c * HW + p)] = m[(size_t) (p * 2 * Z + c)];
+            gl[(size_t) (c * HW + p)] = std::min(10.f, std::max(-20.f, m[(size_t) (p * 2 * Z + Z + c)]));
+        }
+    compare("mean", gm.data(), mean.data(), mean.size());
+    compare("logvar", gl.data(), lv.data(), lv.size());
+    if (std::ifstream(dir + "/ref0_mean32.npy")) {   // enc_fp32.py's moments in FP32
+        const auto m32 = npy<float>(dir + "/ref0_mean32.npy");
+        compare("mean fp32", gm.data(), m32.data(), m32.size());
+    }
+    // the run's noise, eps = (z - mean) / std, through the engine's posterior: the sample as the run took it
+    std::vector<float> eps((size_t) (HW * Z));
+    for (int64_t p = 0; p < HW; ++p)
+        for (int64_t c = 0; c < Z; ++c) {
+            const size_t g = (size_t) (c * HW + p);
+            eps[(size_t) (p * Z + c)] = (zg[g] - mean[g]) / std::exp(0.5f * lv[g]);
+        }
+    float* e = put(eps);
+    float* z = nullptr;
+    if (!strata::gpu::alloc_device(&z, (size_t) (HW * Z) * 4)) throw std::runtime_error("GPU memory");
+    v.encode(rgb, h, w, e, z);
+    const auto zt = fetch(z, (size_t) (HW * Z));
+    std::vector<float> zc((size_t) (HW * Z));
+    for (int64_t p = 0; p < HW; ++p)
+        for (int64_t c = 0; c < Z; ++c) zc[(size_t) (c * HW + p)] = zt[(size_t) (p * Z + c)];
+    compare("sample", zc.data(), zg.data(), zg.size());
+    return 0;
+}
+
 int main(int argc, char** argv) {
     try {
         const std::string what = argc > 1 ? argv[1] : "";
         if (what == "text" && argc == 4) return text(argv[2], argv[3]);
         if (what == "vae" && argc == 4) return vae(argv[2], argv[3]);
+        if (what == "vae-enc" && argc == 4) return vae_enc(argv[2], argv[3]);
         if (what == "dit" && (argc == 4 || argc == 5 || argc == 7))
             return dit(argv[2], argv[3], argc == 4 || std::string(argv[4]) != "bf16", argc == 7 ? argv[5] : "",
                        argc == 7 ? argv[6] : "");
         std::fprintf(stderr, "usage: %s text TEXT_ENCODER.gguf GOLDEN_DIR | vae VAE.safetensors GOLDEN_DIR | "
+                     "vae-enc VAE.safetensors GOLDEN_DIR | "
                      "dit DIT.safetensors GOLDEN_DIR [q8|bf16 [VAE.safetensors OUT.f32]]\n", argv[0]);
         return 2;
     } catch (const std::exception& e) {
