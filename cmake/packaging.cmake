@@ -86,7 +86,9 @@ if(TARGET strata_dnnl)
   install(DIRECTORY ${_strata_onednn_dir}/lib/ DESTINATION ${_pkg_engine}/lib FILES_MATCHING PATTERN "libdnnl.so*")
 endif()
 if(_strata_aotriton_lib)
-  # aotriton, the image engine's attention on AMD GPUs: its library and its kernels' images, which it finds beside it
+  # aotriton, the image engine's attention on AMD GPUs: the engine's module that opens it (on an AMD GPU only), its
+  # library and its kernels' images, which it finds beside it
+  install(TARGETS strata_sdpa_aotriton LIBRARY DESTINATION ${_pkg_engine}/lib)
   install(DIRECTORY ${_strata_aotriton_lib}/ DESTINATION ${_pkg_engine}/lib FILES_MATCHING PATTERN "libaotriton*.so*")
   install(DIRECTORY ${_strata_aotriton_lib}/aotriton.images DESTINATION ${_pkg_engine}/lib)
 endif()

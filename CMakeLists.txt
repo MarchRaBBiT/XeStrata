@@ -758,12 +758,16 @@ if(STRATA_ENABLE_XE)
       # folder (Fedora's /usr/include) stays out of -I, which would break the C++ headers' #include_next
       get_target_property(_strata_hip_inc hip::amdhip64 INTERFACE_INCLUDE_DIRECTORIES)
       list(REMOVE_ITEM _strata_hip_inc ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES} /usr/include)
-      target_sources(strata_image PRIVATE src/image/qi_sdpa_aotriton.cpp)
-      set_property(SOURCE src/image/qi_sdpa_aotriton.cpp APPEND PROPERTY INCLUDE_DIRECTORIES ${_strata_aot_dir}/include
-                   ${_strata_hip_inc})
-      set_property(SOURCE src/image/qi_sdpa_aotriton.cpp APPEND PROPERTY COMPILE_DEFINITIONS __HIP_PLATFORM_AMD__)
+      # a module of its own, which the image engine opens on an AMD GPU only (it needs AMD's HIP runtime, which a
+      # machine with other makers' GPUs need not have), beside the engine
+      add_library(strata_sdpa_aotriton SHARED src/image/qi_sdpa_aotriton.cpp)
+      target_include_directories(strata_sdpa_aotriton PRIVATE ${_strata_aot_dir}/include ${_strata_hip_inc})
+      target_compile_definitions(strata_sdpa_aotriton PRIVATE __HIP_PLATFORM_AMD__)
+      target_link_libraries(strata_sdpa_aotriton PRIVATE strata_sycl ${_strata_aot_dir}/lib/libaotriton_v2.so
+                            hip::amdhip64)
+      add_dependencies(strata_image strata_sdpa_aotriton)
       set_property(SOURCE src/image/qi_sdpa.cpp APPEND PROPERTY COMPILE_DEFINITIONS STRATA_AOTRITON=1)
-      target_link_libraries(strata_image PRIVATE ${_strata_aot_dir}/lib/libaotriton_v2.so hip::amdhip64)
+      target_link_libraries(strata_image PRIVATE ${CMAKE_DL_LIBS})
       set(_strata_aotriton_lib ${_strata_aot_dir}/lib)   # for the packages
     endif()
   endif()

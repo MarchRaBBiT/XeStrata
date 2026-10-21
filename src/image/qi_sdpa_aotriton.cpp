@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: 2026 MistVVK and the XeStrata contributors
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // src/image/qi_sdpa_aotriton.cpp - see qi_sdpa.hpp: aotriton's flash attention on AMD GPUs (MIT; its library and its
-// kernels' images beside the engine), on the queue's HIP stream.
+// kernels' images beside the engine), on the queue's HIP stream.  A module of its own (libstrata_sdpa_aotriton.so,
+// strata_sdpa_aotriton.dll), which the image engine opens on an AMD GPU only: aotriton needs AMD's HIP runtime, which
+// a machine with other makers' GPUs need not have, and the engine must start there.
 
 #include <aotriton/flash.h>
 #include <sycl/ext/oneapi/backend/hip.hpp>
@@ -81,3 +83,15 @@ bool aotriton(sycl::queue& q, const uint16_t* q16, const uint16_t* k16, const ui
 }
 
 }  // namespace strata::image::sdpa
+
+// the module's entry, which qi_sdpa.cpp looks up by this name: q a sycl::queue of the same SYCL runtime
+#if defined(_WIN32)
+#define STRATA_SDPA_EXPORT extern "C" __declspec(dllexport)
+#else
+#define STRATA_SDPA_EXPORT extern "C" __attribute__((visibility("default")))
+#endif
+STRATA_SDPA_EXPORT bool strata_sdpa_aotriton(void* q, const uint16_t* q16, const uint16_t* k16, const uint16_t* v16,
+                                             int64_t q0, int64_t q1, int64_t T, int64_t heads, int64_t hd,
+                                             uint16_t* out16) {
+    return strata::image::sdpa::aotriton(*static_cast<sycl::queue*>(q), q16, k16, v16, q0, q1, T, heads, hd, out16);
+}
