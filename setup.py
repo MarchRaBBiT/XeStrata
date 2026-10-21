@@ -5722,7 +5722,8 @@ def main() -> int:
     # chosen here; with it loaded, the web app and the API switch it off per request
     esp = None
     esp_choice = (a.experimental_speed_projection or "").strip()
-    if family in ("qwen", "coder"):                   # the Coder: the same model's residual stream
+    # the Coder and Unsloth's files: the same model's residual stream (Unsloth's: the user's decision of 2026-10-22)
+    if family in ("qwen", "coder", "unsloth"):
         if not esp_choice:
             say()
             say("  EXPERIMENTAL - speed projection: a small control vector applied while the model runs (layers 4-44).")
