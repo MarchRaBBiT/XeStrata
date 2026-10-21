@@ -605,11 +605,18 @@ void QiDit::forward(const float* x, float t, int64_t H, int64_t W, bool prefix, 
         const auto* nq = reinterpret_cast<const float*>(base + b.nq);
         const auto* nk = reinterpret_cast<const float*>(base + b.nk);
         qi_ln_mod16(xr, mod(0), ntr, Tr, C, h16_, s_);
-        product(h16_, wq, q_ + r0 * C, Tr);
-        product(h16_, wk, k_ + r0 * C, Tr, 0, 0, -1, wq.w8);
-        product(h16_, wv, v_ + r0 * C, Tr, 0, 0, -1, wk.w8);
+        // W8A8: the sums scaled as qi_qk_norm_rope16 reads them
+        QiI8 qkv[3];
+        const bool i8 = wq.w8 && wk.w8 && wv.w8;
+        product(h16_, wq, q_ + r0 * C, Tr, 0, 0, -1, false, i8);
+        qkv[0] = i8_;
+        product(h16_, wk, k_ + r0 * C, Tr, 0, 0, -1, wq.w8, i8);
+        qkv[1] = i8_;
+        product(h16_, wv, v_ + r0 * C, Tr, 0, 0, -1, wk.w8, i8);
+        qkv[2] = i8_;
         qi_qk_norm_rope16(q_ + r0 * C, k_ + r0 * C, v_ + r0 * C, nq, nk, cos_ + r0 * kHead / 2,
-                          sin_ + r0 * kHead / 2, Tr, heads_, kHead, q16_ + r0 * C, k16_ + r0 * C, v16_ + r0 * C, s_);
+                          sin_ + r0 * kHead / 2, Tr, heads_, kHead, q16_ + r0 * C, k16_ + r0 * C, v16_ + r0 * C, s_,
+                          i8 ? qkv : nullptr);
         if (n_text_ > 0) {
             if (prefix) {
                 gpu::copy_async(k16_, b.pk, text_bytes, s_);
@@ -687,13 +694,21 @@ void QiDit::forward_pair(const float* x, float t, int64_t H, int64_t W, float* o
         const auto* nq = reinterpret_cast<const float*>(base + b.nq);
         const auto* nk = reinterpret_cast<const float*>(base + b.nk);
         qi_ln_mod16(x_, mod(0), 0, R, C, h16_, s_);
-        product(h16_, wq, q_, R);
-        product(h16_, wk, k_, R, 0, 0, -1, wq.w8);
-        product(h16_, wv, v_, R, 0, 0, -1, wk.w8);
+        // W8A8: the sums scaled as qi_qk_norm_rope16 reads them (the second context's rows from HW on)
+        QiI8 qkv[3], qkv2[3];
+        const bool i8 = wq.w8 && wk.w8 && wv.w8;
+        product(h16_, wq, q_, R, 0, 0, -1, false, i8);
+        qkv[0] = i8_;
+        product(h16_, wk, k_, R, 0, 0, -1, wq.w8, i8);
+        qkv[1] = i8_;
+        product(h16_, wv, v_, R, 0, 0, -1, wk.w8, i8);
+        qkv[2] = i8_;
+        for (int j = 0; j < 3; ++j) qkv2[j] = {qkv[j].sx + HW, qkv[j].sw};
         qi_qk_norm_rope16(q_, k_, v_, nq, nk, cos_ + na * kHead / 2, sin_ + na * kHead / 2, HW, heads_, kHead,
-                          q16_ + na * C, k16_ + na * C, v16_ + na * C, s_);
+                          q16_ + na * C, k16_ + na * C, v16_ + na * C, s_, i8 ? qkv : nullptr);
         qi_qk_norm_rope16(q_ + HW * C, k_ + HW * C, v_ + HW * C, nq, nk, o.cos + nb * kHead / 2,
-                          o.sin + nb * kHead / 2, HW, heads_, kHead, q16b + nb * C, k16b + nb * C, v16b + nb * C, s_);
+                          o.sin + nb * kHead / 2, HW, heads_, kHead, q16b + nb * C, k16b + nb * C, v16b + nb * C, s_,
+                          i8 ? qkv2 : nullptr);
         if (na > 0) {   // the prefixes' K and V from their caches
             gpu::copy_async(k16_, b.pk, bytes_a, s_);
             gpu::copy_async(v16_, b.pv, bytes_a, s_);

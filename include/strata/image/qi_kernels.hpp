@@ -26,10 +26,10 @@ void qi_gate_add(float* x, const float* h, const float* mod, int64_t n_text, int
 
 /// For each token and head: q and k RMS-normed over the head (weights wq, wk; eps 1e-6), then rotated pairwise
 /// (2j, 2j + 1) by cos[t][j], sin[t][j] (rope tables [T][head_dim / 2]); written as FP16 q16, k16, and v as v16, all
-/// [T][heads * head_dim].
+/// [T][heads * head_dim].  With i8 (three: q's, k's and v's), q, k and v hold W8A8 products' sums.
 void qi_qk_norm_rope16(const float* q, const float* k, const float* v, const float* wq, const float* wk,
                        const float* cos, const float* sin, int64_t T, int64_t heads, int64_t head_dim,
-                       uint16_t* q16, uint16_t* k16, uint16_t* v16, void* stream);
+                       uint16_t* q16, uint16_t* k16, uint16_t* v16, void* stream, const QiI8* i8 = nullptr);
 
 /// out[t, h, :] = softmax(q . k^T / sqrt(head_dim)) . v over the rows token t sees: a prefix token (t < n_text) the
 /// tokens up to itself, or with key_lim the first key_lim[t] (never falling from row to row: an edit's reference

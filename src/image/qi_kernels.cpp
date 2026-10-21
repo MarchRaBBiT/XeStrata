@@ -35,9 +35,23 @@ void finish(void* stream, const sycl::event& e, const char* what) {
 constexpr float kEps = 1e-6f;
 
 // qi_qk_norm_rope16 a sub-group of 32 a head (t, h), HEADS heads a work-group
+// q, k and v as FP32, or (i8) a W8A8 product's int32 sums with their scales (s[0], s[1], s[2]: q's, k's and v's,
+// the activations' shared)
+struct QkvIn {
+    const float *q, *k, *v;
+    bool i8;
+    QiI8 s[3];
+    float at(int which, int64_t t, int64_t idx, int64_t c) const {
+        const float* p = which == 0 ? q : which == 1 ? k : v;
+        if (!i8) return p[idx];
+        return (float) sycl::bit_cast<int32_t>(p[idx]) * s[which].sx[t] * s[which].sw[c];
+    }
+};
+
 struct QkRope {
     static constexpr int64_t SG = 32, HEADS = 8, LANES = SG * HEADS;
-    const float *q, *k, *v, *wq, *wk, *cos, *sin;
+    QkvIn in;
+    const float *wq, *wk, *cos, *sin;
     int64_t n, heads, head_dim;
     uint16_t *q16, *k16, *v16;
     void operator()(sycl::nd_item<1> it) const {
@@ -45,28 +59,28 @@ struct QkRope {
         const int64_t g = static_cast<int64_t>(it.get_group_linear_id()) * HEADS + sg.get_group_linear_id();
         const int64_t lane = sg.get_local_linear_id(), half = head_dim / 2;
         if (g >= n) return;   // the whole sub-group
-        const int64_t t = g / heads, base = g * head_dim;
+        const int64_t t = g / heads, base = g * head_dim, c0 = (g - t * heads) * head_dim;
         for (int which = 0; which < 2; ++which) {
-            const float* src = which == 0 ? q : k;
             const float* w = which == 0 ? wq : wk;
             float ss = 0.f;
             for (int64_t p = lane; p < half; p += SG) {
-                const auto ab = *reinterpret_cast<const sycl::vec<float, 2>*>(src + base + 2 * p);
-                ss += ab[0] * ab[0] + ab[1] * ab[1];
+                const float a = in.at(which, t, base + 2 * p, c0 + 2 * p);
+                const float b = in.at(which, t, base + 2 * p + 1, c0 + 2 * p + 1);
+                ss += a * a + b * b;
             }
             const float r =
                 1.f / sycl::sqrt(sycl::reduce_over_group(sg, ss, sycl::plus<float>()) / (float) head_dim + kEps);
             uint16_t* dst = which == 0 ? q16 : k16;
             for (int64_t p = lane; p < half; p += SG) {
-                const auto ab = *reinterpret_cast<const sycl::vec<float, 2>*>(src + base + 2 * p);
-                const float a = ab[0] * r * w[2 * p], b = ab[1] * r * w[2 * p + 1];
+                const float a = in.at(which, t, base + 2 * p, c0 + 2 * p) * r * w[2 * p];
+                const float b = in.at(which, t, base + 2 * p + 1, c0 + 2 * p + 1) * r * w[2 * p + 1];
                 const float c = cos[t * half + p], sn = sin[t * half + p];
                 // the pair (a, b) = (even, odd): a' = a c - b s, b' = a s + b c
                 dst[base + 2 * p] = f16_from_f32(a * c - b * sn);
                 dst[base + 2 * p + 1] = f16_from_f32(a * sn + b * c);
             }
         }
-        for (int64_t d = lane; d < head_dim; d += SG) v16[base + d] = f16_from_f32(v[base + d]);
+        for (int64_t d = lane; d < head_dim; d += SG) v16[base + d] = f16_from_f32(in.at(2, t, base + d, c0 + d));
     }
     auto get(syclex::properties_tag) const { return syclex::properties{syclex::sub_group_size<SG>}; }
 };
@@ -208,7 +222,10 @@ void qi_gate_add(float* x, const float* h, const float* mod, int64_t n_text, int
 
 void qi_qk_norm_rope16(const float* q, const float* k, const float* v, const float* wq, const float* wk,
                        const float* cos, const float* sin, int64_t T, int64_t heads, int64_t head_dim,
-                       uint16_t* q16, uint16_t* k16, uint16_t* v16, void* stream) {
+                       uint16_t* q16, uint16_t* k16, uint16_t* v16, void* stream, const QiI8* i8) {
+    QkvIn in{q, k, v, i8 != nullptr, {}};
+    if (i8 != nullptr)
+        for (int j = 0; j < 3; ++j) in.s[j] = i8[j];
     if (T <= 0) return;
     if (head_dim % 2 != 0 || head_dim > 256) throw std::invalid_argument("qi_qk_norm_rope16: head_dim");
     const int64_t half = head_dim / 2;
@@ -226,7 +243,7 @@ void qi_qk_norm_rope16(const float* q, const float* k, const float* v, const flo
         const auto e = q0.parallel_for(
             sycl::nd_range<1>(sycl::range<1>((size_t) ((n + QkRope::HEADS - 1) / QkRope::HEADS * QkRope::LANES)),
                               sycl::range<1>((size_t) QkRope::LANES)),
-            QkRope{q, k, v, wq, wk, cos, sin, n, heads, head_dim, q16, k16, v16});
+            QkRope{in, wq, wk, cos, sin, n, heads, head_dim, q16, k16, v16});
         finish(stream, e, "qi_qk_norm_rope16");
         return;
     }
@@ -235,14 +252,13 @@ void qi_qk_norm_rope16(const float* q, const float* k, const float* v, const flo
         sycl::nd_range<1>(sycl::range<1>((size_t) (T * heads) * local), sycl::range<1>(local)),
         [=](sycl::nd_item<1> it) {
             const int64_t g = static_cast<int64_t>(it.get_group_linear_id()), d = static_cast<int64_t>(it.get_local_linear_id());
-            const int64_t t = g / heads, i = g * head_dim + d;
+            const int64_t t = g / heads, i = g * head_dim + d, c0 = (g - t * heads) * head_dim;
             const int64_t j = d / 2;
             const float c = cos[t * half + j], s = sin[t * half + j];
             const bool odd = (d & 1) != 0;
             for (int which = 0; which < 2; ++which) {
-                const float* src = which == 0 ? q : k;
                 const float* w = which == 0 ? wq : wk;
-                const float val = src[i];
+                const float val = in.at(which, t, i, c0 + d);
                 const float ss = sycl::reduce_over_group(it.get_group(), val * val, sycl::plus<float>());
                 const float n = val / sycl::sqrt(ss / (float) head_dim + kEps) * w[d];
                 const float other = sycl::permute_group_by_xor(it.get_sub_group(), n, 1);
@@ -250,7 +266,7 @@ void qi_qk_norm_rope16(const float* q, const float* k, const float* v, const flo
                 const float out = odd ? other * s + n * c : n * c - other * s;
                 (which == 0 ? q16 : k16)[i] = f16_from_f32(out);
             }
-            v16[i] = f16_from_f32(v[i]);
+            v16[i] = f16_from_f32(in.at(2, t, i, c0 + d));
         });
     finish(stream, e, "qi_qk_norm_rope16");
 }
