@@ -1297,6 +1297,13 @@ setup は画像のモデル、VAE、文の読み手（Qwen3-VL-8B）と、編集
 既定は 40 ステップ（Qwen の diffusers の pipeline の既定で、ガイダンスはなし）で、1 枚に Turbo の約 5 倍の時間がかかります。リクエストの `steps`（2〜100）で変えられます。各ステップの sigma は diffusers の scheduler と同じ式で、画像の大きさに合わせてずらします。
 Qwen-Image-2.1-Turbo と Qwen-Image-2.1 の重みは Qwen Research License で、自由なソフトウェアのライセンスではありません。商用に使う前にそのライセンスを読んでください。
 
+`--images mage-flow-turbo` なら、Microsoft の Mage-Flow-Turbo（4B、4 ステップ）で作ります。`mage-flow`（強化学習で調整した版、20 ステップ）と `mage-flow-base`（元のモデル、30 ステップ）は CFG を掛けます（既定の強さ 5）。
+setup は画像のモデル（Comfy-Org の bf16 の safetensors）、VAE、文の読み手（Qwen3-VL-4B）をダウンロードします。文の読み手の大きさの選び方は Qwen-Image-2.1 と同じで、画像のモデルの大きさは 1 つです。
+エンジンは画像のモデルを読み込むときに Q8_0 にし（`--image-dit-q8 off` なら bf16 のまま）、VRAM に入らないブロックは RAM から流します。
+`-uncensored` なら、文の読み手を huihui-ai の Qwen3-VL-4B（拒否の方向を取り除いたもの、noctrex の GGUF）に替えます。
+API では `steps`（既定はそれぞれのステップ数）、CFG の強さ `true_cfg_scale` か `guidance_scale`（1 なら CFG なし）、`negative_prompt`（既定は空白 1 文字）を受けます。編集、マスク、透明な背景はまだできません。
+Mage-Flow の重みは MIT ですが、Microsoft の README は研究のためのモデルで、製品やサービスに使うことは想定していないとしています。XeStrata は Mage-Flow の内容のフィルターも透かしも入れていません。
+
 サーバーは `POST /v1/images/generations`（OpenAI の images API の形。`seed` と、Qwen-Image-2.1 では `steps` も受けます）で画像を作り、Web のページには「Images」のタブが出ます。
 画像の API は vLLM-Omni 互換（OpenAI 互換）で、vLLM-Omni の拡張の項目も受けます。`num_inference_steps` は `steps` と同じです（Turbo は 8 ステップのままで、ステップ数の指定は無視します）。`true_cfg_scale` を 1 より大きくして `negative_prompt` を付けると、Qwen-Image-2.1 に CFG を掛けます（diffusers の Qwen-Image-2.1 と同じ式です。条件ありとネガティブの 2 つ分を計算するので、時間は 1024×1024 で約 2 倍、512×512 では約 1.5 倍です）。どちらかが欠けていればガイダンスなしで、`guidance_scale` は Qwen-Image-2.1 では使いません。
 `output_format` は `png`（既定）、`jpeg`、`webp` で、`output_compression`（0〜100、既定 100）が jpeg と webp の画質になります。`quality` は Qwen-Image-2.1 でステップ数を決めます（`low` 20、`medium` 30、`high` と `auto` は既定の 40。`steps` を付けたときはそちら）。Turbo では 8 ステップのままです。応答の `usage` は画像のエンジンのトークンで数えます（プロンプトのトークンと、参照画像と作った画像の 16×16 画素で 1 つのトークン）。

@@ -214,7 +214,7 @@ It goes with any text model, and the images are made by XeStrata's own image eng
 | `mage-flow` | [Mage-Flow](https://huggingface.co/Comfy-Org/Mage-Flow) | slow (20 steps, CFG) | tuned for following instructions and drawing text |
 | `mage-flow-base` | [Mage-Flow-Base](https://huggingface.co/Comfy-Org/Mage-Flow) | slow (30 steps, CFG) | the model before that tuning |
 
-For Qwen-Image-2.1, with `-uncensored` (`qwen-image-turbo-uncensored` and so on), the text encoder is AtomicChat's Qwen3-VL-8B with its refusal direction removed.
+With `-uncensored` (`qwen-image-turbo-uncensored`, `mage-flow-turbo-uncensored` and so on), the text encoder is one with its refusal direction removed (for Qwen-Image-2.1 AtomicChat's Qwen3-VL-8B, for Mage-Flow huihui-ai's Qwen3-VL-4B).
 
 | Image model size (`--image-quant`) | Download | RAM (about) | VRAM |
 | --- | ---: | ---: | ---: |
@@ -226,13 +226,12 @@ The download is the image model, the text encoder (Qwen3-VL-8B Q8_0), the VAE an
 The RAM is what it takes besides the text model: when it is short, setup lowers the text encoder down to Q4_K, then the image model (with `--image-ssd-offload on` it keeps them and reads what does not fit from the SSD).
 More VRAM makes it faster.
 
-Mage-Flow (Microsoft, MIT) has one image model for generation and another for edits: setup installs both, and the engine switches to the edit one for an edit.
-It comes in one size: the download is the two image models (bf16), the text encoder (Qwen3-VL-4B Q8_0), the VAE and the vision encoder for the edits, 21.9 GB together, and the RAM about 16 GB (one image model at a time).
-The engine turns the image model into Q8_0 as it loads it and keeps it in VRAM, what does not fit in pinned RAM, also as Q8_0 (`--image-dit-q8 off` keeps bf16).
-The image model not in use stays in pinned RAM as Q8_0, so switching is quick; `--image-dit-keep off` lets it go, about 4.4 GB less RAM, and reads it from the file again at each switch.
+Mage-Flow (Microsoft, MIT) comes in one size: the download is the image model (bf16), the text encoder (Qwen3-VL-4B Q8_0) and the VAE, 12.9 GB together, and the RAM about 11 GB.
+The engine turns the image model into Q8_0 as it loads it and keeps it in VRAM, and streams what does not fit from RAM (`--image-dit-q8 off` keeps bf16).
+Mage-Flow only generates images: its edits are not in yet.
 
 Images are made through `POST /v1/images/generations` and `/v1/images/edits` (vLLM-Omni compatible, so OpenAI compatible), the Images tab of the web page, and the chat ([details](docs/DETAILS.md#image-generation-optional)).
-Qwen-Image-2.1's weights are under the Qwen Research License, not a free software license; Mage-Flow's are under MIT.
+Qwen-Image-2.1's weights are under the Qwen Research License, not a free software license. Mage-Flow's are under MIT, but Microsoft's README says the models are for research and not meant for products or services.
 
 ## Install
 
