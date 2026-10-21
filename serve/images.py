@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Niko1221 and the Strata contributors
 # SPDX-FileCopyrightText: 2026 MistVVK and the XeStrata contributors
 # SPDX-License-Identifier: LGPL-3.0-or-later AND MIT
-"""serve/images.py - image generation (Qwen-Image-2.1-Turbo, Qwen-Image-2.1) through XeStrata's own image engine,
-strata-image.
+"""serve/images.py - image generation (Qwen-Image-2.1-Turbo, Qwen-Image-2.1, Mage-Flow) through XeStrata's own image
+engine, strata-image.
 
 POST /v1/images/generations takes OpenAI's request shape (prompt, size, n, response_format b64_json|url) plus Strata's
 own field seed; POST /v1/images/edits the same with reference images (OpenAI's multipart form, image or image[]; or JSON
@@ -15,6 +15,12 @@ prompt's text states and the layers that fit in VRAM kept between images, one im
 model card's command for the same seed (within LPIPS 0.03); the base model ("schedule": "base") the steps asked for
 (default the config's "steps", 40) on its scheduler's sigmas (base_sigmas), CFG 1 as well.  A size whose sides are
 not multiples of 16 (1920x1080) is made at the sides rounded up (1920x1088) and its middle cut out.
+
+Mage-Flow ("family": "mage-flow", "schedule": "mage"): its own prompt form (MF_PROMPT_HEAD, the 34 ids of its system
+turn dropped), the steps asked for (default the config's: Turbo 4, the RL model 20, the base model 30) on its static
+shift (mage_sigmas), and guidance by guidance_scale or true_cfg_scale (the one scale it has; default the config's
+"cfg_scale": Turbo 1, none; the others 5.0) with negative_prompt (default " ", its pipeline's).  Its edits, masks and
+transparent images are not here.
 
 The GPU is shared with the text engine one job at a time: an image job takes the service's turn (the FIFO every chat
 request takes), so no chat turn runs on the GPU meanwhile.  The image engine works in the VRAM it is given: what it
@@ -88,6 +94,12 @@ QUALITY_STEPS = {"low": 20, "medium": 30, "standard": 30, "high": None, "hd": No
 PROMPT_HEAD = "<|im_start|>system\nComprehend and analyze the provided prompt.<|im_end|>\n<|im_start|>user\n"
 PROMPT_TAIL = "<|im_end|>\n<|im_start|>assistant\n"
 DROP = 14
+# Mage-Flow's prompt (its pipeline's "mage-flow" template): the system turn's 34 ids are not the DiT's
+MF_PROMPT_HEAD = ("<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, "
+                  "text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n")
+MF_DROP = 34
+MF_SHIFT = 6.0                     # Mage-Flow's static time shift
+MF_NEG = " "                       # its pipeline's negative prompt when none is given
 # an edit's reference image in the prompt: one pad, which the engine widens to the image's tokens
 REF_PROMPT = "{sep}<image{i}><|vision_start|><|image_pad|><|vision_end|>"
 REF_MAX_BYTES = 32 << 20
@@ -169,10 +181,12 @@ def parse_request(req: dict, cfg: dict) -> dict:
     if cfg.get("schedule") == "base":
         steps = _int_field(req, "steps", 2, MAX_STEPS,
                            QUALITY_STEPS.get(quality or "auto") or int(cfg.get("steps") or 40))
+    elif cfg.get("schedule") == "mage":   # Mage-Flow: any count on its static shift, the config's by default
+        steps = _int_field(req, "steps", 1, MAX_STEPS, int(cfg.get("steps") or 4))
     else:   # Turbo's own sigmas: steps asked for are ignored, as its diffusers pipeline (sample_sigmas) does
         _int_field(req, "steps", 1, MAX_STEPS, None)
         steps = TURBO_STEPS
-    cfg_fields = cfg_request(req)
+    cfg_fields = cfg_request(req, cfg)
     seed = _int_field(req, "seed", 0, 2**62, None)
     if seed is None:
         seed = random.SystemRandom().randrange(0, 2**31)
@@ -181,10 +195,12 @@ def parse_request(req: dict, cfg: dict) -> dict:
             "output_compression": compression, "background": background, **cfg_fields}
 
 
-def cfg_request(req: dict) -> dict:
+def cfg_request(req: dict, cfg: dict | None = None) -> dict:
     """vLLM-Omni's guidance fields, checked: negative_prompt, guidance_scale and true_cfg_scale.  Qwen-Image-2.1 takes
     classifier-free guidance from true_cfg_scale above 1 with a negative_prompt, as diffusers' QwenImage21Pipeline
-    does (without one, or at 1, none: "cfg" stays out of the job); guidance_scale it has no use for, and ignores."""
+    does (without one, or at 1, none: "cfg" stays out of the job); guidance_scale it has no use for, and ignores.
+    Mage-Flow (cfg "family" mage-flow) has one scale: true_cfg_scale, else guidance_scale, else the config's
+    "cfg_scale"; above 1 it guides, with negative_prompt or its pipeline's " "."""
     out: dict = {}
     neg = req.get("negative_prompt")
     if neg is not None:
@@ -198,6 +214,12 @@ def cfg_request(req: dict) -> dict:
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= CFG_MAX:
             raise ImageRequestError(f"{key}: a number from 0 to {CFG_MAX:g}")
         out[key] = float(v)
+    if (cfg or {}).get("family") == "mage-flow":
+        scale = out.get("true_cfg_scale", out.get("guidance_scale", float((cfg or {}).get("cfg_scale") or 1.0)))
+        if scale > 1:
+            out["cfg"] = scale
+            out.setdefault("negative_prompt", MF_NEG)
+        return out
     if out.get("true_cfg_scale", 1.0) > 1 and out.get("negative_prompt") is not None:
         out["cfg"] = out["true_cfg_scale"]
     return out
@@ -273,6 +295,8 @@ def parse_edit_request(req: dict, images: list[bytes], cfg: dict, mask: bytes | 
     multiples of SIZE_STEP.  `mask` (OpenAI's): a PNG of the first image's size whose transparent pixels are where it
     changes, the rest kept as it is (the engine's inpainting), as job["mask"]; refused by a model whose config says
     "mask": false."""
+    if cfg.get("family") == "mage-flow":
+        raise ImageRequestError("edits: Mage-Flow's are not in this version yet")
     if not cfg.get("vision"):
         raise ImageRequestError("edits need the vision encoder: run setup with --images qwen-image-turbo again")
     if not images:
@@ -370,13 +394,25 @@ def png_rgba(rgba: bytes, width: int, height: int, made_w: int, made_h: int) -> 
             + chunk(b"IDAT", zlib.compress(bytes(rows), 6)) + chunk(b"IEND", b""))
 
 
-def prompt_ids(tok, prompt: str, refs: int = 0) -> list[int]:
+def prompt_ids(tok, prompt: str, refs: int = 0, family: str = "qwen-image") -> list[int]:
     """The prompt in the model's chat form, tokenized (Qwen3-VL's tokenizer): the user's text plain, so a special
     token spelled in it stays text; an edit's `refs` reference images before it, one pad each (stable-diffusion.cpp's
-    prompt for Qwen-Image-2.1's edits, the pads widened by the engine)."""
-    head = PROMPT_HEAD + "".join(REF_PROMPT.format(sep=" " if i else "", i=i + 1) for i in range(refs))
+    prompt for Qwen-Image-2.1's edits, the pads widened by the engine).  Mage-Flow's in its own form
+    (MF_PROMPT_HEAD)."""
+    head = ((MF_PROMPT_HEAD if family == "mage-flow" else PROMPT_HEAD) +
+            "".join(REF_PROMPT.format(sep=" " if i else "", i=i + 1) for i in range(refs)))
     text = head + prompt + PROMPT_TAIL
     return tok.encode(text, parse_special=True, plain=[(len(head), len(head) + len(prompt))])
+
+
+def mage_sigmas(steps: int, shift: float = MF_SHIFT) -> list[float]:
+    """Mage-Flow's sigmas for `steps` and the terminal 0: shift t / (1 + (shift - 1) t), t from 1 down to 1 / steps
+    (its FlowMatchEulerDiscreteScheduler with a static shift; the engine's own default for Turbo's 4)."""
+    out = []
+    for i in range(steps):
+        t = 1.0 - (1.0 - 1.0 / steps) * i / (steps - 1) if steps > 1 else 1.0
+        out.append(shift * t / (1.0 + (shift - 1.0) * t))
+    return out + [0.0]
 
 
 def load_tokenizer(gguf: str):
@@ -431,6 +467,8 @@ class ImageEngine:
                "--text", str(self.cfg["llm"])]
         if self.cfg.get("vision"):
             cmd += ["--vision", str(self.cfg["vision"])]
+        if self.cfg.get("dit_q8") is False:
+            cmd += ["--dit-q8", "0"]
         return cmd + ["--serve"]
 
     def alive(self) -> bool:
@@ -608,6 +646,7 @@ class ImageGen:
             raise ValueError('the config\'s "images" section is for stable-diffusion.cpp, which XeStrata no longer '
                              "uses (run setup with --images again)")
         self.policy, self.reload = policy, reload
+        self.drop = MF_DROP if self.cfg.get("family") == "mage-flow" else DROP   # the system turn's ids
         self.model = self.cfg.get("model_name") or MODEL_NAME
         self.log = log
         out = self.cfg.get("out_dir")
@@ -683,9 +722,10 @@ class ImageGen:
         if self.tok is None:
             self.tok = load_tokenizer(self.cfg["llm"])
         if "ids" not in job:
-            job["ids"] = prompt_ids(self.tok, model_prompt(job), len(job.get("refs") or ()))
+            fam = self.cfg.get("family") or "qwen-image"
+            job["ids"] = prompt_ids(self.tok, model_prompt(job), len(job.get("refs") or ()), fam)
             if job.get("cfg"):   # guidance's negative prompt, in the same form (its pads as the prompt's)
-                job["neg_ids"] = prompt_ids(self.tok, job["negative_prompt"], len(job.get("refs") or ()))
+                job["neg_ids"] = prompt_ids(self.tok, job["negative_prompt"], len(job.get("refs") or ()), fam)
         return job["ids"]
 
     @staticmethod
@@ -733,8 +773,8 @@ class ImageGen:
             self._ready()
             w, h = made_size(job)
             self.stage(job)
-            n = len(self.ids(job)) - DROP
-            neg = f" NEG:{len(job['neg_ids']) - DROP}" if job.get("cfg") else ""
+            n = len(self.ids(job)) - self.drop
+            neg = f" NEG:{len(job['neg_ids']) - self.drop}" if job.get("cfg") else ""
             return self.engine.ask(f"NEED {w} {h} {n}{self._refs_words(job)}{neg}", "NEED", 600)
 
     def free_mib(self) -> int:
@@ -776,8 +816,10 @@ class ImageGen:
                 self._ready()
                 self.stage(job)
                 ids = ",".join(str(i) for i in self.ids(job))
-                sigmas = ("" if self.cfg.get("schedule") != "base" else
-                          " SIGMAS:" + ",".join(f"{x:.7g}" for x in base_sigmas(job["steps"], mw, mh)))
+                sched = self.cfg.get("schedule")
+                sig = (base_sigmas(job["steps"], mw, mh) if sched == "base" else
+                       mage_sigmas(job["steps"]) if sched == "mage" else [])
+                sigmas = " SIGMAS:" + ",".join(f"{x:.7g}" for x in sig) if sig else ""
                 for i in range(job["n"]):
                     if cancel is not None and cancel.is_set():
                         self.totals["failed"] += 1
@@ -794,7 +836,7 @@ class ImageGen:
                     def stage(name):
                         self._live(stage=name, **({"sampling_at": time.monotonic()} if name == "sampling" else {}))
                     try:
-                        r = self.engine.ask(f"IMG {mw} {mh} {job['seed'] + i} {DROP} {out} {ids}{sigmas}"
+                        r = self.engine.ask(f"IMG {mw} {mh} {job['seed'] + i} {self.drop} {out} {ids}{sigmas}"
                                             f"{self._refs_words(job)}{self._cfg_words(job)}", "IMAGE", timeout,
                                             cancel, step, stage)
                     except ImageJobFailed as e:
