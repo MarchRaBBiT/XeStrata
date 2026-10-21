@@ -35,7 +35,8 @@ answers, no questions), --setup (install another model / change settings instead
 generation on XeStrata's image engine, POST /v1/images/generations: Qwen-Image-2.1-Turbo in 8 steps, or its base
 model Qwen-Image-2.1 in 40; mage-flow-turbo|mage-flow|mage-flow-base[-uncensored]: Mage-Flow in 4, 20 or 30;
 -uncensored: the text encoder with the refusal direction removed; --image-quant Q4_K_M|Q6_K|Q8_0 (Qwen-Image),
---image-dit-q8 on|off (Mage-Flow), --image-ssd-offload on|off, --image-gpu-policy auto|keep|shrink|unload).
+--image-dit-q8 on|off and --image-dit-keep on|off (Mage-Flow), --image-ssd-offload on|off, --image-gpu-policy
+auto|keep|shrink|unload).
 
 Setup recommends, it never forces: the recommended answers are the defaults (--yes, or Enter), and a bigger choice
 than it recommends - a longer context, a size it thinks will not fit - is kept, with what it risks.  With --yes, an
@@ -3099,16 +3100,17 @@ def setup_images(a, gpu: dict, models_dir: Path, eng: Path, text_gb: float | Non
                  "(--image-dit-q8 on|off)")
         asked = QI.dit_quants(dit)[-1]
     dit_q8 = getattr(a, "image_dit_q8", None) != "off"
+    dit_keep = getattr(a, "image_dit_keep", None) != "off"
     tasked = QI.DEFAULT_TEXT_QUANT
     ssd = getattr(a, "image_ssd_offload", None) == "on"
     quant, tquant = asked, tasked
     lowered = None
     if not ssd and text_gb is not None:
         left = ram_gb() - text_gb
-        quant, tquant, fits = QI.fit_ram(left, enc, asked, tasked, dit)
+        quant, tquant, fits = QI.fit_ram(left, enc, asked, tasked, dit, dit_keep)
         if (quant, tquant) != (asked, tasked):
             # kept in the config: the server says it at start and on the web page (the user's decision, 2026-10-15)
-            need = QI.ram_need_gb(asked, enc, tasked, dit)
+            need = QI.ram_need_gb(asked, enc, tasked, dit, dit_keep)
             lowered = {"from": asked, "to": quant, "text_from": tasked, "text_to": tquant,
                        "need_gb": round(need, 1), "ram_left_gb": round(max(left, 0.0), 1)}
             warn(f"image model lowered from {asked} (text encoder {tasked}) to {quant} (text encoder {tquant}): "
@@ -3116,7 +3118,8 @@ def setup_images(a, gpu: dict, models_dir: Path, eng: Path, text_gb: float | Non
                  f"leaves ~{max(left, 0):.0f} GB. --image-ssd-offload on keeps both and reads what does not fit "
                  "from the SSD (slower)")
         if not fits:
-            warn(f"even {quant} with a {tquant} text encoder (~{QI.ram_need_gb(quant, enc, tquant, dit):.0f} GB) "
+            least = QI.ram_need_gb(quant, enc, tquant, dit, dit_keep)
+            warn(f"even {quant} with a {tquant} text encoder (~{least:.0f} GB) "
                  f"does not fit the ~{max(left, 0):.0f} GB of RAM the text model leaves: images read part of the model "
                  "from the SSD (slower), and the PC may run short of RAM while one is made")
     elif ssd:
@@ -3142,7 +3145,8 @@ def setup_images(a, gpu: dict, models_dir: Path, eng: Path, text_gb: float | Non
         download(QI.file_url(name, hf_endpoint()), dst, f"image model: {Path(path).name}")
         verify_sha256(dst, size, sha)
     cfg = QI.image_config(quant, exe, models_dir, model=a.images, uma=bool((gpu or {}).get("integrated")),
-                          policy=a.image_gpu_policy or "auto", ssd_offload=ssd, text_quant=tquant, dit_q8=dit_q8)
+                          policy=a.image_gpu_policy or "auto", ssd_offload=ssd, text_quant=tquant, dit_q8=dit_q8,
+                          dit_keep=dit_keep)
     if lowered:
         cfg["quant_lowered"] = lowered
     ok(f"image generation: {quant}, text encoder {tquant}, GPU policy {cfg['gpu_policy']}")
@@ -5058,6 +5062,10 @@ def main() -> int:
     ap.add_argument("--image-dit-q8", choices=["on", "off"],
                     help="Mage-Flow: on (default) quantizes its image model to Q8_0 as the engine reads it (half the "
                          "VRAM and RAM, the pinned RAM of what does not fit included); off keeps bf16")
+    ap.add_argument("--image-dit-keep", choices=["on", "off"],
+                    help="Mage-Flow: on (default) keeps the image model not in use (the generation's or the edit's) in "
+                         "RAM as Q8_0, so switching is quick; off lets it go (about 4.4 GB less RAM) and reads it from "
+                         "the file again at each switch")
     ap.add_argument("--image-ssd-offload", choices=["on", "off"],
                     help="on: keep the image model's and its text encoder's sizes even when the RAM is short, and "
                          "read what does not fit from the SSD (slower); off (default): smaller sizes instead")
