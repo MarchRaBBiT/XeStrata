@@ -5,11 +5,12 @@
 //   strata-image --dit DIT.gguf --vae VAE.safetensors --text TEXT_ENCODER.gguf [--vision MMPROJ.gguf]
 //                [--budget-mib M] (--ids 1,2,3 [--drop N] [--width W] [--height H] [--seed S] [--sigmas 1,...,0]
 //                [--ref IMAGE]... [--mask IMAGE] [--repeat N] --out IMAGE.rgba | --serve)
-//   strata-image --dit DIT.safetensors ... [--dit-q8 0|1] [--edit-dit EDIT_DIT.safetensors --vision MMPROJ.gguf]
+//   strata-image --dit DIT.safetensors ... [--dit-q8 auto|0|1] [--edit-dit EDIT_DIT.safetensors --vision MMPROJ.gguf]
 //                [--dit-keep 0|1]
 //
 // The DiT's file says the model: a GGUF is Qwen-Image-2.1's, a safetensors file Mage-Flow's (its bf16 weights as
-// Comfy-Org has them; --dit-q8 1, the default, quantizes its blocks to Q8_0 as they are read).  Mage-Flow's edits take
+// Comfy-Org has them; its blocks FP16 on the GPU when they fit the budget, else quantized to Q8_0 as they are read:
+// --dit-q8 auto, the default; 1 always Q8_0, 0 always FP16).  Mage-Flow's edits take
 // its edit DiT (--edit-dit) and Qwen3-VL-4B's mmproj (--vision), up to three --ref; --dit-keep 1, the default, keeps the
 // DiT not in use in RAM between a generation and an edit (0: read from its file again).
 //
@@ -292,7 +293,8 @@ int main(int argc, char** argv) {
         uint64_t budget = 0;
         int repeat = 1;
         std::string edit_dit;
-        bool serving = false, dit_q8 = true, dit_keep = true;
+        int dit_q8 = -1;   // Mage-Flow: by the budget
+        bool serving = false, dit_keep = true;
         for (int i = 1; i < argc; ++i) {
             const std::string a = argv[i];
             auto val = [&]() -> std::string {
@@ -317,7 +319,10 @@ int main(int argc, char** argv) {
             else if (a == "--budget-mib") budget = std::stoull(val()) << 20;
             else if (a == "--repeat") repeat = std::stoi(val());
             else if (a == "--serve") serving = true;
-            else if (a == "--dit-q8") dit_q8 = val() != "0";
+            else if (a == "--dit-q8") {
+                const std::string v = val();
+                dit_q8 = v == "auto" ? -1 : v != "0";
+            }
             else if (a == "--edit-dit") edit_dit = val();
             else if (a == "--dit-keep") dit_keep = val() != "0";
             else throw std::invalid_argument("unknown option " + a);
@@ -325,7 +330,7 @@ int main(int argc, char** argv) {
         if (dit.empty() || vae.empty() || text.empty() || (!serving && (out.empty() || ids.empty()))) {
             std::fprintf(stderr, "usage: %s --dit F --vae F --text F [--vision F] [--budget-mib M] (--ids 1,2,3 "
                          "[--drop N] [--width W] [--height H] [--seed S] [--sigmas 1,...,0] [--ref IMAGE]... "
-                         "[--mask IMAGE] [--repeat N] --out IMAGE.rgba | --serve) [--dit-q8 0|1] [--edit-dit F] "
+                         "[--mask IMAGE] [--repeat N] --out IMAGE.rgba | --serve) [--dit-q8 auto|0|1] [--edit-dit F] "
                          "[--dit-keep 0|1]\n", argv[0]);
             return 2;
         }

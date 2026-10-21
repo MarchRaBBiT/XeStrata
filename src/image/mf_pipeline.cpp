@@ -134,7 +134,7 @@ std::vector<float> mage_sigmas(int n, float shift) {
 }
 
 bool MfPipeline::open(const std::string& dit, const std::string& vae, const std::string& text, std::string& err,
-                      bool q8, const std::string& edit_dit, const std::string& vision, bool keep) {
+                      int q8, const std::string& edit_dit, const std::string& vision, bool keep) {
     s_ = core::Runtime::get().create_stream();
     dit_path_ = dit;
     vae_path_ = vae;
@@ -147,9 +147,10 @@ bool MfPipeline::open(const std::string& dit, const std::string& vae, const std:
     gpu::mem_info(&free, &total);
     te_size_ = std::make_unique<QiText>();
     dit_size_ = std::make_unique<MfDit>();
+    dit16_size_ = std::make_unique<MfDit>();
     vae_size_ = std::make_unique<MfVae>();
-    if (!(te_size_->open(text, s_, err, true) && dit_size_->open(dit, s_, err, true, q8_) &&
-          vae_size_->open(vae, s_, err, true)))
+    if (!(te_size_->open(text, s_, err, true) && dit_size_->open(dit, s_, err, true, true) &&
+          dit16_size_->open(dit, s_, err, true, false) && vae_size_->open(vae, s_, err, true)))
         return false;
     if (!edit_path_.empty() || !vision_path_.empty()) {
         if (edit_path_.empty() || vision_path_.empty()) {
@@ -164,7 +165,7 @@ bool MfPipeline::open(const std::string& dit, const std::string& vae, const std:
 }
 
 void MfPipeline::ensure_open() {
-    if ((dit_ || edit_dit_) && vae_ && te_) return;
+    if (vae_ && te_) return;
     std::string err;
     te_ = std::make_unique<QiText>();
     vae_ = std::make_unique<MfVae>();
@@ -177,15 +178,30 @@ void MfPipeline::ensure_open() {
     te_->set_flat_positions(true);   // the reference's encoder: every token's position its index, an image's too
     te_->set_layer_budget(te_->layer_min());
     te_set_ = te_->layer_min();
-    edit_active_ = false;
-    (void) use_dit(false);
+    edit_active_ = false;   // the DiT is opened by the request, which knows its size
+}
+
+// Q8_0 or FP16 for a request of `rows` image rows (an edit's references' included): FP16 when its blocks all fit the
+// budget beside the weights that stay, the larger of the DiT's activations and the encoder's, and the encoder's two
+// slots
+bool MfPipeline::want_q8(int64_t rows, int n, int64_t max_text, int64_t n_ids) const {
+    if (q8_ >= 0) return q8_ == 1;
+    const MfDit& d16 = *dit16_size_;
+    const uint64_t fixed = d16.weight_bytes() + vae_size_->weight_bytes() + kScratch +
+                           (vision_size_ ? vae_size_->encoder_bytes() : 0);
+    const uint64_t work = std::max(d16.activation_bytes(rows, n, max_text), te_size_->activation_bytes(n_ids));
+    return fixed + d16.block_bytes() + work + te_size_->layer_min() > budget();
 }
 
 // the DiT for a generation or an edit: the other gives its VRAM back (its Q8_0 kept in RAM with keep_, else let go),
 // this one opened when it is not, nothing of it resident until a request plans its budget
-MfDit& MfPipeline::use_dit(bool edit) {
+MfDit& MfPipeline::use_dit(bool edit, bool q8) {
     std::unique_ptr<MfDit>& want = edit ? edit_dit_ : dit_;
     std::unique_ptr<MfDit>& other = edit ? dit_ : edit_dit_;
+    if (want && want->q8() != q8) {   // the other form for this request's budget: opened again
+        gpu::stream_sync(s_);
+        want.reset();
+    }
     if (edit == edit_active_ && want) return *want;
     if (other) {
         other->drop_blocks();
@@ -196,7 +212,7 @@ MfDit& MfPipeline::use_dit(bool edit) {
     if (!want) {
         std::string err;
         auto d = std::make_unique<MfDit>();
-        if (!d->open(edit ? edit_path_ : dit_path_, s_, err, false, q8_)) throw std::runtime_error(err);
+        if (!d->open(edit ? edit_path_ : dit_path_, s_, err, false, q8)) throw std::runtime_error(err);
         want = std::move(d);
     }
     want->set_block_budget(want->block_min());
@@ -206,11 +222,12 @@ MfDit& MfPipeline::use_dit(bool edit) {
 }
 
 uint64_t MfPipeline::held() const {
-    const MfDit* d = edit_active_ ? edit_dit_.get() : dit_.get();
-    if (!(d && vae_ && te_)) return 0;
-    const MfDit* o = edit_active_ ? dit_.get() : edit_dit_.get();
-    return d->weight_bytes() + (o ? o->weight_bytes() : 0) + vae_->weight_bytes() + kScratch + d->blocks_vram() +
-           te_->layers_vram() + d->activations_held() + vae_->scratch_held();
+    if (!(vae_ && te_)) return 0;
+    uint64_t b = vae_->weight_bytes() + kScratch + te_->layers_vram() + vae_->scratch_held();
+    for (const MfDit* d : {dit_.get(), edit_dit_.get()})
+        if (d != nullptr) b += d->weight_bytes();
+    if (const MfDit* d = active()) b += d->blocks_vram() + d->activations_held();
+    return b;
 }
 
 void MfPipeline::fit(uint64_t reserve) {
@@ -223,7 +240,8 @@ void MfPipeline::fit(uint64_t reserve) {
 QiNeed MfPipeline::need(int64_t n_text, int64_t width, int64_t height,
                         const std::vector<std::pair<int64_t, int64_t>>& refs, bool mask, int64_t n_neg) {
     (void) mask;
-    const MfDit& dit = *dit_size_;
+    const MfDit& dit = q8_ == 0 ? *dit16_size_ : *dit_size_;   // the least: Q8_0's, unless FP16 is asked for
+    const MfDit& full = q8_ == 1 ? *dit_size_ : *dit16_size_;  // all resident: FP16's, unless Q8_0 is
     const QiText& te = *te_size_;
     const MfVae& vae = *vae_size_;
     const int64_t h = height / 16, w = width / 16;
@@ -248,8 +266,8 @@ QiNeed MfPipeline::need(int64_t n_text, int64_t width, int64_t height,
     QiNeed nd;
     nd.least = fixed + std::max({dit.activation_bytes(hw, n, max_text, 512), vae.scratch_bytes(h, w), te_act, edit}) +
                dit.block_min() + te.layer_min();
-    nd.full = fixed + dit.block_bytes() + te.layer_min() +
-              std::max({dit.activation_bytes(hw, n, max_text), vae.scratch_bytes(h, w), te_act, edit});
+    nd.full = fixed - dit.weight_bytes() + full.weight_bytes() + full.block_bytes() + te.layer_min() +
+              std::max({full.activation_bytes(hw, n, max_text), vae.scratch_bytes(h, w), te_act, edit});
     nd.held = held();
     size_t free = 0, total = 0;
     gpu::mem_info(&free, &total);
@@ -260,7 +278,7 @@ QiNeed MfPipeline::need(int64_t n_text, int64_t width, int64_t height,
 
 void MfPipeline::set_budget(uint64_t bytes) {
     budget_ = bytes;
-    if (held() == 0) return;
+    if (held() == 0 || active() == nullptr) return;
     (void) plan(0, 1, 0, 0);   // shrink at once what no longer fits
 }
 
@@ -275,9 +293,11 @@ void MfPipeline::release(bool all) {
         edit_active_ = false;
         return;
     }
-    dit().drop_blocks();
+    if (MfDit* d = active()) {
+        d->drop_blocks();
+        d->drop_activations();
+    }
     te_->drop_layers();
-    dit().drop_activations();
     vae_->drop_scratch();
     dit_set_ = te_set_ = 0;
     mlp_set_ = -1;
@@ -431,7 +451,9 @@ std::vector<uint8_t> MfPipeline::generate(const QiRequest& r, QiTimes* times, Qi
         edit_refs(r, e);
         vae_->drop_scratch();
     }
-    MfDit& d = use_dit(editing);
+    const int64_t max_ids = (int64_t) std::max(editing ? e.ids.size() : r.ids.size(),
+                                               editing ? e.neg_ids.size() : r.neg_ids.size());
+    MfDit& d = use_dit(editing, want_q8(h * w + e.rows, guided ? 2 : 1, max_ids - r.drop, max_ids));
     if (stage) stage("text");
     const std::vector<int32_t>& ids = editing ? e.ids : r.ids;
     const std::vector<int32_t>& neg_ids = editing ? e.neg_ids : r.neg_ids;
