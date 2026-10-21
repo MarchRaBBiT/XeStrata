@@ -39,6 +39,8 @@ ONEMATH_DLLS = ("onemath.dll", "onemath_blas_mklgpu.dll", "onemath_blas_cublas.d
 # AMD GPUs' image attention: the engine's module that opens aotriton (on an AMD GPU only), aotriton's library (built
 # in the engine's build, liblzma linked in) and its kernels' images, which it finds beside it
 AOTRITON_DLLS = ("strata_sdpa_aotriton.dll", "aotriton_v2.dll")
+# Intel GPUs' image attention: oneDNN (built in the engine's build, onednn/bin/)
+ONEDNN_DLLS = ("dnnl.dll",)
 # what a Windows PC brings (the Visual C++ runtime, which xestrata.exe checks for) and what must never be carried
 FORBIDDEN = ("vcruntime*.dll", "msvcp*.dll", "concrt*.dll", "ucrtbase*.dll", "api-ms-win-*.dll", "nvcuda.dll",
              "nvml.dll", "cublas*.dll", "cudart*.dll", "mkl_*.dll", "amdhip64*.dll", "amd_comgr*.dll")
@@ -94,6 +96,10 @@ COMPONENTS = [
      ["app/engine/aotriton_v2.dll", "app/engine/aotriton.images/*"]),
     ("liblzma of XZ Utils (linked into aotriton_v2.dll)", "5.8.1", "0BSD", "https://tukaani.org/xz/",
      ["src:third_party/main/xz/COPYING.0BSD"], []),
+    ("oneDNN", "3.12", "Apache-2.0 (parts of it under other licenses, listed in THIRD-PARTY-PROGRAMS)",
+     "https://github.com/uxlfoundation/oneDNN",
+     ["src:third_party/main/oneDNN/LICENSE", "src:third_party/main/oneDNN/THIRD-PARTY-PROGRAMS"],
+     ["app/engine/dnnl.dll"]),
     ("cuDNN Frontend (compiled into strata-image.exe)", "1.31.0", "Apache-2.0 (parts MIT)",
      "https://github.com/NVIDIA/cudnn-frontend", ["src:third_party/main/cudnn-frontend/LICENSE.txt"], []),
     ("stb_image (compiled into strata-image.exe)", "2.30", "MIT OR Unlicense", "https://github.com/nothings/stb",
@@ -196,6 +202,8 @@ def main() -> None:
         shutil.copy2(a.sycl / "bin" / d, eng / d)
     for d in ONEMATH_DLLS:
         shutil.copy2(a.engine / "bin" / d, eng / d)
+    for d in ONEDNN_DLLS:
+        shutil.copy2(a.engine / "onednn" / "bin" / d, eng / d)
     aot = a.engine / "_deps" / "aotriton" / "aotriton"
     shutil.copy2(a.engine / AOTRITON_DLLS[0], eng / AOTRITON_DLLS[0])
     shutil.copy2(aot / "lib" / AOTRITON_DLLS[1], eng / AOTRITON_DLLS[1])

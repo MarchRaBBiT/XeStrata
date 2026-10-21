@@ -25,13 +25,14 @@ mkl_ver=2026.2.0
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
-# llvm-21 and lld-21: llvm-lib, llvm-rc, llvm-mt, llvm-ml and lld-link, which intel/llvm does not install;
+# llvm-21 and lld-21: llvm-lib, llvm-rc, llvm-mt, llvm-ml and lld-link, which intel/llvm does not install; clang-21
+# beside them, which llvm-rc preprocesses with (oneDNN's version resource);
 # nvidia-cuda-toolkit: CUDA 12.4, for intel/llvm's CUDA target and the engine's NVIDIA code (not free software);
 # dotnet-sdk-10.0 for the launchers; ROCm's HIP (free software) for intel/llvm's HIP target and the Windows HIP
 # adapter's headers, and the device libraries the AMD code links (as container.sh); python3-venv and patch for
 # aotriton's build (its configure makes a venv for its code generator, and XeStrata's patch goes onto its source)
 apt-get install -y -q --no-install-recommends git cmake ninja-build g++ libhwloc-dev libzstd-dev python3 python3-pip \
-  python3-venv curl ca-certificates unzip ccache lld lld-21 llvm-21 dotnet-sdk-10.0 7zip nvidia-cuda-toolkit \
+  python3-venv curl ca-certificates unzip ccache lld lld-21 llvm-21 clang-21 dotnet-sdk-10.0 7zip nvidia-cuda-toolkit \
   opencl-headers patch xz-utils libamdhip64-dev rocm-device-libs-21
 cuda_path=/usr/lib/cuda
 # cuDNN's headers (the same on Windows), for the image engine's attention, which opens cuDNN where the user installed
