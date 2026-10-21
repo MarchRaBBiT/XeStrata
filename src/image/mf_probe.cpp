@@ -156,7 +156,7 @@ int vae(const std::string& path, const std::string& dir) {
     const auto t0 = std::chrono::steady_clock::now();
     v.decode_raw(z, h, w, rgb);
     strata::gpu::stream_sync(s);
-    std::printf("decode %lld x %lld: %.1f ms\n", (long long) (16 * h), (long long) (16 * w), 1e3 * seconds_since(t0));
+    std::printf("decode %lld x %lld: %.1f ms\n", 16 * (long long) h, 16 * (long long) w, 1e3 * seconds_since(t0));
     compare("cond", channels_first(fetch(v.last_cond(), (size_t) (HW * C)), HW, C).data(), cond.data(), cond.size());
     const auto st = npy<float>(dir + "/vae_s.npy");
     compare("blocks", channels_first(fetch(v.last_state(), (size_t) (HW * C)), HW, C).data(), st.data(), st.size());

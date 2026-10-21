@@ -93,6 +93,7 @@ void quantize_matrix(const uint16_t* src, int64_t n, int64_t k, uint8_t* dst) {
     const uint64_t row = (uint64_t) (k / 32 * 34);
     const int nt = (int) std::max(1u, std::min(16u, std::thread::hardware_concurrency()));
     std::vector<std::thread> th;
+    th.reserve((size_t) nt);
     for (int t = 0; t < nt; ++t)
         th.emplace_back([=] {
             for (int64_t r = t; r < n; r += nt) quantize_row(src + r * k, k, dst + r * row);
@@ -557,17 +558,18 @@ void MfDit::drop_activations() {
 void MfDit::rope_tables(int64_t h, int64_t w) {
     if (h == rope_h_ && w == rope_w_) return;
     const int64_t half = hd_ / 2, a0 = axes_[0] / 2, a1 = axes_[1] / 2;
+    const int64_t y0 = h - h / 2, x0 = w - w / 2;   // the centre's row and column
     std::vector<float> c((size_t) (h * w * half)), s(c.size());
     for (int64_t y = 0; y < h; ++y)
         for (int64_t x = 0; x < w; ++x)
             for (int64_t j = 0; j < half; ++j) {
                 double pos = 0, dim = (double) axes_[0], k = (double) j;
                 if (j >= a0 && j < a0 + a1) {
-                    pos = (double) (y - (h - h / 2));
+                    pos = (double) (y - y0);
                     dim = (double) axes_[1];
                     k = (double) (j - a0);
                 } else if (j >= a0 + a1) {
-                    pos = (double) (x - (w - w / 2));
+                    pos = (double) (x - x0);
                     dim = (double) axes_[2];
                     k = (double) (j - a0 - a1);
                 }
@@ -592,7 +594,7 @@ void MfDit::time_embedding(float sigma) {
         const float f = round_bf16(std::exp(-std::log(10000.f) * (float) i / 128.f));
         const float a = 1000.f * (t * f);
         e[(size_t) i] = f16_from_f32(round_bf16(std::cos(a)));
-        e[(size_t) (128 + i)] = f16_from_f32(round_bf16(std::sin(a)));
+        e[128 + (size_t) i] = f16_from_f32(round_bf16(std::sin(a)));
     }
     gpu::copy_async(t16_, e.data(), e.size() * 2, s_);
     gpu::stream_sync(s_);   // e leaves scope

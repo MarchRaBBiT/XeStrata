@@ -484,11 +484,12 @@ bool MfVae::open(const std::string& path, void* stream, std::string& err, bool d
         std::vector<float> dct((size_t) (kPix * 64));
         const double pi = 3.14159265358979323846;
         for (int64_t j = 0; j < kPix; ++j) {
-            const double py = (double) (j / kPatch) / 15.0, px = (double) (j % kPatch) / 15.0;
+            const int64_t iy = j / kPatch, ix = j % kPatch;
+            const double py = (double) iy / 15.0, px = (double) ix / 15.0;
             for (int a = 0; a < 8; ++a)
                 for (int b = 0; b < 8; ++b) {
                     const double fa = 8.0 * a / 7.0, fb = 8.0 * b / 7.0;
-                    dct[(size_t) (j * 64 + a * 8 + b)] =
+                    dct[(size_t) (j * 64 + a * 8L + b)] =
                         (float) (std::cos(px * fa * pi) * std::cos(py * fb * pi) / (1.0 + fa * fb));
                 }
         }

@@ -97,7 +97,8 @@ QiNeed MfPipeline::need(int64_t n_text, int64_t width, int64_t height,
     const MfDit& dit = *dit_size_;
     const QiText& te = *te_size_;
     const MfVae& vae = *vae_size_;
-    const int64_t hw = (height / 16) * (width / 16), n = n_neg > 0 ? 2 : 1, max_text = std::max(n_text, n_neg);
+    const int64_t hw = (height / 16) * (width / 16), max_text = std::max(n_text, n_neg);
+    const int n = n_neg > 0 ? 2 : 1;
     const uint64_t fixed = dit.weight_bytes() + vae.weight_bytes() + kScratch;
     const uint64_t te_act = te.activation_bytes(std::max(n_text, n_neg) + 64);   // the system turn's ids too
     QiNeed nd;
@@ -244,7 +245,6 @@ std::vector<uint8_t> MfPipeline::generate(const QiRequest& r, QiTimes* times, Qi
         if (vae_->scratch_bytes(h, w) > room && te_->layers_vram() > 0) {
             te_->drop_layers();
             te_set_ = 0;
-            room += p.layers;
         }
         vae_->decode(x, h, w, rgba);
         if (vae_->scratch_bytes(h, w) > p.vae) vae_->drop_scratch();
