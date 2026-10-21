@@ -287,6 +287,16 @@ int serve(si::ImagePipeline& p) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // oneMath's rocBLAS backend times hipBLASLt's first algorithms on a shape's first product and keeps the fastest:
+    // an image model's few shapes repeat every step (RX 9060 XT: its int8 products 20 to 40% faster), where the text
+    // engine's change with each prompt (it leaves the timing off)
+    if (std::getenv("ONEMATH_HIPBLASLT_TUNE") == nullptr) {
+#if defined(_WIN32)
+        _putenv_s("ONEMATH_HIPBLASLT_TUNE", "1");
+#else
+        setenv("ONEMATH_HIPBLASLT_TUNE", "1", 0);
+#endif
+    }
     try {
         std::string dit, vae, text, vision, out, ids;
         std::vector<std::string> ref_paths;
