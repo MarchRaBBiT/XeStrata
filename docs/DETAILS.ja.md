@@ -1298,10 +1298,11 @@ setup は画像のモデル、VAE、文の読み手（Qwen3-VL-8B）と、編集
 Qwen-Image-2.1-Turbo と Qwen-Image-2.1 の重みは Qwen Research License で、自由なソフトウェアのライセンスではありません。商用に使う前にそのライセンスを読んでください。
 
 `--images mage-flow-turbo` なら、Microsoft の Mage-Flow-Turbo（4B、4 ステップ）で作ります。`mage-flow`（強化学習で調整した版、20 ステップ）と `mage-flow-base`（元のモデル、30 ステップ）は CFG を掛けます（既定の強さ 5）。
-setup は画像のモデル（Comfy-Org の bf16 の safetensors）、VAE、文の読み手（Qwen3-VL-4B）をダウンロードします。文の読み手の大きさの選び方は Qwen-Image-2.1 と同じで、画像のモデルの大きさは 1 つです。
+setup は生成用と編集用の画像のモデル（Comfy-Org の bf16 の safetensors）、VAE、文の読み手（Qwen3-VL-4B）、編集のための画像の読み手（Qwen3-VL-4B の mmproj）をダウンロードします。文の読み手の大きさの選び方は Qwen-Image-2.1 と同じで、画像のモデルの大きさは 1 つです。
 エンジンは画像のモデルを読み込むときに Q8_0 にし（`--image-dit-q8 off` なら bf16 のまま）、VRAM に入らないブロックは RAM から流します。
 `-uncensored` なら、文の読み手を huihui-ai の Qwen3-VL-4B（拒否の方向を取り除いたもの、noctrex の GGUF）に替えます。
-API では `steps`（既定はそれぞれのステップ数）、CFG の強さ `true_cfg_scale` か `guidance_scale`（1 なら CFG なし）、`negative_prompt`（既定は空白 1 文字）を受けます。編集、マスク、透明な背景はまだできません。
+API では `steps`（既定はそれぞれのステップ数）、CFG の強さ `true_cfg_scale` か `guidance_scale`（1 なら CFG なし）、`negative_prompt`（既定は空白 1 文字）を受けます。マスクと透明な背景はありません。
+編集（`POST /v1/images/edits`、Web のページの Images のタブ、会話の `edit_image`）は、エンジンが編集用の画像のモデルに差し替えて作ります。参照画像は 3 枚まで（編集のモデルの学習と同じ）、ステップ数の既定は Turbo が 4、ほかの 2 つは 30 です。使っていない方の画像のモデルは Q8_0 のまま RAM に残し（`--image-dit-keep off` なら残さず、差し替えのたびにファイルから読み直します）、差し替えは数秒です。
 Mage-Flow の重みは MIT ですが、Microsoft の README は研究のためのモデルで、製品やサービスに使うことは想定していないとしています。XeStrata は Mage-Flow の内容のフィルターも透かしも入れていません。
 
 サーバーは `POST /v1/images/generations`（OpenAI の images API の形。`seed` と、Qwen-Image-2.1 では `steps` も受けます）で画像を作り、Web のページには「Images」のタブが出ます。

@@ -1325,10 +1325,11 @@ It runs 40 steps by default (the default of Qwen's diffusers pipeline, without g
 The weights of Qwen-Image-2.1-Turbo and Qwen-Image-2.1 are under the Qwen Research License, not a free software license: read it before any commercial use.
 
 With `--images mage-flow-turbo` the images are made by Microsoft's Mage-Flow-Turbo (4B, 4 steps). `mage-flow` (the model tuned with reinforcement learning, 20 steps) and `mage-flow-base` (the model before it, 30 steps) take CFG (scale 5 by default).
-setup downloads the image model (Comfy-Org's bf16 safetensors), the VAE and the text encoder (Qwen3-VL-4B). The text encoder's size is chosen as for Qwen-Image-2.1; the image model comes in one size.
+setup downloads the image models for generation and for edits (Comfy-Org's bf16 safetensors), the VAE, the text encoder (Qwen3-VL-4B) and the vision encoder for the edits (Qwen3-VL-4B's mmproj). The text encoder's size is chosen as for Qwen-Image-2.1; the image model comes in one size.
 The engine turns the image model into Q8_0 as it loads it (`--image-dit-q8 off` keeps bf16) and streams the blocks that do not fit in VRAM from RAM.
 With `-uncensored` the text encoder is huihui-ai's Qwen3-VL-4B with its refusal direction removed (noctrex's GGUF).
-The API takes `steps` (each model's count by default), the CFG scale as `true_cfg_scale` or `guidance_scale` (1: no CFG) and `negative_prompt` (one space by default). Edits, masks and transparent backgrounds are not in yet.
+The API takes `steps` (each model's count by default), the CFG scale as `true_cfg_scale` or `guidance_scale` (1: no CFG) and `negative_prompt` (one space by default). It has no masks and no transparent backgrounds.
+Edits (`POST /v1/images/edits`, the Images tab of the web page, the chat's `edit_image`) are made with the edit image model, which the engine switches to. An edit takes up to 3 reference images (as the edit models were trained), in 4 steps by default with Turbo and 30 with the other two. The image model not in use stays in RAM as Q8_0 (`--image-dit-keep off` lets it go and reads it from the file again at each switch); a switch takes a few seconds.
 Mage-Flow's weights are under MIT, but Microsoft's README says the models are for research and not meant for products or services. XeStrata adds no content filter and no watermark for Mage-Flow.
 
 The server makes images on `POST /v1/images/generations` (OpenAI's images API, plus `seed`, and `steps` with Qwen-Image-2.1), and the web page gets an Images tab.
