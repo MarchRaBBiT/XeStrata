@@ -846,7 +846,9 @@ if(STRATA_ENABLE_XE)
       # a module of its own, which the image engine opens on an AMD GPU only (it needs AMD's HIP runtime, which a
       # machine with other makers' GPUs need not have), beside the engine, the same on Linux and Windows
       add_library(strata_sdpa_aotriton SHARED src/image/qi_sdpa_aotriton.cpp)
-      target_include_directories(strata_sdpa_aotriton PRIVATE ${_strata_aot_dir}/include ${_strata_hip_inc})
+      # aotriton's headers as a system folder: on Windows they put dllimport on its enums, which clang ignores
+      target_include_directories(strata_sdpa_aotriton SYSTEM PRIVATE ${_strata_aot_dir}/include)
+      target_include_directories(strata_sdpa_aotriton PRIVATE ${_strata_hip_inc})
       target_compile_definitions(strata_sdpa_aotriton PRIVATE __HIP_PLATFORM_AMD__)
       target_link_libraries(strata_sdpa_aotriton PRIVATE strata_sycl ${_strata_aot_libs})
       if(TARGET strata_aotriton_win)
@@ -875,8 +877,14 @@ if(STRATA_ENABLE_XE)
         DOWNLOAD_EXTRACT_TIMESTAMP FALSE SOURCE_DIR ${CMAKE_BINARY_DIR}/_deps/strata_cudnn_fe-src
         SUBBUILD_DIR ${CMAKE_BINARY_DIR}/_deps/strata_cudnn_fe-subbuild)
       target_sources(strata_image PRIVATE src/image/qi_sdpa_cudnn.cpp)
+      # the CUDA runtime's headers cudnn.h includes: on Windows the cross build's (above, oneMath's cuBLAS), as the
+      # toolkit's can sit among the build machine's C library's
+      set(_strata_cudnn_cuda_inc ${_strata_cuda_root}/include)
+      if(WIN32 AND EXISTS "${STRATA_CUDA_WINDOWS_LIBS}/include/cuda_runtime_api.h")
+        set(_strata_cudnn_cuda_inc ${STRATA_CUDA_WINDOWS_LIBS}/include)
+      endif()
       set_property(SOURCE src/image/qi_sdpa_cudnn.cpp APPEND PROPERTY INCLUDE_DIRECTORIES
-                   ${strata_cudnn_fe_SOURCE_DIR}/include ${_strata_cudnn_inc} ${_strata_cuda_root}/include)
+                   ${strata_cudnn_fe_SOURCE_DIR}/include ${_strata_cudnn_inc} ${_strata_cudnn_cuda_inc})
       set_property(SOURCE src/image/qi_sdpa_cudnn.cpp APPEND PROPERTY COMPILE_DEFINITIONS
                    NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING CUDNN_FRONTEND_SKIP_JSON_LIB)
       set_property(SOURCE src/image/qi_sdpa_cudnn.cpp APPEND PROPERTY COMPILE_OPTIONS -w)   # its headers' warnings
