@@ -9,12 +9,20 @@
 // whole would take too much), then the DiT's blocks (used at every step) past the text encoder's two slots, then the
 // encoder's layers.  The VAE decodes in what is left, the DiT's activations freed when it needs them (it is not tiled:
 // its group norms take the whole latent, a few MiB at 2048 x 2048).  The same prompt's text states are kept.
+//
+// Edits (with the edit DiT and the vision encoder): up to three reference images (the edit models' training).  Each
+// goes to the VAE's encoder at the image's size (its posterior sampled with the seed's noise) and, its long edge at
+// most 384 pixels and its sides multiples of 32 as Qwen3-VL's processor takes it, to the vision encoder, whose tokens
+// widen the reference's pad in the prompt (their positions plain, as the reference's text encoder takes them); the
+// edit DiT takes their latents after the target's.  The DiT not in use gives its VRAM back; with keep its Q8_0 stays
+// in RAM for the next switch, without it the DiT is read from its file again.
 #pragma once
 
 #include "strata/image/mf_dit.hpp"
 #include "strata/image/mf_vae.hpp"
 #include "strata/image/pipeline.hpp"
 #include "strata/image/qi_text.hpp"
+#include "strata/image/qi_vision.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -30,9 +38,10 @@ std::vector<float> mage_sigmas(int n, float shift = 6.0f);
 class MfPipeline : public ImagePipeline {
 public:
     /// Reads the parts' files for their sizes; the parts go on the GPU with the first request.  `q8`: the DiT's blocks
-    /// as Q8_0 (else bf16).
+    /// as Q8_0 (else bf16).  `edit_dit` and `vision` (the mmproj): edits (none without them); `keep`: the DiT not in
+    /// use kept in RAM.
     bool open(const std::string& dit, const std::string& vae, const std::string& text, std::string& err,
-              bool q8 = true);
+              bool q8 = true, const std::string& edit_dit = "", const std::string& vision = "", bool keep = true);
 
     void set_budget(uint64_t bytes) override;
     uint64_t budget() const override { return budget_ > 0 ? budget_ : auto_budget_; }
@@ -47,14 +56,19 @@ public:
                                   const std::function<void(const char*)>& stage = {}) override;
 
 private:
+    struct Edit;   // an edit's references as the parts take them
     QiPlan plan(int64_t hw, int n, int64_t max_text, int64_t n_ids);
     void ensure_open();
+    MfDit& use_dit(bool edit);
+    MfDit& dit() { return edit_active_ ? *edit_dit_ : *dit_; }
+    void edit_refs(const QiRequest& r, Edit& e);
 
     void* s_ = nullptr;
-    std::string dit_path_, vae_path_, text_path_;
-    bool q8_ = true;
+    std::string dit_path_, vae_path_, text_path_, edit_path_, vision_path_;
+    bool q8_ = true, keep_ = true, edit_active_ = false;
     std::unique_ptr<QiText> te_;
-    std::unique_ptr<MfDit> dit_;
+    std::unique_ptr<MfDit> dit_, edit_dit_;
+    std::unique_ptr<QiVision> vision_size_;
     std::unique_ptr<MfVae> vae_;
     std::unique_ptr<QiText> te_size_;
     std::unique_ptr<MfDit> dit_size_;

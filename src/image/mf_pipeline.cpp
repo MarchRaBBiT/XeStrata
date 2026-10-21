@@ -22,10 +22,106 @@ namespace {
 constexpr uint64_t kMiB = 1ull << 20;
 constexpr uint64_t kScratch = 384 * kMiB;   // the products' dequantization scratch (the DiT's and the encoder's)
 constexpr int kTurboSteps = 4;              // Mage-Flow-Turbo's steps (its model card)
+constexpr int32_t kImagePad = 151655;       // Qwen3-VL's <|image_pad|>
+constexpr size_t kMaxRefs = 3;              // the edit models' training takes up to three references
+constexpr int64_t kVlEdge = 384;            // the vision encoder's input: its long edge at most this (training's)
+constexpr int64_t kVlFactor = 32, kVlMinPixels = 65536, kVlMaxPixels = 16777216;   // Qwen3-VL's processor
 
 uint64_t clampu(uint64_t v, uint64_t lo, uint64_t hi) { return std::max(lo, std::min(v, hi)); }
 
+// PIL's bicubic filter (a = -0.5)
+double bicubic_w(double x) {
+    constexpr double a = -0.5;
+    x = std::fabs(x);
+    if (x < 1.0) return ((a + 2.0) * x - (a + 3.0)) * x * x + 1.0;
+    if (x < 2.0) return (((x - 5.0) * x + 8.0) * x - 4.0) * a;
+    return 0.0;
+}
+
+// one axis of PIL's resample: each output's taps over the input, its support widened by the scale when shrinking
+void resample_axis(const std::vector<float>& src, int64_t lines, int64_t n_in, int64_t stride_line, int64_t stride_in,
+                   int64_t n_out, std::vector<float>& dst, int64_t dst_line, int64_t dst_out) {
+    const double scale = (double) n_in / (double) n_out, fs = std::max(scale, 1.0), support = 2.0 * fs;
+    for (int64_t o = 0; o < n_out; ++o) {
+        const double center = ((double) o + 0.5) * scale;
+        // PIL's taps: the support's ends rounded (its C cast, the same as floor here: the low end is clamped at 0)
+        const auto lo = std::max<int64_t>((int64_t) std::floor(center - support + 0.5), 0);
+        const auto hi = std::min<int64_t>((int64_t) std::floor(center + support + 0.5), n_in);
+        std::vector<double> w((size_t) (hi - lo));
+        double sum = 0.0;
+        for (int64_t i = lo; i < hi; ++i) sum += w[(size_t) (i - lo)] = bicubic_w(((double) i - center + 0.5) / fs);
+        for (int64_t l = 0; l < lines; ++l) {
+            double v = 0.0;
+            for (int64_t i = lo; i < hi; ++i) v += w[(size_t) (i - lo)] * src[(size_t) (l * stride_line + i * stride_in)];
+            // an 8-bit image's pass rounds and clips, as PIL's does
+            dst[(size_t) (l * dst_line + o * dst_out)] = (float) std::clamp(std::nearbyint(v / sum), 0.0, 255.0);
+        }
+    }
+}
+
+// rgb [3][H][W] (0 .. 255) resized to [3][H2][W2] as PIL resizes an RGB image with BICUBIC (rows, then columns)
+std::vector<float> resize_bicubic(const std::vector<float>& rgb, int64_t W, int64_t H, int64_t W2, int64_t H2) {
+    if (W == W2 && H == H2) return rgb;
+    std::vector<float> t((size_t) (3 * H * W2)), out((size_t) (3 * H2 * W2));
+    resample_axis(rgb, 3 * H, W, W, 1, W2, t, W2, 1);
+    for (int c = 0; c < 3; ++c) {
+        std::vector<float> plane(t.begin() + c * H * W2, t.begin() + (c + 1) * H * W2), o((size_t) (H2 * W2));
+        resample_axis(plane, W2, H, 1, W2, H2, o, 1, W2);
+        std::copy(o.begin(), o.end(), out.begin() + c * H2 * W2);
+    }
+    return out;
+}
+
+// a reference's RGB [3][H][W] (0 .. 255) over white
+std::vector<float> ref_rgb(const QiRef& f) {
+    const int64_t n = f.width * f.height;
+    std::vector<float> rgb((size_t) (3 * n));
+    for (int64_t q = 0; q < n; ++q) {
+        const float a = (float) f.rgba[(size_t) (q * 4 + 3)] / 255.f;
+        for (int c = 0; c < 3; ++c)
+            rgb[(size_t) (c * n + q)] = std::nearbyint((float) f.rgba[(size_t) (q * 4 + c)] * a + 255.f * (1.f - a));
+    }
+    return rgb;
+}
+
+// the vision encoder's input size of a w x h reference: its long edge capped at kVlEdge (Python's round), then
+// Qwen3-VL's smart_resize to multiples of kVlFactor within its pixel bounds; cw, ch the capped size
+void vl_size(int64_t w, int64_t h, int64_t& cw, int64_t& ch, int64_t& vw, int64_t& vh) {
+    cw = w;
+    ch = h;
+    if (std::max(w, h) > kVlEdge) {
+        const double sc = (double) kVlEdge / (double) std::max(w, h);
+        cw = std::max<int64_t>(1, (int64_t) std::nearbyint((double) w * sc));
+        ch = std::max<int64_t>(1, (int64_t) std::nearbyint((double) h * sc));
+    }
+    const auto f = (double) kVlFactor;
+    double bh = std::max(f, std::nearbyint((double) ch / f) * f), bw = std::max(f, std::nearbyint((double) cw / f) * f);
+    if (bh * bw > (double) kVlMaxPixels) {
+        const double beta = std::sqrt((double) ch * (double) cw / (double) kVlMaxPixels);
+        bh = std::max(f, std::floor((double) ch / beta / f) * f);
+        bw = std::max(f, std::floor((double) cw / beta / f) * f);
+    } else if (bh * bw < (double) kVlMinPixels) {
+        const double beta = std::sqrt((double) kVlMinPixels / ((double) ch * (double) cw));
+        bh = std::ceil((double) ch * beta / f) * f;
+        bw = std::ceil((double) cw * beta / f) * f;
+    }
+    vw = (int64_t) bw;
+    vh = (int64_t) bh;
+}
+
 }  // namespace
+
+// an edit's references as the parts take them: the widened prompts and their images for the text encoder, the
+// references' latents for the DiT (device, [rows][channels])
+struct MfPipeline::Edit {
+    std::vector<QiVisionOut> vouts;
+    std::vector<int32_t> ids, neg_ids;
+    std::vector<QiText::Image> te, neg_te;
+    std::vector<std::pair<int64_t, int64_t>> sizes;
+    float* z = nullptr;
+    int64_t rows = 0;
+    ~Edit() { gpu::free(z); }
+};
 
 std::vector<float> mage_sigmas(int n, float shift) {
     std::vector<float> s;
@@ -38,12 +134,15 @@ std::vector<float> mage_sigmas(int n, float shift) {
 }
 
 bool MfPipeline::open(const std::string& dit, const std::string& vae, const std::string& text, std::string& err,
-                      bool q8) {
+                      bool q8, const std::string& edit_dit, const std::string& vision, bool keep) {
     s_ = core::Runtime::get().create_stream();
     dit_path_ = dit;
     vae_path_ = vae;
     text_path_ = text;
+    edit_path_ = edit_dit;
+    vision_path_ = vision;
     q8_ = q8;
+    keep_ = keep;
     size_t free = 0, total = 0;
     gpu::mem_info(&free, &total);
     te_size_ = std::make_unique<QiText>();
@@ -52,35 +151,66 @@ bool MfPipeline::open(const std::string& dit, const std::string& vae, const std:
     if (!(te_size_->open(text, s_, err, true) && dit_size_->open(dit, s_, err, true, q8_) &&
           vae_size_->open(vae, s_, err, true)))
         return false;
+    if (!edit_path_.empty() || !vision_path_.empty()) {
+        if (edit_path_.empty() || vision_path_.empty()) {
+            err = "image engine: Mage-Flow's edits need both the edit DiT and the vision encoder";
+            return false;
+        }
+        vision_size_ = std::make_unique<QiVision>();
+        if (!vision_size_->open(vision_path_, s_, err, true) || !vae_size_->open_encoder(err, true)) return false;
+    }
     auto_budget_ = vram_cap(free);
     return true;
 }
 
 void MfPipeline::ensure_open() {
-    if (dit_ && vae_ && te_) return;
+    if ((dit_ || edit_dit_) && vae_ && te_) return;
     std::string err;
     te_ = std::make_unique<QiText>();
-    dit_ = std::make_unique<MfDit>();
     vae_ = std::make_unique<MfVae>();
-    if (!(te_->open(text_path_, s_, err) && dit_->open(dit_path_, s_, err, false, q8_) &&
-          vae_->open(vae_path_, s_, err))) {
+    if (!(te_->open(text_path_, s_, err) && vae_->open(vae_path_, s_, err))) {
         te_.reset();
-        dit_.reset();
         vae_.reset();
         throw std::runtime_error(err);
     }
     te_->set_final_norm(true);
-    dit_->set_block_budget(dit_->block_min());   // nothing resident until a request plans its budget
+    te_->set_flat_positions(true);   // the reference's encoder: every token's position its index, an image's too
     te_->set_layer_budget(te_->layer_min());
-    dit_set_ = dit_->block_min();
     te_set_ = te_->layer_min();
+    edit_active_ = false;
+    (void) use_dit(false);
+}
+
+// the DiT for a generation or an edit: the other gives its VRAM back (its Q8_0 kept in RAM with keep_, else let go),
+// this one opened when it is not, nothing of it resident until a request plans its budget
+MfDit& MfPipeline::use_dit(bool edit) {
+    std::unique_ptr<MfDit>& want = edit ? edit_dit_ : dit_;
+    std::unique_ptr<MfDit>& other = edit ? dit_ : edit_dit_;
+    if (edit == edit_active_ && want) return *want;
+    if (other) {
+        other->drop_blocks();
+        other->drop_activations();
+        if (!keep_) other.reset();
+    }
+    edit_active_ = edit;
+    if (!want) {
+        std::string err;
+        auto d = std::make_unique<MfDit>();
+        if (!d->open(edit ? edit_path_ : dit_path_, s_, err, false, q8_)) throw std::runtime_error(err);
+        want = std::move(d);
+    }
+    want->set_block_budget(want->block_min());
+    dit_set_ = want->block_min();
     mlp_set_ = -1;
+    return *want;
 }
 
 uint64_t MfPipeline::held() const {
-    if (!(dit_ && vae_ && te_)) return 0;
-    return dit_->weight_bytes() + vae_->weight_bytes() + kScratch + dit_->blocks_vram() + te_->layers_vram() +
-           dit_->activations_held() + vae_->scratch_held();
+    const MfDit* d = edit_active_ ? edit_dit_.get() : dit_.get();
+    if (!(d && vae_ && te_)) return 0;
+    const MfDit* o = edit_active_ ? dit_.get() : edit_dit_.get();
+    return d->weight_bytes() + (o ? o->weight_bytes() : 0) + vae_->weight_bytes() + kScratch + d->blocks_vram() +
+           te_->layers_vram() + d->activations_held() + vae_->scratch_held();
 }
 
 void MfPipeline::fit(uint64_t reserve) {
@@ -92,21 +222,34 @@ void MfPipeline::fit(uint64_t reserve) {
 
 QiNeed MfPipeline::need(int64_t n_text, int64_t width, int64_t height,
                         const std::vector<std::pair<int64_t, int64_t>>& refs, bool mask, int64_t n_neg) {
-    (void) refs;
     (void) mask;
     const MfDit& dit = *dit_size_;
     const QiText& te = *te_size_;
     const MfVae& vae = *vae_size_;
-    const int64_t hw = (height / 16) * (width / 16), max_text = std::max(n_text, n_neg);
+    const int64_t h = height / 16, w = width / 16;
+    int64_t hw = h * w;
+    uint64_t edit = 0, fixed = dit.weight_bytes() + vae.weight_bytes() + kScratch;
+    if (!refs.empty() && vision_size_) {   // the references: each a target's worth of latent rows, its image tokens in
+        fixed += vae.encoder_bytes();      // the prompts; the vision encoder and the VAE's encoder while they run
+        for (const auto& [rw, rh] : refs) {
+            int64_t cw = 0, ch = 0, vw = 0, vh = 0;
+            vl_size(rw, rh, cw, ch, vw, vh);
+            const int64_t tokens = (vh / kVlFactor) * (vw / kVlFactor) - 1;
+            n_text += tokens;
+            if (n_neg > 0) n_neg += tokens;
+            edit = std::max(edit, vision_size_->weight_bytes() + vision_size_->scratch_bytes((vh / 16) * (vw / 16)));
+        }
+        edit = std::max(edit, vae.encode_scratch_bytes(h, w) + (uint64_t) (3 * height * width) * 4);
+        hw += (int64_t) refs.size() * h * w;
+    }
+    const int64_t max_text = std::max(n_text, n_neg);
     const int n = n_neg > 0 ? 2 : 1;
-    const uint64_t fixed = dit.weight_bytes() + vae.weight_bytes() + kScratch;
     const uint64_t te_act = te.activation_bytes(std::max(n_text, n_neg) + 64);   // the system turn's ids too
     QiNeed nd;
-    nd.least = fixed + std::max({dit.activation_bytes(hw, n, max_text, 512), vae.scratch_bytes(height / 16, width / 16),
-                                 te_act}) +
+    nd.least = fixed + std::max({dit.activation_bytes(hw, n, max_text, 512), vae.scratch_bytes(h, w), te_act, edit}) +
                dit.block_min() + te.layer_min();
     nd.full = fixed + dit.block_bytes() + te.layer_min() +
-              std::max({dit.activation_bytes(hw, n, max_text), vae.scratch_bytes(height / 16, width / 16), te_act});
+              std::max({dit.activation_bytes(hw, n, max_text), vae.scratch_bytes(h, w), te_act, edit});
     nd.held = held();
     size_t free = 0, total = 0;
     gpu::mem_info(&free, &total);
@@ -117,22 +260,24 @@ QiNeed MfPipeline::need(int64_t n_text, int64_t width, int64_t height,
 
 void MfPipeline::set_budget(uint64_t bytes) {
     budget_ = bytes;
-    if (!(dit_ && vae_ && te_)) return;
+    if (held() == 0) return;
     (void) plan(0, 1, 0, 0);   // shrink at once what no longer fits
 }
 
 void MfPipeline::release(bool all) {
-    if (!(dit_ && vae_ && te_)) return;
+    if (held() == 0) return;
     if (all) {
         gpu::stream_sync(s_);
         te_.reset();
         dit_.reset();
+        edit_dit_.reset();
         vae_.reset();
+        edit_active_ = false;
         return;
     }
-    dit_->drop_blocks();
+    dit().drop_blocks();
     te_->drop_layers();
-    dit_->drop_activations();
+    dit().drop_activations();
     vae_->drop_scratch();
     dit_set_ = te_set_ = 0;
     mlp_set_ = -1;
@@ -141,28 +286,30 @@ void MfPipeline::release(bool all) {
 QiPlan MfPipeline::plan(int64_t hw, int n, int64_t max_text, int64_t n_ids) {
     QiPlan p;
     p.budget = budget();
-    p.fixed = dit_->weight_bytes() + vae_->weight_bytes() + kScratch;
+    MfDit& d = dit();
+    const MfDit* o = edit_active_ ? dit_.get() : edit_dit_.get();
+    p.fixed = d.weight_bytes() + (o ? o->weight_bytes() : 0) + vae_->weight_bytes() + kScratch;
     if (p.budget <= p.fixed)
         throw std::runtime_error("image engine: the VRAM budget (" + std::to_string(p.budget >> 20) +
                                  " MiB) is below the weights that always stay");
-    const uint64_t avail = p.budget - p.fixed, dit_min = dit_->block_min(), te_min = te_->layer_min();
+    const uint64_t avail = p.budget - p.fixed, dit_min = d.block_min(), te_min = te_->layer_min();
     // the DiT's activations, the MLP in bands of rows when the whole takes more than a third of what is there
     int64_t mlp = 0;
-    p.activations = hw > 0 ? dit_->activation_bytes(hw, n, max_text) : 0;
+    p.activations = hw > 0 ? d.activation_bytes(hw, n, max_text) : 0;
     for (int64_t rows : {4096, 2048, 1024, 512}) {
         if (hw == 0 || p.activations * 3 <= avail) break;
         mlp = rows;
-        p.activations = dit_->activation_bytes(hw, n, max_text, rows);
+        p.activations = d.activation_bytes(hw, n, max_text, rows);
     }
     const uint64_t work = std::max(p.activations, te_->activation_bytes(n_ids));
     if (avail < work + dit_min + te_min)
         throw std::runtime_error("image engine: the VRAM budget (" + std::to_string(p.budget >> 20) +
                                  " MiB) is too small for this image");
-    p.blocks = clampu(avail - work - te_min, dit_min, dit_->block_bytes());
+    p.blocks = clampu(avail - work - te_min, dit_min, d.block_bytes());
     p.layers = clampu(avail - work - p.blocks, te_min, te_->layer_bytes());
     p.mlp_rows = mlp;
     if (p.blocks != dit_set_) {
-        dit_->set_block_budget(p.blocks);
+        d.set_block_budget(p.blocks);
         dit_set_ = p.blocks;
     }
     if (p.layers != te_set_) {
@@ -170,14 +317,92 @@ QiPlan MfPipeline::plan(int64_t hw, int n, int64_t max_text, int64_t n_ids) {
         te_set_ = p.layers;
     }
     if (hw > 0 && mlp != mlp_set_) {
-        dit_->set_mlp_rows(mlp);
+        d.set_mlp_rows(mlp);
         mlp_set_ = mlp;
     }
-    if (hw == 0) dit_->drop_activations();
-    p.resident_blocks = dit_->resident_blocks();
+    if (hw == 0) d.drop_activations();
+    p.resident_blocks = d.resident_blocks();
     p.resident_layers = te_->resident_layers();
     p.vae = avail - p.blocks - p.layers;
     return p;
+}
+
+void MfPipeline::edit_refs(const QiRequest& r, Edit& e) {
+    if (edit_path_.empty() || vision_path_.empty())
+        throw std::invalid_argument("image engine: Mage-Flow's edits need the edit DiT and the vision encoder");
+    if (r.refs.size() > kMaxRefs)
+        throw std::invalid_argument("image engine: Mage-Flow's edits take up to 3 reference images");
+    if (std::count(r.ids.begin(), r.ids.end(), kImagePad) != (int64_t) r.refs.size())
+        throw std::invalid_argument("image engine: the prompt's image pads and the reference images differ in number");
+    const int64_t h = r.height / 16, w = r.width / 16, HW = r.width * r.height;
+    std::string err;
+    if (!vae_->open_encoder(err)) throw std::runtime_error(err);
+    QiVision vision;
+    if (!vision.open(vision_path_, s_, err)) throw std::runtime_error(err);
+    e.rows = (int64_t) r.refs.size() * h * w;
+    const int64_t Z = dit_size_->latent_channels();
+    float* rgb = nullptr;
+    float* eps = nullptr;
+    if (!gpu::alloc_device(&e.z, (size_t) (e.rows * Z) * 4) || !gpu::alloc_device(&rgb, (size_t) (3 * HW) * 4) ||
+        !gpu::alloc_device(&eps, (size_t) (h * w * Z) * 4)) {
+        gpu::free(rgb);
+        gpu::free(eps);
+        throw std::runtime_error(std::string("image engine: GPU memory: ") + gpu::last_error());
+    }
+    try {
+        for (size_t j = 0; j < r.refs.size(); ++j) {
+            const QiRef& f = r.refs[j];
+            if (f.width <= 0 || f.height <= 0 || f.rgba.size() != (size_t) (f.width * f.height * 4))
+                throw std::invalid_argument("image engine: a reference image is empty");
+            const std::vector<float> src = ref_rgb(f);
+            // the vision encoder's input: the long edge capped, then the processor's size (two resizes, as the
+            // reference's)
+            int64_t cw = 0, ch = 0, vw = 0, vh = 0;
+            vl_size(f.width, f.height, cw, ch, vw, vh);
+            std::vector<float> vl = resize_bicubic(resize_bicubic(src, f.width, f.height, cw, ch), cw, ch, vw, vh);
+            for (float& v : vl) v = v / 127.5f - 1.f;
+            e.vouts.push_back(vision.encode(vl.data(), vw, vh));
+            // the VAE's input at the image's size; its posterior sampled with noise of the seed's own (each reference
+            // its stream, apart from the target's)
+            std::vector<float> px = resize_bicubic(src, f.width, f.height, r.width, r.height);
+            for (float& v : px) v = v / 127.5f - 1.f;
+            gpu::copy(rgb, px.data(), px.size() * 4);
+            const auto n = philox_randn(r.seed ^ (0x9E3779B97F4A7C15ull * (j + 1)), (uint64_t) (h * w * Z));
+            gpu::copy(eps, n.data(), n.size() * 4);
+            vae_->encode(rgb, h, w, eps, e.z + (int64_t) j * h * w * Z);
+            e.sizes.emplace_back(h, w);
+        }
+    } catch (...) {
+        gpu::free(rgb);
+        gpu::free(eps);
+        throw;
+    }
+    gpu::free(rgb);
+    gpu::free(eps);
+    // the prompts with each pad widened to its reference's image tokens
+    auto widen = [&](const std::vector<int32_t>& src, std::vector<int32_t>& out, std::vector<QiText::Image>& te) {
+        size_t k = 0;
+        for (const int32_t id : src) {
+            if (id != kImagePad) {
+                out.push_back(id);
+                continue;
+            }
+            if (k >= e.vouts.size())
+                throw std::invalid_argument("image engine: the negative prompt's image pads and the references differ");
+            const QiVisionOut& v = e.vouts[k++];
+            QiText::Image im;
+            im.index = (int64_t) out.size();
+            im.rows = v.rows;
+            im.grid_h = v.grid_h;
+            im.grid_w = v.grid_w;
+            im.main = v.main.data();
+            for (const auto& d : v.deepstack) im.deepstack.push_back(d.data());
+            te.push_back(im);
+            out.insert(out.end(), (size_t) v.rows, kImagePad);
+        }
+    };
+    widen(r.ids, e.ids, e.te);
+    if (r.cfg > 1.0f && !r.neg_ids.empty()) widen(r.neg_ids, e.neg_ids, e.neg_te);
 }
 
 std::vector<uint8_t> MfPipeline::generate(const QiRequest& r, QiTimes* times, QiPlan* plan_out,
@@ -186,60 +411,85 @@ std::vector<uint8_t> MfPipeline::generate(const QiRequest& r, QiTimes* times, Qi
     using clock = std::chrono::steady_clock;
     if (r.width % 16 != 0 || r.height % 16 != 0 || r.width <= 0 || r.height <= 0)
         throw std::invalid_argument("image engine: the size must be a multiple of 16");
-    if (!r.refs.empty() || !r.mask.rgba.empty())
-        throw std::invalid_argument("image engine: Mage-Flow's edits are not here yet");
+    if (!r.mask.rgba.empty()) throw std::invalid_argument("image engine: Mage-Flow's edits take no mask");
     if ((int64_t) r.ids.size() <= r.drop) throw std::invalid_argument("image engine: no prompt after the system turn");
-    const bool guided = r.cfg > 1.0f && !r.neg_ids.empty();
+    const bool guided = r.cfg > 1.0f && !r.neg_ids.empty(), editing = !r.refs.empty();
     if (guided && (int64_t) r.neg_ids.size() <= r.drop)
         throw std::invalid_argument("image engine: no negative prompt after the system turn");
     const int64_t h = r.height / 16, w = r.width / 16, HW = r.width * r.height;
     const auto t0 = clock::now();
     ensure_open();
+    // the references first (the vision encoder and the VAE's encoder in VRAM the DiT's cache gives way to)
+    Edit e;
+    if (editing) {
+        if (stage) stage("refs");
+        std::vector<std::pair<int64_t, int64_t>> sizes;
+        sizes.reserve(r.refs.size());
+        for (const QiRef& f : r.refs) sizes.emplace_back(f.width, f.height);
+        const uint64_t more = need(0, r.width, r.height, sizes).least - need(0, r.width, r.height).least;
+        if (held() + more > budget()) release(false);
+        edit_refs(r, e);
+        vae_->drop_scratch();
+    }
+    MfDit& d = use_dit(editing);
     if (stage) stage("text");
-    const int64_t n_ctx = (int64_t) r.ids.size() - r.drop,
-                  n_neg = guided ? (int64_t) r.neg_ids.size() - r.drop : 0;
-    QiPlan p = plan(h * w, guided ? 2 : 1, std::max(n_ctx, n_neg),
-                    (int64_t) std::max(r.ids.size(), r.neg_ids.size()));
-    if (r.ids != last_ids_) {
+    const std::vector<int32_t>& ids = editing ? e.ids : r.ids;
+    const std::vector<int32_t>& neg_ids = editing ? e.neg_ids : r.neg_ids;
+    const int64_t n_ctx = (int64_t) ids.size() - r.drop, n_neg = guided ? (int64_t) neg_ids.size() - r.drop : 0;
+    QiPlan p = plan(h * w + e.rows, guided ? 2 : 1, std::max(n_ctx, n_neg),
+                    (int64_t) std::max(ids.size(), neg_ids.size()));
+    // the states: an edit's afresh (its images are not in the ids), a generation's kept for the same prompt
+    if (editing) {
+        last_states_ = te_->encode(ids, e.te);
+        last_ids_.clear();
+    } else if (r.ids != last_ids_) {
         last_states_ = te_->encode(r.ids);
         last_ids_ = r.ids;
     } else {
         p.text_cached = true;
     }
     const int64_t C = te_->hidden();
-    dit_->set_context(0, last_states_.data() + r.drop * C, n_ctx);
+    d.set_context(0, last_states_.data() + r.drop * C, n_ctx);
     if (guided) {
-        if (r.neg_ids != last_neg_ids_) {
+        if (editing) {
+            last_neg_states_ = te_->encode(neg_ids, e.neg_te);
+            last_neg_ids_.clear();
+        } else if (r.neg_ids != last_neg_ids_) {
             last_neg_states_ = te_->encode(r.neg_ids);
             last_neg_ids_ = r.neg_ids;
         }
-        dit_->set_context(1, last_neg_states_.data() + r.drop * C, n_neg);
+        d.set_context(1, last_neg_states_.data() + r.drop * C, n_neg);
     } else {
-        dit_->set_context(1, nullptr, 0);
+        d.set_context(1, nullptr, 0);
     }
     te_->drop_activations();
+    d.set_refs(e.z, e.sizes);
     const auto t1 = clock::now();
     // the seed's noise as Qwen-Image's ([channels][h][w], PyTorch's CUDA randn), as the latent's tokens [h w][channels]
-    const int64_t Cl = dit_->latent_channels(), n = Cl * h * w;
+    const int64_t Cl = d.latent_channels(), n = Cl * h * w;
     const auto noise = philox_randn(r.seed, (uint64_t) n);
     std::vector<float> tokens((size_t) n);
     for (int64_t c = 0; c < Cl; ++c)
         for (int64_t q = 0; q < h * w; ++q) tokens[(size_t) (q * Cl + c)] = noise[(size_t) (c * h * w + q)];
     float *x = nullptr, *rgba = nullptr;
-    if (!gpu::alloc_device(&x, (size_t) n * 4) || !gpu::alloc_device(&rgba, (size_t) (4 * HW) * 4))
+    if (!gpu::alloc_device(&x, (size_t) n * 4) || !gpu::alloc_device(&rgba, (size_t) (4 * HW) * 4)) {
+        gpu::free(x);
+        d.set_refs(nullptr, {});
         throw std::runtime_error(std::string("image engine: GPU memory: ") + gpu::last_error());
+    }
     std::vector<float> out((size_t) (4 * HW));
     try {
         gpu::copy(x, tokens.data(), (size_t) n * 4);
         if (stage) stage("sampling");
-        dit_->sample(x, h, w, r.sigmas.empty() ? mage_sigmas(kTurboSteps) : r.sigmas, guided ? r.cfg : 1.0f, step);
+        d.sample(x, h, w, r.sigmas.empty() ? mage_sigmas(kTurboSteps) : r.sigmas, guided ? r.cfg : 1.0f, step);
+        d.set_refs(nullptr, {});
         const auto t2 = clock::now();
         if (stage) stage("decode");
         // the VAE beside the DiT's activations when it fits there; else they give way to it, then the encoder's
         // layers (the next prompt streams them back)
         uint64_t room = p.vae > p.activations ? p.vae - p.activations : 0;
         if (vae_->scratch_bytes(h, w) > room) {
-            dit_->drop_activations();
+            d.drop_activations();
             room = p.vae;
         }
         if (vae_->scratch_bytes(h, w) > room && te_->layers_vram() > 0) {
@@ -256,6 +506,7 @@ std::vector<uint8_t> MfPipeline::generate(const QiRequest& r, QiTimes* times, Qi
             times->decode = std::chrono::duration<double>(t3 - t2).count();
         }
     } catch (...) {
+        d.set_refs(nullptr, {});
         gpu::free(x);
         gpu::free(rgba);
         throw;
