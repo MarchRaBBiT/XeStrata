@@ -12,6 +12,7 @@
 // pinned RAM and copied in at each step (an edit with many or large reference images).
 #pragma once
 
+#include "strata/image/pipeline.hpp"
 #include "strata/image/qi_stream.hpp"
 #include "strata/prefill/gemm.hpp"
 
@@ -27,11 +28,6 @@ class GgufFile;
 }
 
 namespace strata::image {
-
-/// A request stopped on its caller's word (the step callback said so).
-struct QiStopped : std::runtime_error {
-    QiStopped() : std::runtime_error("image engine: stopped") {}
-};
 
 /// Philox 4x32-10 normal values as PyTorch's CUDA randn gives them for `seed` (the generator stable-diffusion.cpp
 /// uses): value i from counter (offset, 0, i, 0) and key (seed low, seed high), Box-Muller's sine half.
