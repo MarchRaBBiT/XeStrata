@@ -210,10 +210,40 @@ struct Heads {
     float value(int64_t t, int64_t c, const Stats&) const { return kernels::f32_from_f16(o16[t * C + c]) * hs[c / hd]; }
 };
 
+// The per-head kernels below: a sub-group of 32 a row's head (its values read side by side, kSG apart), kRows heads a
+// work-group; a work-item a row's head without sub-groups of 32.
+
 // part[r][h] = the largest |v| of row r's head h, rows of a ([na][C]) then b ([nb][C])
+struct HeadMax {
+    const float *a, *b;
+    int64_t na, nb, heads, hd;
+    float* part;
+    void operator()(sycl::nd_item<1> it) const {
+        const auto sg = it.get_sub_group();
+        const int64_t i = static_cast<int64_t>(it.get_group_linear_id()) * kRows + sg.get_group_linear_id();
+        if (i >= (na + nb) * heads) return;
+        const int64_t r = i / heads, h = i - r * heads, C = heads * hd;
+        const float* row = (r < na ? a + r * C : b + (r - na) * C) + h * hd;
+        float m = 0.f;
+        for (int64_t d = sg.get_local_linear_id(); d < hd; d += kSG) m = sycl::fmax(m, sycl::fabs(row[d]));
+        m = sycl::reduce_over_group(sg, m, sycl::maximum<float>());
+        if (sg.get_local_linear_id() == 0) part[i] = m;
+    }
+    auto get(syclex::properties_tag) const { return syclex::properties{syclex::sub_group_size<kSG>}; }
+};
+
 void head_max(const float* a, int64_t na, const float* b, int64_t nb, int64_t heads, int64_t hd, float* part, void* s) {
+    const int64_t n = (na + nb) * heads;
+    if (n <= 0) return;
+    sycl::queue& q = q_of(s);
+    if (has_sg32(q)) {
+        q.parallel_for(sycl::nd_range<1>(sycl::range<1>((size_t) ((n + kRows - 1) / kRows * kRows * kSG)),
+                                         sycl::range<1>((size_t) (kRows * kSG))),
+                       HeadMax{a, b, na, nb, heads, hd, part});
+        return;
+    }
     const int64_t C = heads * hd;
-    q_of(s).parallel_for(sycl::range<1>((size_t) ((na + nb) * heads)), [=](sycl::id<1> id) {
+    q.parallel_for(sycl::range<1>((size_t) n), [=](sycl::id<1> id) {
         const auto i = static_cast<int64_t>(id[0]);
         const int64_t r = i / heads, h = i - r * heads;
         const float* row = (r < na ? a + r * C : b + (r - na) * C) + h * hd;
@@ -223,25 +253,67 @@ void head_max(const float* a, int64_t na, const float* b, int64_t nb, int64_t he
     });
 }
 
-// hs[h] = the scale of head h over the rows' part
+// hs[h] = the scale of head h over the rows' part: a work-group a head, its items striding the rows
 void head_scale(const float* part, int64_t rows, int64_t heads, float* hs, void* s) {
-    q_of(s).parallel_for(sycl::range<1>((size_t) heads), [=](sycl::id<1> id) {
-        const auto h = static_cast<int64_t>(id[0]);
+    constexpr size_t kWG = 256;
+    q_of(s).parallel_for(sycl::nd_range<1>(sycl::range<1>((size_t) heads * kWG), sycl::range<1>(kWG)),
+                         [=](sycl::nd_item<1> it) {
+        const auto h = static_cast<int64_t>(it.get_group_linear_id());
         float m = 0.f;
-        for (int64_t r = 0; r < rows; ++r) m = sycl::fmax(m, part[r * heads + h]);
-        hs[h] = pow2_scale(m);
+        for (auto r = static_cast<int64_t>(it.get_local_linear_id()); r < rows; r += (int64_t) kWG)
+            m = sycl::fmax(m, part[r * heads + h]);
+        m = sycl::reduce_over_group(it.get_group(), m, sycl::maximum<float>());
+        if (it.get_local_linear_id() == 0) hs[h] = pow2_scale(m);
     });
 }
 
 // For each row and head: q and k RMS-normed over the head (weights wq, wk; eps 1e-6) and rotated pairwise (2j, 2j + 1)
-// by cos[t][j], sin[t][j] (rope false: not rotated), v divided by its head's scale; FP16 out.  A work-item a row's
-// head.
+// by cos[t][j], sin[t][j] (rope false: not rotated), v divided by its head's scale; FP16 out
+struct QkRope {
+    const float *q, *k, *v, *wq, *wk, *cos, *sin;
+    bool rope;
+    const float* hs;
+    int64_t T, heads, hd;
+    uint16_t *q16, *k16, *v16;
+    void operator()(sycl::nd_item<1> it) const {
+        const auto sg = it.get_sub_group();
+        const int64_t i = static_cast<int64_t>(it.get_group_linear_id()) * kRows + sg.get_group_linear_id();
+        if (i >= T * heads) return;
+        const int64_t t = i / heads, h = i - t * heads, o = t * heads * hd + h * hd, half = hd / 2;
+        const auto lane = static_cast<int64_t>(sg.get_local_linear_id());
+        for (int which = 0; which < 2; ++which) {
+            const float* src = (which == 0 ? q : k) + o;
+            const float* w = which == 0 ? wq : wk;
+            uint16_t* dst = (which == 0 ? q16 : k16) + o;
+            float ss = 0.f;
+            for (int64_t j = lane; j < half; j += kSG) ss += src[2 * j] * src[2 * j] + src[2 * j + 1] * src[2 * j + 1];
+            const float r = 1.f / sycl::sqrt(sycl::reduce_over_group(sg, ss, sycl::plus<float>()) / (float) hd + kEps);
+            for (int64_t j = lane; j < half; j += kSG) {
+                const float a = src[2 * j] * r * w[2 * j], b = src[2 * j + 1] * r * w[2 * j + 1];
+                const float c = rope ? cos[t * half + j] : 1.f, sn = rope ? sin[t * half + j] : 0.f;
+                dst[2 * j] = f16_from_f32(a * c - b * sn);
+                dst[2 * j + 1] = f16_from_f32(a * sn + b * c);
+            }
+        }
+        const float inv = 1.f / hs[h];
+        for (int64_t d = lane; d < hd; d += kSG) v16[o + d] = f16_from_f32(v[o + d] * inv);
+    }
+    auto get(syclex::properties_tag) const { return syclex::properties{syclex::sub_group_size<kSG>}; }
+};
+
 void qk_rope_v16(const float* q, const float* k, const float* v, const float* wq, const float* wk, const float* cos,
                  const float* sin, bool rope, const float* hs, int64_t T, int64_t heads, int64_t hd, uint16_t* q16,
                  uint16_t* k16, uint16_t* v16, void* s) {
     if (T <= 0) return;
+    sycl::queue& qu = q_of(s);
+    if (has_sg32(qu)) {
+        qu.parallel_for(sycl::nd_range<1>(sycl::range<1>((size_t) ((T * heads + kRows - 1) / kRows * kRows * kSG)),
+                                          sycl::range<1>((size_t) (kRows * kSG))),
+                        QkRope{q, k, v, wq, wk, cos, sin, rope, hs, T, heads, hd, q16, k16, v16});
+        return;
+    }
     const int64_t C = heads * hd, half = hd / 2;
-    q_of(s).parallel_for(sycl::range<1>((size_t) (T * heads)), [=](sycl::id<1> id) {
+    qu.parallel_for(sycl::range<1>((size_t) (T * heads)), [=](sycl::id<1> id) {
         const auto i = static_cast<int64_t>(id[0]);
         const int64_t t = i / heads, h = i - t * heads, o = t * C + h * hd;
         for (int which = 0; which < 2; ++which) {
