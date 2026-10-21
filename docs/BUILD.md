@@ -468,7 +468,7 @@ The image is built on the user's PC and not distributed: the contrib packages' i
 | --- | --- | --- |
 | `XESTRATA_VERSION` | `latest` | the release's tag (`xe0.1.43.1`, for example) |
 | `XESTRATA_VARIANT` | `contrib-cuda13.4` | the rpm's variant |
-| `XESTRATA_NONFREE` | `1` | `0` leaves out oneMKL and cuBLAS (Intel's and NVIDIA's dense products then run on XeStrata's own kernels) |
+| `XESTRATA_NONFREE` | `1` | `0` leaves out oneMKL (Intel's dense products then run on XeStrata's own kernels). NVIDIA's cuBLAS and cuDNN are not in the image: they go into the data folder when `xestrata --setup` names them |
 
 - **A local rpm**: one rpm in `container/rpm/` is installed instead of the release's.
   `xestrata-free`, which the Releases do not have, is made with `tools/package/build.sh fedora44 free` and put there.

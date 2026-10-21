@@ -1297,9 +1297,6 @@ INTEL_REPO = {
                "    'gpgkey=https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB' \\\n"
                "    | sudo tee /etc/yum.repos.d/oneAPI.repo > /dev/null"),
 }
-NVIDIA_REPO_FEDORA = ("sudo dnf config-manager addrepo "
-                      "--from-repofile=https://developer.download.nvidia.com/compute/cuda/repos/fedora44/x86_64/"
-                      "cuda-fedora44.repo")
 
 
 def pkg_installed(name: str) -> bool:
@@ -1330,8 +1327,8 @@ def repo_added(url: str) -> bool:
 
 def runtime_missing(makers: set) -> tuple:
     """For the package's engine: the GPU makers' packages (BUILD.json's runtime) that the GPUs of `makers` need and
-    are not installed, those that would make them faster (oneMKL, cuBLAS: contrib; cuDNN is linux_cudnn's), and the
-    commands that add the repositories those come from.  Empty for an engine without the record."""
+    are not installed, those that would make them faster (oneMKL, cuBLAS: contrib; pip's are linux_nvidia_libs'), and
+    the commands that add the repositories those come from.  Empty for an engine without the record."""
     rt = packaged_engine().get("runtime") or {}
     need = [n for m in ("intel", "amd") if m in makers for n in rt.get(m, []) if not pkg_installed(n)]
     fast = [n for m, k in (("intel", "onemkl"), ("nvidia", "cublas")) if m in makers
@@ -1341,9 +1338,6 @@ def runtime_missing(makers: set) -> tuple:
     if any(n in rt.get("onemkl", []) for n in fast) and d in INTEL_REPO and \
             not repo_added("repos.intel.com/oneapi"):
         repos.append(INTEL_REPO[d])
-    if d == "fedora" and any(n in rt.get("cublas", []) for n in fast) and \
-            not repo_added("developer.download.nvidia.com/compute/cuda"):
-        repos.append(NVIDIA_REPO_FEDORA)
     return need, fast, repos
 
 
@@ -1452,17 +1446,18 @@ def windows_amd_libs(gfx: set) -> list:
     return commands
 
 
-def cudnn_dir(data: Path) -> Path:
-    """Linux: where cuDNN and the CUDA runtime cudnn-frontend opens go, from pip (no distribution has cuDNN for every
-    CUDA version): the data folder's cudnn/, beside the models (a container mounts it at the same path)."""
-    return Path(data) / "cudnn"
+def nvidia_libs_dir(data: Path) -> Path:
+    """Linux: where NVIDIA's libraries go that neither Ubuntu's nor Fedora's own repositories have (NVIDIA's
+    repositories are not used): cuDNN and the CUDA runtime cudnn-frontend opens, and Fedora's cuBLAS, from pip, in the
+    data folder's nvidia-libs/, beside the models (a container mounts it at the same path)."""
+    return Path(data) / "nvidia-libs"
 
 
-def cudnn_lib_dirs(data: Path) -> list:
-    """The folders of cudnn_dir's libraries for the engine's library path (a folder that is not there is skipped where
-    the server starts the engine, so cuDNN installed later is taken from the next start): cuDNN's, and the CUDA
-    runtime's of CUDA 13 (nvidia-cuda-runtime) and 12 (nvidia-cuda-runtime-cu12)."""
-    nv = cudnn_dir(data) / "nvidia"
+def nvidia_lib_dirs(data: Path) -> list:
+    """The folders of nvidia_libs_dir's libraries for the engine's library path (a folder that is not there is skipped
+    where the server starts the engine, so what is installed later is taken from the next start): cuDNN's, and CUDA
+    13's (nvidia-cuda-runtime, nvidia-cublas) and 12's CUDA runtime (nvidia-cuda-runtime-cu12)."""
+    nv = nvidia_libs_dir(data) / "nvidia"
     return [str(nv / "cudnn" / "lib"), str(nv / "cu13" / "lib"), str(nv / "cuda_runtime" / "lib")]
 
 
@@ -1482,30 +1477,40 @@ def cuda_major(root: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def cudnn_pip_names(major: int) -> list:
-    """pip's packages of cuDNN and the CUDA runtime for a CUDA major version (as tools/package/container.sh names them
-    for the packages)."""
+def nvidia_pip_names(major: int) -> list:
+    """pip's packages of cuDNN and the CUDA runtime for a CUDA major version, for an engine compiled here (whose cuBLAS
+    is the CUDA toolkit's); tools/package/container.sh names the packages' (BUILD.json's runtime "nvidia_pip")."""
     if major == 12:
         return ["nvidia-cudnn-cu12", "nvidia-cuda-runtime-cu12"]
     return [f"nvidia-cudnn-cu{major}", f"nvidia-cuda-runtime=={major}.*"]
 
 
-def linux_cudnn(makers: set, data: Path, names: list) -> None:
-    """Names pip's command for cuDNN and the CUDA runtime (`names`) when the system has no cuDNN and cudnn_dir has
-    none: into cudnn_dir, which the engine's library path holds (cudnn_lib_dirs), with --target (Ubuntu's Python
-    refuses --user, PEP 668) and --no-deps (cuBLAS is the distribution's)."""
+def linux_nvidia_libs(makers: set, data: Path, names: list) -> None:
+    """Names pip's command for NVIDIA's libraries (`names`) when one of them is neither on the system nor in
+    nvidia_libs_dir: into nvidia_libs_dir, which the engine's library path holds (nvidia_lib_dirs), with --target
+    (Ubuntu's Python refuses --user, PEP 668), --upgrade (a target folder's packages are otherwise kept as they are)
+    and --no-deps (what the distribution has, it gives)."""
     import ctypes.util
     import importlib.util
     import shlex
     if WIN or "nvidia" not in makers or not names:
         return
-    if ctypes.util.find_library("cudnn") or (cudnn_dir(data) / "nvidia" / "cudnn" / "lib" / "libcudnn.so.9").exists():
+    dirs = [Path(d) for d in nvidia_lib_dirs(data)]
+
+    def found(lib: str) -> bool:
+        return bool(ctypes.util.find_library(lib)) or any(next(d.glob(f"lib{lib}.so.*"), None) for d in dirs
+                                                          if d.is_dir())
+    missing = [what for what, lib, want in (("cuBLAS for the matrix products", "cublas",
+                                             any(n.startswith("nvidia-cublas") for n in names)),
+                                            ("cuDNN for the image engine's attention", "cudnn", True))
+               if want and not found(lib)]
+    if not missing:
         return
-    warn("faster with NVIDIA's cuDNN for the image engine's attention (not free software; without it XeStrata's own "
-         "kernel does the work), into the data folder:")
+    warn(f"faster with NVIDIA's {' and '.join(missing)} (not free software; without them XeStrata's own kernels do "
+         "the work), into the data folder:")
     if importlib.util.find_spec("pip") is None:
         say(f"  {install_cmd(['python3-pip'])}")
-    say(f"  python3 -m pip install --target {shlex.quote(str(cudnn_dir(data)))} --no-deps "
+    say(f"  python3 -m pip install --target {shlex.quote(str(nvidia_libs_dir(data)))} --upgrade --no-deps "
         + " ".join(shlex.quote(n) for n in names))
 
 
@@ -1530,7 +1535,7 @@ def check_runtime(makers: set, gfx: set, data: Path) -> None:
                 say("  " + c)
         return
     check_igc(makers)
-    linux_cudnn(makers, data, (packaged_engine().get("runtime") or {}).get("cudnn_pip") or [])
+    linux_nvidia_libs(makers, data, (packaged_engine().get("runtime") or {}).get("nvidia_pip") or [])
     need, fast, repos = runtime_missing(makers)
     if not need and not fast:
         return
@@ -3059,9 +3064,9 @@ def build_engine(visions, llama, comp: dict, data: Path) -> Path:
             "hip_archs": comp.get("hip_archs", [])}
     if extra := engine_cmake_args():                   # (only when given: a build without them stays as it was)
         used["cmake_args"] = extra
-    # cuDNN's headers where pip put them (cudnn_dir), for the image engine's attention on NVIDIA GPUs: the engine is
-    # compiled again once they are there
-    cudnn = cudnn_dir(data) / "nvidia" / "cudnn"
+    # cuDNN's headers where pip put them (nvidia_libs_dir), for the image engine's attention on NVIDIA GPUs: the
+    # engine is compiled again once they are there
+    cudnn = nvidia_libs_dir(data) / "nvidia" / "cudnn"
     if comp["license"] == "contrib" and comp["cuda_archs"] and (cudnn / "include" / "cudnn.h").exists():
         used["cudnn_root"] = str(cudnn)
     engine_ok = (xe and (eng / EXE).exists() and (eng / IMAGE_EXE).exists() and meta.get("src") == src
@@ -4889,7 +4894,7 @@ def prepare_engine(a, gpu: dict, vision: str) -> tuple[Path, Path, str, list]:
         if meta.get("license") == "contrib" and (mkl := mkl_root()):
             lib_dirs.append(str(Path(mkl) / "lib"))
         if meta.get("license") == "contrib" and not WIN:
-            lib_dirs += cudnn_lib_dirs(data_folder_path(a.data_dir, load_settings()))
+            lib_dirs += nvidia_lib_dirs(data_folder_path(a.data_dir, load_settings()))
         ok(f"engine: {eng / EXE} ({meta.get('package', 'package')})")
     else:
         llama = get_llama_cpp()
@@ -4898,9 +4903,9 @@ def prepare_engine(a, gpu: dict, vision: str) -> tuple[Path, Path, str, list]:
         enc = "vulkan"
         data = data_folder_path(a.data_dir, load_settings())
         eng = build_engine({"none": [], "gpu": [enc, "cpu"], "cpu": ["cpu"]}[vision], llama, comp, data)
-        # the runtime of the compiler the engine was built with (none for the distribution's), and cuDNN's
-        cudnn_libs = cudnn_lib_dirs(data) if comp["license"] == "contrib" else []
-        lib_dirs = list(dict.fromkeys(comp["lib_dirs"] + cudnn_libs))
+        # the runtime of the compiler the engine was built with (none for the distribution's), and pip's NVIDIA ones
+        nvidia_libs = nvidia_lib_dirs(data) if comp["license"] == "contrib" else []
+        lib_dirs = list(dict.fromkeys(comp["lib_dirs"] + nvidia_libs))
         ok(f"engine: {eng / EXE}")
     return llama, eng, enc, lib_dirs
 
@@ -5544,7 +5549,7 @@ def main() -> int:
     if PACKAGED:                                       # the GPU makers' packages the package only suggests
         check_runtime(makers, amd_gfx, data)
     elif not WIN and (majors := [v for t in cuda_toolkits() if (v := cuda_major(t))]):   # a contrib build: its CUDA
-        linux_cudnn(makers, data, cudnn_pip_names(max(majors)))
+        linux_nvidia_libs(makers, data, nvidia_pip_names(max(majors)))
     if not WIN and (gpu["render"] is None or not os.access(gpu["render"], os.R_OK | os.W_OK)):
         fail(f"no access to the GPU ({gpu['render'] or 'no render node'})",
              "NVIDIA's driver is not loaded (nvidia-smi says why)" if gpu.get("vendor") == "nvidia" else

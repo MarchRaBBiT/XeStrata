@@ -468,7 +468,7 @@ xe0.1.43.1-1 は `0.1.43.1-1`（rpm は Version が 0.1.43.1、Release が 1）�
 | --- | --- | --- |
 | `XESTRATA_VERSION` | `latest` | リリースのタグ（`xe0.1.43.1` など） |
 | `XESTRATA_VARIANT` | `contrib-cuda13.4` | 入れる rpm の版 |
-| `XESTRATA_NONFREE` | `1` | `0` で oneMKL と cuBLAS を入れません（Intel と NVIDIA の密な積は XeStrata の自前のカーネルになります） |
+| `XESTRATA_NONFREE` | `1` | `0` で oneMKL を入れません（Intel の密な積は XeStrata の自前のカーネルになります）。NVIDIA の cuBLAS と cuDNN はイメージに入れず、`xestrata --setup` が示すときにデータフォルダーに入れます |
 
 - **手元の rpm**: `container/rpm/` に rpm を 1 つ置くと、Releases から取らずにそれを入れます。
   Releases にない `xestrata-free` は、`tools/package/build.sh fedora44 free` で作ってここに置きます。
