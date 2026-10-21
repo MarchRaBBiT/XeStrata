@@ -605,8 +605,8 @@ if(STRATA_ENABLE_XE)
       set(_strata_onemath_url URL ${STRATA_ONEMATH_SOURCE})
     else()
       set(_strata_onemath_url
-        URL https://github.com/MistVVK/oneMath/archive/refs/tags/xestrata-9.tar.gz
-        URL_HASH SHA256=493f51583f18c9430a01612294480b7ba1bd1b339a3d7ec553ef550c0264b8f9)
+        URL https://github.com/MistVVK/oneMath/archive/refs/tags/xestrata-10.tar.gz
+        URL_HASH SHA256=efda4bf89d1624fc8c70c63508489ed8eef24ad62c962d80b3f52717abd0841b)
     endif()
     # another archive is another tree: start from it again
     if(NOT "${_strata_onemath_url}" STREQUAL "${_STRATA_ONEMATH_KEY}")
