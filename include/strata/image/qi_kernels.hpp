@@ -44,6 +44,12 @@ void qi_attention(const uint16_t* q16, const uint16_t* k16, const uint16_t* v16,
 /// The path qi_attention takes on the current GPU, for the report.
 const char* qi_attention_path();
 
+/// The attention of query rows q0 .. q1 - 1 over all T keys (no mask), FP16 out16 [q1 - q0][heads * head_dim] (the
+/// layout of qi_attention's), through a GPU maker's kernel where the build has one for the GPU (src/image/qi_sdpa.cpp:
+/// oneDNN's SDPA on Intel GPUs); false where none takes it.
+bool qi_sdpa(const uint16_t* q16, const uint16_t* k16, const uint16_t* v16, int64_t q0, int64_t q1, int64_t T,
+             int64_t heads, int64_t head_dim, uint16_t* out16, void* stream);
+
 /// The text encoder's q and k ([T][q_heads * head_dim], [T][kv_heads * head_dim]): each head RMS-normed (wq, wk; eps
 /// 1e-6), then rotated as NEOX does (pair (j, j + head_dim / 2) by a position times theta^(-2j / head_dim)); FP16 out,
 /// v as v16.  The position: t, or with pos3 (three [T] rows: time, row, column) Qwen3-VL's interleaved M-RoPE, pair j

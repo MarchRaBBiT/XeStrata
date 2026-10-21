@@ -59,6 +59,11 @@ SPDX-FileCopyrightText = "The oneMath contributors"
 SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
+path = ["third_party/main/oneDNN/LICENSE", "third_party/main/oneDNN/THIRD-PARTY-PROGRAMS"]
+SPDX-FileCopyrightText = "Intel Corporation and the oneDNN contributors"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
 path = ["third_party/main/intel-llvm/LICENSE.TXT"]
 SPDX-FileCopyrightText = "The LLVM project contributors"
 SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"

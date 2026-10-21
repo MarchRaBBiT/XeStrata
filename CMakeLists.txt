@@ -638,8 +638,46 @@ if(STRATA_ENABLE_XE)
                            src/image/qi_vae.cpp src/image/qi_text.cpp src/image/qi_pipeline.cpp
                            src/image/mf_vae.cpp src/image/mf_dit.cpp
                            src/image/mf_pipeline.cpp
-                           src/image/qi_stream.cpp src/image/qi_vision.cpp src/image/qi_image_io.cpp)
+                           src/image/qi_stream.cpp src/image/qi_vision.cpp src/image/qi_image_io.cpp
+                           src/image/qi_sdpa.cpp)
   target_include_directories(strata_image PUBLIC include)
+  # The image attention's vendors' kernels (src/image/qi_sdpa.cpp), the engine's own kernel where none takes it.
+  # Intel GPUs: oneDNN's SDPA (Apache-2.0, https://github.com/uxlfoundation/oneDNN at the tag pinned here; Ubuntu's
+  # libdnnl-sycl is built for another SYCL runtime than intel/llvm's), built with the engine's compiler for Intel GPUs
+  # only (its SYCL GPU runtime, no CPU runtime) beside the build, and linked to the image engine alone (the text engine
+  # does not load it).  Windows: not yet.
+  option(STRATA_ONEDNN "the image attention through oneDNN's SDPA on Intel GPUs" ON)
+  set(STRATA_ONEDNN_SOURCE "" CACHE STRING
+      "oneDNN's source archive (a local file or URL) to build from (empty: fetch the pinned one)")
+  if(STRATA_ONEDNN AND NOT WIN32)
+    include(ExternalProject)
+    if(STRATA_ONEDNN_SOURCE)
+      set(_strata_onednn_url URL ${STRATA_ONEDNN_SOURCE})
+    else()
+      set(_strata_onednn_url
+        URL https://github.com/uxlfoundation/oneDNN/archive/refs/tags/v3.12.tar.gz
+        URL_HASH SHA256=efa94db6e8395daaef8e307a48e9527bbaab58a64b44e5d59a3662b4b155099d)
+    endif()
+    set(_strata_onednn_dir ${CMAKE_BINARY_DIR}/onednn)
+    set(_strata_onednn_args -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+        -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER} -DCMAKE_INSTALL_PREFIX=${_strata_onednn_dir}
+        -DCMAKE_INSTALL_LIBDIR=lib -DDNNL_CPU_RUNTIME=NONE -DDNNL_GPU_RUNTIME=SYCL -DDNNL_GPU_VENDOR=INTEL
+        -DDNNL_LIBRARY_TYPE=SHARED -DDNNL_BUILD_TESTS=OFF -DDNNL_BUILD_EXAMPLES=OFF -DDNNL_BUILD_DOC=OFF)
+    if(CMAKE_CXX_COMPILER_LAUNCHER)
+      list(APPEND _strata_onednn_args -DCMAKE_CXX_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER}
+                                      -DCMAKE_C_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER})
+    endif()
+    ExternalProject_Add(strata_onednn ${_strata_onednn_url} DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+      PREFIX ${CMAKE_BINARY_DIR}/_deps/onednn CMAKE_ARGS ${_strata_onednn_args}
+      BUILD_BYPRODUCTS ${_strata_onednn_dir}/lib/libdnnl.so)
+    file(MAKE_DIRECTORY ${_strata_onednn_dir}/include)
+    add_library(strata_dnnl SHARED IMPORTED)
+    set_target_properties(strata_dnnl PROPERTIES IMPORTED_LOCATION ${_strata_onednn_dir}/lib/libdnnl.so
+                          INTERFACE_INCLUDE_DIRECTORIES ${_strata_onednn_dir}/include)
+    add_dependencies(strata_image strata_onednn)
+    target_link_libraries(strata_image PRIVATE strata_dnnl)
+    target_compile_definitions(strata_image PRIVATE STRATA_ONEDNN=1)
+  endif()
   # stb_image (third_party/main/stb, MIT or the Unlicense) for an edit's reference image: its implementation in
   # qi_image_io.cpp alone, its own warnings not the build's
   target_include_directories(strata_image SYSTEM PRIVATE third_party/main/stb)
