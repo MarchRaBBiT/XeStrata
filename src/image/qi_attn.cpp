@@ -188,6 +188,22 @@ struct AttnKernel {
         sycl::group_barrier(sg);
         for (int64_t j0 = 0; j0 < keys; j0 += CH) {
             const uint16_t* kc0 = k16 + j0 * row + h * D;
+            if constexpr (P == 0 || P == 1) {
+                // Intel's: the next chunk's keys and values into L1 while this one is worked, in blocks of 32 rows x
+                // 32 columns shared out over the work-group's sub-groups (they read the same chunks)
+                const int64_t jn = j0 + CH;
+                if (jn + CH <= keys) {
+                    constexpr int PR = 32, PC = 32, NB = (CH / PR) * (D / PC);
+                    for (int b = g; b < 2 * NB; b += nsg) {
+                        const uint16_t* base = (b < NB ? k16 : v16) + (jn + (int64_t) ((b % NB) / (D / PC)) * PR) * row +
+                                               h * D + (int64_t) ((b % NB) % (D / PC)) * PC;
+                        mx::joint_matrix_prefetch<PR, PC>(sg, const_cast<sycl::half*>(
+                                                                  reinterpret_cast<const sycl::half*>(base)),
+                                                          row, mx::layout::row_major,
+                                                          syclex::properties{syclex::prefetch_hint_L1});
+                    }
+                }
+            }
             for (int nt = 0; nt < CH / TN; ++nt) {   // S = Q . K^T, K's tiles from global memory (the caches)
                 typename Ops::C c;
                 Ops::zero(sg, c);
