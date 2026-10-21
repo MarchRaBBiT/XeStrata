@@ -293,6 +293,32 @@ void qi_swiglu16(const float* gu, int64_t T, int64_t inter, uint16_t* h16, void*
     finish(stream, e, "qi_swiglu16");
 }
 
+void qi_quantize_q8(const uint16_t* x16, int64_t rows, int64_t cols, void* xq, void* stream) {
+    if (rows <= 0) return;
+    auto* x8 = static_cast<int8_t*>(xq);
+    auto* xs = reinterpret_cast<float*>(x8 + rows * cols);
+    const int64_t nb = cols / 32;
+    const auto e = queue_for(stream).parallel_for(sycl::range<1>((size_t) (rows * nb)), [=](sycl::id<1> i) {
+        const int64_t r = (int64_t) i[0] / nb, b = (int64_t) i[0] % nb;
+        const uint16_t* xr = x16 + r * cols + b * 32;
+        float v[32], amax = 0.f;
+        for (int j = 0; j < 32; ++j) { v[j] = f32_from_f16(xr[j]); amax = sycl::fmax(amax, sycl::fabs(v[j])); }
+        const float d = amax / 127.f, id = amax > 0.f ? 1.f / d : 0.f;
+        uint32_t p[8];
+        for (int j = 0; j < 8; ++j) {
+            uint32_t u = 0;
+            for (int k = 0; k < 4; ++k)
+                u |= (uint32_t) (uint8_t) (int8_t) (int) sycl::round(v[4 * j + k] * id) << (8 * k);
+            p[j] = u;
+        }
+        auto* o = reinterpret_cast<sycl::vec<uint32_t, 4>*>(x8 + r * cols + b * 32);
+        o[0] = sycl::vec<uint32_t, 4>{p[0], p[1], p[2], p[3]};
+        o[1] = sycl::vec<uint32_t, 4>{p[4], p[5], p[6], p[7]};
+        xs[r * nb + b] = d;
+    });
+    finish(stream, e, "qi_quantize_q8");
+}
+
 void qi_to_f16(const float* x, int64_t n, uint16_t* y16, void* stream) {
     if (n <= 0) return;
     const auto e = queue_for(stream).parallel_for(sycl::range<1>((size_t) n), [=](sycl::id<1> i) {

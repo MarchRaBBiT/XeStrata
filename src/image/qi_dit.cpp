@@ -10,6 +10,9 @@
 #include "strata/image/qi_kernels.hpp"
 #include "strata/kernels/bf16_bits.hpp"
 #include "strata/kernels/f16_bits.hpp"
+#include "strata/kernels/iq_mmq.hpp"
+#include "strata/kernels/q8_mma.hpp"
+#include "strata/core/runtime.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -208,6 +211,21 @@ bool QiDit::open(const std::string& path, void* stream, std::string& err, bool d
         heads_ = C_ / kHead;
         for (const W* w : {&t1_, &t2_, &mod_, &nout_, &pout_, &tin_, &tout_, &iin_})
             scratch = std::max(scratch, w->n * w->k);
+        // the blocks' Q8_0 products on the int8 tensor cores where the GPU has them: the weights rewritten in place
+        // each time a block is copied to the GPU
+        if (kernels::q8_mma_usable(core::Runtime::get().stream(s_))) {
+            for (Block& b : blocks_)
+                for (W* w : {&b.q, &b.k, &b.v, &b.o, &b.gu, &b.down}) {
+                    w->packed = w->type == 8 && w->n % 128 == 0 && w->k % 256 == 0;
+                    packed_ = packed_ || w->packed;
+                }
+            blocks_stream_.set_prepare([this](int i, uint8_t* d) {
+                sycl::queue& q = core::Runtime::get().stream(s_);
+                const Block& b = blocks_[(size_t) i];
+                for (const W* w : {&b.q, &b.k, &b.v, &b.o, &b.gu, &b.down})
+                    if (w->packed) kernels::q8_mma_repack(q, d + reinterpret_cast<uintptr_t>(w->d), w->n, w->k);
+            });
+        }
         if (dry_) return true;
         if (!gemm_.init(s_, scratch, err)) return false;
         blocks_stream_.configure(blocks_stream_.total(), s_);   // all resident until a budget is set
@@ -225,6 +243,20 @@ bool QiDit::open(const std::string& path, void* stream, std::string& err, bool d
 void QiDit::product(const uint16_t* x16, const W& w, float* y, int64_t T, int64_t ldy, int64_t row0, int64_t rows) {
     if (rows < 0) rows = w.n;
     const auto* base = static_cast<const uint8_t*>(w.d) + (uint64_t) row0 * w.row_bytes;
+    if (w.packed) {
+        const size_t need = kernels::iq_mmq_act_bytes(T, w.k);
+        if (need > xq_bytes_) {
+            if (xq_ != nullptr) {
+                allocs_.erase(std::remove(allocs_.begin(), allocs_.end(), xq_), allocs_.end());
+                gpu::free(xq_);
+            }
+            xq_ = alloc<uint8_t>(allocs_, (int64_t) need);
+            xq_bytes_ = need;
+        }
+        qi_quantize_q8(x16, T, w.k, xq_, s_);
+        kernels::q8_mma_gemm(core::Runtime::get().stream(s_), xq_, base, y, T, rows, w.k, ldy > 0 ? ldy : rows);
+        return;
+    }
     if (w.type == kTypeF16) gemm_.f16(x16, reinterpret_cast<const uint16_t*>(base), y, T, rows, w.k, ldy);
     else gemm_.native(x16, w.type, base, y, T, rows, w.k, ldy);
 }
@@ -609,7 +641,8 @@ uint64_t QiDit::activation_bytes(int64_t T, int64_t mlp_rows) const {
     return (uint64_t) T * (uint64_t) C_ * 4 * 4 + (uint64_t) T * (uint64_t) std::max(C_, in_ch_) * 4 +
            (uint64_t) mr * 2 * (uint64_t) inter_ * 4 + (uint64_t) T * (uint64_t) std::max(C_, inter_) * 2 +
            (uint64_t) TP * (uint64_t) C_ * 2 * 3 + (uint64_t) T * (uint64_t) C_ * 2 + (uint64_t) T * kHead * 4 +
-           (plain ? (uint64_t) T * (uint64_t) C_ * 4 : 0);
+           (plain ? (uint64_t) T * (uint64_t) C_ * 4 : 0) +
+           (packed_ ? std::max(kernels::iq_mmq_act_bytes(T, C_), kernels::iq_mmq_act_bytes(mr, inter_)) : 0);
 }
 
 void QiDit::set_mlp_rows(int64_t rows) {
@@ -621,12 +654,14 @@ void QiDit::set_mlp_rows(int64_t rows) {
 
 void QiDit::drop_activations() {
     for (void* p : {(void*) x_, (void*) q_, (void*) k_, (void*) v_, (void*) h_, (void*) gu_, (void*) h16_, (void*) q16_,
-                    (void*) k16_, (void*) v16_, (void*) o16_, (void*) cos_, (void*) sin_, (void*) attn_scratch_})
+                    (void*) k16_, (void*) v16_, (void*) o16_, (void*) cos_, (void*) sin_, (void*) attn_scratch_, xq_})
         if (p != nullptr) {
             allocs_.erase(std::remove(allocs_.begin(), allocs_.end(), p), allocs_.end());
             gpu::free(p);
         }
     x_ = q_ = k_ = v_ = h_ = gu_ = cos_ = sin_ = attn_scratch_ = nullptr;
+    xq_ = nullptr;
+    xq_bytes_ = 0;
     h16_ = q16_ = k16_ = v16_ = o16_ = nullptr;
     cap_T_ = 0;
     rope_H_ = rope_W_ = rope_text_ = -1;

@@ -117,6 +117,7 @@ private:
         int64_t n = 0, k = 0;   // n rows of k
         const void* d = nullptr;
         uint64_t row_bytes = 0;
+        bool packed = false;    // Q8_0 rewritten for q8_mma_gemm (q8_mma_repack)
     };
     struct Block {
         W q, k, v, o, gu, down;   // d: the offset within the block's region (LayerStream)
@@ -156,6 +157,10 @@ private:
     float *x_ = nullptr, *q_ = nullptr, *k_ = nullptr, *v_ = nullptr, *h_ = nullptr, *gu_ = nullptr;
     uint16_t *h16_ = nullptr, *q16_ = nullptr, *k16_ = nullptr, *v16_ = nullptr, *o16_ = nullptr;
     float *cos_ = nullptr, *sin_ = nullptr, *attn_scratch_ = nullptr;
+    // the int8 products' activations (W::packed): xq_ for xq_bytes_
+    bool packed_ = false;   // some block's products take them
+    void* xq_ = nullptr;
+    size_t xq_bytes_ = 0;
     int64_t rope_H_ = -1, rope_W_ = -1, rope_text_ = -1;
     float *text_ = nullptr;           // the prefix's rows [n_text][C] (the projected text, the references' tokens)
     std::vector<float> pre_pos_;      // the prefix rows' positions [n_text][3]

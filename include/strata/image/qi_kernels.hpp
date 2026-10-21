@@ -60,6 +60,10 @@ void qi_attention_causal(const uint16_t* q16, const uint16_t* k16, const uint16_
 /// h16[t, i] = gu[t, inter + i] * silu(gu[t, i]) (the fused gate_up product: gate first, then up).
 void qi_swiglu16(const float* gu, int64_t T, int64_t inter, uint16_t* h16, void* stream);
 
+/// The activations of an int8 product (kernels::iq_mmq_quantize's layout, without the sums): rows x cols (a multiple of
+/// 32) of x16 as int8 with a scale for each 32.
+void qi_quantize_q8(const uint16_t* x16, int64_t rows, int64_t cols, void* xq, void* stream);
+
 /// y16 = FP16(x), n elements.
 void qi_to_f16(const float* x, int64_t n, uint16_t* y16, void* stream);
 
