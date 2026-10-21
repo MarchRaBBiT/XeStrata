@@ -6,6 +6,7 @@
 
 #include "strata/core/per_device.hpp"
 #include "strata/core/runtime.hpp"
+#include "strata/kernels/bf16_bits.hpp"
 #include "strata/kernels/f16_bits.hpp"
 
 #include <sycl/sycl.hpp>
@@ -13,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <string>
 
 namespace strata::image {
 
@@ -21,6 +23,7 @@ namespace {
 namespace syclex = sycl::ext::oneapi::experimental;
 
 using strata::kernels::f16_from_f32;
+using strata::kernels::f32_from_bf16;
 using strata::kernels::f32_from_f16;
 
 sycl::queue& queue_for(void* stream) { return core::Runtime::get().stream(stream); }
@@ -68,6 +71,102 @@ struct QkRope {
     auto get(syclex::properties_tag) const { return syclex::properties{syclex::sub_group_size<SG>}; }
 };
 
+// qi_rows_i8's values: V of row r from column k, FP16 or BF16
+struct I8From16 {
+    const uint16_t* src;
+    bool bf16;
+    int64_t K;
+    template<int V> void load(int64_t r, int64_t k, float* v) const {
+        const auto raw = *reinterpret_cast<const sycl::vec<uint16_t, V>*>(src + r * K + k);
+        for (int j = 0; j < V; ++j) v[j] = bf16 ? f32_from_bf16(raw[j]) : f32_from_f16(raw[j]);
+    }
+};
+
+// qi_swiglu_i8's: SwiGLU of a W8A8 product's int32 sums [gate | up]
+struct I8FromSwiglu {
+    const int32_t* gu;
+    const float *sx, *sw;
+    int64_t inter;
+    template<int V> void load(int64_t r, int64_t k, float* v) const {
+        const int32_t* row = gu + r * 2 * inter;
+        for (int j = 0; j < V; ++j) {
+            const float g = (float) row[k + j] * sx[r] * sw[k + j];
+            const float u = (float) row[inter + k + j] * sx[r] * sw[inter + k + j];
+            v[j] = u * g / (1.f + sycl::exp(-g));
+        }
+    }
+};
+
+// qi_rows_i8 a work-group a row: a sub-group of 32 a group of 256 values (8 a lane, held in registers), up to MAXG
+// groups each; the rotation's butterflies of strides 1 to 4 within a lane, 8 to 128 across lanes
+template<class Src> struct RowsI8 {
+    static constexpr int SG = 32, V = kQiRotate / SG, MAXG = 4;
+    Src src;
+    int64_t K, gpr, nsg;
+    int8_t* q;
+    float* s;
+    const float* rs;
+    void operator()(sycl::nd_item<1> it) const {
+        const auto sg = it.get_sub_group();
+        const auto r = static_cast<int64_t>(it.get_group_linear_id());
+        const auto si = static_cast<int64_t>(sg.get_group_linear_id());
+        const int lane = static_cast<int>(sg.get_local_linear_id());
+        float v[MAXG][V];
+        float amax = 0.f;
+        for (int c = 0; c < MAXG; ++c) {
+            const int64_t g = si + c * nsg;
+            if (g >= gpr) break;   // the whole sub-group
+            src.template load<V>(r, g * kQiRotate + (int64_t) lane * V, v[c]);
+            for (int m = 1; m < V; m <<= 1)
+                for (int j = 0; j < V; ++j)
+                    if ((j & m) == 0) {
+                        const float a = v[c][j], b = v[c][j + m];
+                        v[c][j] = a + b;
+                        v[c][j + m] = a - b;
+                    }
+            for (int l = 1; l < SG; l <<= 1)
+                for (int j = 0; j < V; ++j) {
+                    const float o = sycl::permute_group_by_xor(sg, v[c][j], l);
+                    v[c][j] = (lane & l) != 0 ? o - v[c][j] : v[c][j] + o;
+                }
+            for (int j = 0; j < V; ++j) {
+                v[c][j] *= 1.f / 16.f;
+                amax = sycl::fmax(amax, sycl::fabs(v[c][j]));
+            }
+        }
+        amax = sycl::reduce_over_group(it.get_group(), amax, sycl::maximum<float>());
+        const float d = amax / 127.f, id = amax > 0.f ? 1.f / d : 0.f;
+        for (int c = 0; c < MAXG; ++c) {
+            const int64_t g = si + c * nsg;
+            if (g >= gpr) break;
+            sycl::vec<int8_t, V> o;
+            for (int j = 0; j < V; ++j) o[j] = (int8_t) (int) sycl::round(v[c][j] * id);
+            *reinterpret_cast<sycl::vec<int8_t, V>*>(q + r * K + g * kQiRotate + (int64_t) lane * V) = o;
+        }
+        if (si == 0 && lane == 0) s[r] = rs != nullptr ? d * rs[r] : d;
+    }
+    auto get(syclex::properties_tag) const { return syclex::properties{syclex::sub_group_size<SG>}; }
+};
+
+template<class Src>
+void rows_i8(const Src& src, int64_t rows, int64_t K, int8_t* q, float* s, const float* rs, void* stream) {
+    if (rows <= 0) return;
+    sycl::queue& qu = queue_for(stream);
+    constexpr int64_t SG = RowsI8<Src>::SG, MAXG = RowsI8<Src>::MAXG;
+    const int64_t gpr = K / kQiRotate;
+    const auto max_sg =
+        static_cast<int64_t>(qu.get_device().get_info<sycl::info::device::max_work_group_size>()) / SG;
+    const int64_t per = (gpr + max_sg - 1) / max_sg;
+    if (K % kQiRotate != 0 || per > MAXG)
+        throw std::runtime_error("image engine: a W8A8 product takes rows of a multiple of 256 values, up to " +
+                                 std::to_string(max_sg * MAXG * kQiRotate));
+    const int64_t nsg = (gpr + per - 1) / per;
+    const auto e = qu.parallel_for(
+        sycl::nd_range<1>(sycl::range<1>((size_t) (rows * nsg * SG)), sycl::range<1>((size_t) (nsg * SG))),
+        RowsI8<Src>{src, K, gpr, nsg, q, s, rs});
+    finish(stream, e, "qi_rows_i8");
+}
+
 }  // namespace
 
 void qi_ln_mod16(const float* x, const float* mod, int64_t n_text, int64_t T, int64_t C, uint16_t* y16, void* stream) {
@@ -93,12 +192,16 @@ void qi_ln_mod16(const float* x, const float* mod, int64_t n_text, int64_t T, in
     finish(stream, e, "qi_ln_mod16");
 }
 
-void qi_gate_add(float* x, const float* h, const float* mod, int64_t n_text, int64_t T, int64_t C, void* stream) {
+void qi_gate_add(float* x, const float* h, const float* mod, int64_t n_text, int64_t T, int64_t C, void* stream,
+                 const QiI8* i8) {
     if (T <= 0) return;
+    const float* sx = i8 != nullptr ? i8->sx : nullptr;
+    const float* sw = i8 != nullptr ? i8->sw : nullptr;
     const auto e = queue_for(stream).parallel_for(sycl::range<1>((size_t) (T * C)), [=](sycl::id<1> id) {
         const auto i = static_cast<int64_t>(id[0]);
         const int64_t t = i / C, c = i - t * C;
-        x[i] += h[i] * sycl::tanh(mod[(t < n_text ? C : 0) + c]);
+        const float v = sx != nullptr ? (float) sycl::bit_cast<int32_t>(h[i]) * sx[t] * sw[c] : h[i];
+        x[i] += v * sycl::tanh(mod[(t < n_text ? C : 0) + c]);
     });
     finish(stream, e, "qi_gate_add");
 }
@@ -376,6 +479,25 @@ void qi_quantize_q8(const uint16_t* x16, int64_t rows, int64_t cols, void* xq, v
         xs[r * nb + b] = d;
     });
     finish(stream, e, "qi_quantize_q8");
+}
+
+void qi_rows_i8(const uint16_t* src, bool bf16, int64_t rows, int64_t K, int8_t* q, float* s, const float* rs,
+                void* stream) {
+    rows_i8(I8From16{src, bf16, K}, rows, K, q, s, rs, stream);
+}
+
+void qi_swiglu_i8(const int32_t* gu, const QiI8& g, int64_t T, int64_t inter, int8_t* q, float* s, void* stream) {
+    rows_i8(I8FromSwiglu{gu, g.sx, g.sw, inter}, T, inter, q, s, nullptr, stream);
+}
+
+void qi_i8_scale(float* y, int64_t T, int64_t N, int64_t ldy, const float* sx, const float* sw, const float* bias,
+                 void* stream) {
+    if (T <= 0 || N <= 0) return;
+    const auto e = queue_for(stream).parallel_for(sycl::range<2>((size_t) T, (size_t) N), [=](sycl::id<2> i) {
+        float& v = y[(int64_t) i[0] * ldy + (int64_t) i[1]];
+        v = (float) sycl::bit_cast<int32_t>(v) * sx[i[0]] * sw[i[1]] + (bias != nullptr ? bias[i[1]] : 0.f);
+    });
+    finish(stream, e, "qi_i8_scale");
 }
 
 void qi_to_f16(const float* x, int64_t n, uint16_t* y16, void* stream) {

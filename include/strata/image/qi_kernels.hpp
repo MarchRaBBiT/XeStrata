@@ -15,8 +15,14 @@ namespace strata::image {
 /// y16[t] = LayerNorm(x[t]) * (1 + mod[t < n_text][...]) (no affine, eps 1e-6), FP16.
 void qi_ln_mod16(const float* x, const float* mod, int64_t n_text, int64_t T, int64_t C, uint16_t* y16, void* stream);
 
-/// x[t] += h[t] * tanh(mod[t < n_text][...]).
-void qi_gate_add(float* x, const float* h, const float* mod, int64_t n_text, int64_t T, int64_t C, void* stream);
+/// A W8A8 product's output left as its int32 sums (their bits in the FP32 array): value [t][n] = sum * sx[t] * sw[n].
+struct QiI8 {
+    const float *sx = nullptr, *sw = nullptr;
+};
+
+/// x[t] += h[t] * tanh(mod[t < n_text][...]); with i8, h holds a W8A8 product's sums.
+void qi_gate_add(float* x, const float* h, const float* mod, int64_t n_text, int64_t T, int64_t C, void* stream,
+                 const QiI8* i8 = nullptr);
 
 /// For each token and head: q and k RMS-normed over the head (weights wq, wk; eps 1e-6), then rotated pairwise
 /// (2j, 2j + 1) by cos[t][j], sin[t][j] (rope tables [T][head_dim / 2]); written as FP16 q16, k16, and v as v16, all
@@ -69,6 +75,26 @@ void qi_swiglu16(const float* gu, int64_t T, int64_t inter, uint16_t* h16, void*
 /// The activations of an int8 product (kernels::iq_mmq_quantize's layout, without the sums): rows x cols (a multiple of
 /// 32) of x16 as int8 with a scale for each 32.
 void qi_quantize_q8(const uint16_t* x16, int64_t rows, int64_t cols, void* xq, void* stream);
+
+/// The group a W8A8 product's operands are rotated in (qi_rows_i8): K must be a multiple of it.
+constexpr int64_t kQiRotate = 256;
+
+/// The operands of a W8A8 product (prefill::Gemm::i8): rows of K FP16 (or with bf16 BF16) values (K up to 32768 on a
+/// GPU of 1024-item work-groups), each group of kQiRotate times the normalized Hadamard matrix (orthogonal, so the
+/// product of two rotated operands is that of the originals; it spreads a channel's outliers over the group), then as
+/// int8 with a scale for the row: q [rows][K], s [rows], times rs [rows] where given (rows the caller scaled down).
+/// The weights' rows and the activations' tokens alike.
+void qi_rows_i8(const uint16_t* src, bool bf16, int64_t rows, int64_t K, int8_t* q, float* s, const float* rs,
+                void* stream);
+
+/// qi_rows_i8 of qi_swiglu16's values, from the gate_up product's int32 sums gu [T][2 inter] (scaled by g): the down
+/// product's int8 input in one pass.
+void qi_swiglu_i8(const int32_t* gu, const QiI8& g, int64_t T, int64_t inter, int8_t* q, float* s, void* stream);
+
+/// y [T][N] (row stride ldy) holds a W8A8 product's int32 sums (their bits): y = sum * sx[t] * sw[n] + bias[n], in
+/// place (bias null: none).
+void qi_i8_scale(float* y, int64_t T, int64_t N, int64_t ldy, const float* sx, const float* sw, const float* bias,
+                 void* stream);
 
 /// y16 = FP16(x), n elements.
 void qi_to_f16(const float* x, int64_t n, uint16_t* y16, void* stream);
