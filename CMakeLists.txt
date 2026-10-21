@@ -696,12 +696,20 @@ if(STRATA_ENABLE_XE)
   # build's ROCm (hip's version) and its kernels' images for the build's AMD architectures, fetched (their SHA-256
   # checked) and unpacked beside the build, or STRATA_AOTRITON_ROOT, a folder of its own; the packages carry both.  A
   # ROCm without its build, or an architecture without images, takes XeStrata's own kernel.
+  # Windows: AOTriton has no Windows release, and builds the library alone there (its NOIMAGE mode; the images are the
+  # same as Linux's), from its source (the tag's archive, its SHA-256 checked), with a patch of XeStrata's
+  # (third_party/main/aotriton/patches: HIP's headers and import library given, the build machine's Python) and xz's
+  # liblzma (0BSD) linked in, both cross-built with this build's toolchain; HIP's are the Windows HIP adapter's
+  # (tools/intel_llvm_build.py --windows, beside STRATA_SYCL_WINDOWS).
   set(STRATA_AOTRITON_ROOT "" CACHE PATH "aotriton's folder (include/, lib/ with its images) for the image attention")
-  if(_strata_hip_archs AND NOT WIN32)
-    strata_hip_prefixes(_strata_aot_prefixes)
-    find_package(hip QUIET PATHS ${_strata_aot_prefixes})
+  set(_strata_aot_hip_win "${STRATA_SYCL_WINDOWS}/../hip")
+  if(_strata_hip_archs AND (NOT WIN32 OR EXISTS "${_strata_aot_hip_win}/lib/amdhip64.lib"))
+    if(NOT WIN32)
+      strata_hip_prefixes(_strata_aot_prefixes)
+      find_package(hip QUIET PATHS ${_strata_aot_prefixes})
+    endif()
     set(_strata_aot_dir "${STRATA_AOTRITON_ROOT}")
-    if(NOT _strata_aot_dir AND hip_FOUND)
+    if(NOT _strata_aot_dir AND (hip_FOUND OR WIN32))
       set(_strata_aot_base https://github.com/ROCm/aotriton/releases/download/0.14.2b/aotriton-0.14.2b)
       set(_strata_aot_rocm6.4 35f598d0aabf1fca887fb8428e12f34de9e3ce852dc2aa832b76e318cf4f3940)
       set(_strata_aot_rocm7.0 98800207360e1b688afc4fccf794b50560ef2b42bdd32ed0b71f90fdc86b0cf6)
@@ -718,8 +726,11 @@ if(STRATA_ENABLE_XE)
       set(_strata_aot_gfx942 eae5d36c974d974f085cfbdecf77760db71324fa9814ed50d8a3fc42bfbe3e41)
       set(_strata_aot_gfx950 23716cbf855df9df1ca7d480a90e0fb29b0356bb424015c426fc0e5a973f682b)
       set(_strata_aot_rocm "rocm${hip_VERSION_MAJOR}.${hip_VERSION_MINOR}")
-      if(DEFINED _strata_aot_${_strata_aot_rocm})
-        set(_strata_aot_files "manylinux_2_28_x86_64-${_strata_aot_rocm}-shared")
+      if(WIN32 OR DEFINED _strata_aot_${_strata_aot_rocm})
+        set(_strata_aot_files "")
+        if(NOT WIN32)
+          set(_strata_aot_files "manylinux_2_28_x86_64-${_strata_aot_rocm}-shared")
+        endif()
         foreach(strata_arch IN LISTS _strata_hip_archs)
           # the images' families: gfx1200 and gfx1201 are gfx120x's, gfx1100 to gfx1103 gfx110x's, and so on
           string(REGEX REPLACE "^(gfx1[012][0-9])[0-9a-f]$" "\\1x" _strata_family "${strata_arch}")
@@ -748,23 +759,64 @@ if(STRATA_ENABLE_XE)
             file(REMOVE ${_strata_tar})
           endif()
         endforeach()
+        if(WIN32)
+          include(ExternalProject)
+          set(_strata_aot_win -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE} -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+              -DSTRATA_XWIN=${STRATA_XWIN} -DSTRATA_SYCL_WINDOWS=${STRATA_SYCL_WINDOWS} -DCMAKE_BUILD_TYPE=Release)
+          if(CMAKE_CXX_COMPILER_LAUNCHER)
+            list(APPEND _strata_aot_win -DCMAKE_CXX_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER}
+                                        -DCMAKE_C_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER})
+          endif()
+          set(_strata_xz_dir ${CMAKE_BINARY_DIR}/_deps/aotriton/xz)
+          ExternalProject_Add(strata_xz
+            URL https://github.com/tukaani-project/xz/releases/download/v5.8.1/xz-5.8.1.tar.gz
+            URL_HASH SHA256=507825b599356c10dca1cd720c9d0d0c9d5400b9de300af00e4d1ea150795543
+            DOWNLOAD_EXTRACT_TIMESTAMP FALSE PREFIX ${CMAKE_BINARY_DIR}/_deps/aotriton/xz-build
+            CMAKE_ARGS ${_strata_aot_win} -DCMAKE_INSTALL_PREFIX=${_strata_xz_dir} -DBUILD_SHARED_LIBS=OFF
+              -DBUILD_TESTING=OFF -DXZ_TOOL_XZ=OFF -DXZ_TOOL_XZDEC=OFF -DXZ_TOOL_LZMADEC=OFF -DXZ_TOOL_LZMAINFO=OFF
+              -DXZ_TOOL_SCRIPTS=OFF -DXZ_DOC=OFF -DXZ_NLS=OFF -DXZ_THREADS=vista)
+          # the release's commit and tree, which its images' signatures carry (the source is its archive, no clone)
+          ExternalProject_Add(strata_aotriton_win
+            URL https://github.com/ROCm/aotriton/archive/refs/tags/0.14.2b.tar.gz
+            URL_HASH SHA256=9d64da24c877b6a8f6a7921a178d007232a5e35a908c19695e1d0a6f8c1eb0a5
+            DOWNLOAD_EXTRACT_TIMESTAMP FALSE PREFIX ${CMAKE_BINARY_DIR}/_deps/aotriton/win-build
+            PATCH_COMMAND patch -p1 -i
+              ${CMAKE_SOURCE_DIR}/third_party/main/aotriton/patches/0001-windows-cross-build.patch
+            CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env AOTRITON_CI_SUPPLIED_SHA1=c11b5b886a10a00f925f74133d38b3505e67ccd9
+              AOTRITON_GIT_TREESHA1=25d66e23104aab7a2492d40d1d326499d224dc88
+              ${CMAKE_COMMAND} -G Ninja -S <SOURCE_DIR> -B <BINARY_DIR> ${_strata_aot_win}
+              -DCMAKE_INSTALL_PREFIX=${_strata_aot_dir} -DAOTRITON_NOIMAGE_MODE=ON -DAOTRITON_NO_PYTHON=ON
+              -DAOTRITON_HIP_WINDOWS=${_strata_aot_hip_win} -Dliblzma_DIR=${_strata_xz_dir}/lib/cmake/liblzma
+              -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH
+            DEPENDS strata_xz
+            BUILD_BYPRODUCTS ${_strata_aot_dir}/lib/aotriton_v2.lib)
+        endif()
       else()
         message(STATUS "aotriton has no build for ROCm ${hip_VERSION}: the image attention on AMD GPUs takes "
                        "XeStrata's own kernel")
       endif()
     endif()
-    if(_strata_aot_dir AND EXISTS ${_strata_aot_dir}/lib/libaotriton_v2.so AND TARGET hip::amdhip64)
+    set(_strata_aot_libs "")
+    if(WIN32 AND TARGET strata_aotriton_win)
+      set(_strata_aot_libs ${_strata_aot_dir}/lib/aotriton_v2.lib ${_strata_aot_hip_win}/lib/amdhip64.lib)
+      set(_strata_hip_inc ${_strata_aot_hip_win}/include)
+    elseif(NOT WIN32 AND _strata_aot_dir AND EXISTS ${_strata_aot_dir}/lib/libaotriton_v2.so AND TARGET hip::amdhip64)
       # hip's headers for its file only (its stream type), not hip::host's options for the SYCL sources; a system
       # folder (Fedora's /usr/include) stays out of -I, which would break the C++ headers' #include_next
       get_target_property(_strata_hip_inc hip::amdhip64 INTERFACE_INCLUDE_DIRECTORIES)
       list(REMOVE_ITEM _strata_hip_inc ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES} /usr/include)
+      set(_strata_aot_libs ${_strata_aot_dir}/lib/libaotriton_v2.so hip::amdhip64)
+    endif()
+    if(_strata_aot_libs)
       # a module of its own, which the image engine opens on an AMD GPU only (it needs AMD's HIP runtime, which a
-      # machine with other makers' GPUs need not have), beside the engine
+      # machine with other makers' GPUs need not have), beside the engine, the same on Linux and Windows
       add_library(strata_sdpa_aotriton SHARED src/image/qi_sdpa_aotriton.cpp)
       target_include_directories(strata_sdpa_aotriton PRIVATE ${_strata_aot_dir}/include ${_strata_hip_inc})
       target_compile_definitions(strata_sdpa_aotriton PRIVATE __HIP_PLATFORM_AMD__)
-      target_link_libraries(strata_sdpa_aotriton PRIVATE strata_sycl ${_strata_aot_dir}/lib/libaotriton_v2.so
-                            hip::amdhip64)
+      target_link_libraries(strata_sdpa_aotriton PRIVATE strata_sycl ${_strata_aot_libs})
+      if(TARGET strata_aotriton_win)
+        add_dependencies(strata_sdpa_aotriton strata_aotriton_win)
+      endif()
       add_dependencies(strata_image strata_sdpa_aotriton)
       set_property(SOURCE src/image/qi_sdpa.cpp APPEND PROPERTY COMPILE_DEFINITIONS STRATA_AOTRITON=1)
       target_link_libraries(strata_image PRIVATE ${CMAKE_DL_LIBS})
