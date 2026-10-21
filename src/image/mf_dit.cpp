@@ -660,6 +660,11 @@ MfOut MfDit::product(const uint16_t* x16, const float* rs, const W& w, const uin
     }
     if (w.type == kTypeF16) gemm_.f16(x16, reinterpret_cast<const uint16_t*>(d), y, T, w.n, w.k);
     else gemm_.native(x16, w.type, d, y, T, w.n, w.k);
+    if (defer) {
+        out.rs = rs;
+        out.b = bias;
+        return out;
+    }
     if (rs != nullptr || bias != nullptr) rows_back(y, rs, bias, T, w.n, s_);
     return out;
 }
@@ -705,6 +710,7 @@ void MfDit::ensure(int64_t hw, int n, int64_t max_text) {
     tk_ = alloc<float>(allocs_, L * C_);
     tv_ = alloc<float>(allocs_, L * C_);
     rs_ = alloc<float>(allocs_, std::max(X, mlp_rows_));
+    rs2_ = alloc<float>(allocs_, std::max(X, mlp_rows_));
     rs_io_ = alloc<float>(allocs_, R);
     rs_to_ = alloc<float>(allocs_, L);
     hs_ = alloc<float>(allocs_, 2 * heads_);
@@ -744,10 +750,10 @@ void MfDit::ensure(int64_t hw, int n, int64_t max_text) {
 
 void MfDit::drop_activations() {
     gpu::stream_sync(s_);
-    for (void* p : {(void*) tq_, (void*) tk_, (void*) tv_, (void*) rs_, (void*) rs_io_, (void*) rs_to_, (void*) hs_,
-                    (void*) vpart_})
+    for (void* p : {(void*) tq_, (void*) tk_, (void*) tv_, (void*) rs_, (void*) rs2_, (void*) rs_io_, (void*) rs_to_,
+                    (void*) hs_, (void*) vpart_})
         release(allocs_, p);
-    tq_ = tk_ = tv_ = rs_ = rs_io_ = rs_to_ = hs_ = vpart_ = nullptr;
+    tq_ = tk_ = tv_ = rs_ = rs2_ = rs_io_ = rs_to_ = hs_ = vpart_ = nullptr;
     for (void* p : {(void*) img_, (void*) txt_, (void*) q_, (void*) k_, (void*) v_, (void*) a_, (void*) gu_,
                     (void*) h16_, (void*) jq16_, (void*) jk16_, (void*) jv16_, (void*) jo16_, (void*) io16_,
                     (void*) to16_, (void*) cos_, (void*) sin_, (void*) cos_id_, (void*) sin_id_, (void*) attn_scratch_,
@@ -904,14 +910,14 @@ void MfDit::forward(const float* x, float sigma, int64_t h, int64_t w, int n, fl
         modulation(tsil, b.tmod, base, mod_t_, f(b.b_tmod));
         // q, k, v of the image rows and of the text rows
         rows16(LnMod{img_, mod_i_, mod_i_ + C, C}, R, C, h16_, rs_, s_);
-        // (a W8A8 product's sums are scaled by their readers, head_max and qk_rope_v16)
+        // (the products' sums are scaled by their readers, head_max and qk_rope_v16)
         const MfOut q = product(h16_, rs_, b.q, base, q_, R, f(b.b_q), false, true);
         const MfOut k = product(h16_, rs_, b.k, base, k_, R, f(b.b_k), b.q.type == kTypeW8, true);
         const MfOut v = product(h16_, rs_, b.v, base, v_, R, f(b.b_v), b.k.type == kTypeW8, true);
-        rows16(LnMod{txt_, mod_t_, mod_t_ + C, C}, L, C, h16_, rs_, s_);
-        const MfOut tq = product(h16_, rs_, b.tq, base, tq_, L, f(b.b_tq), false, true);
-        const MfOut tk = product(h16_, rs_, b.tk, base, tk_, L, f(b.b_tk), b.tq.type == kTypeW8, true);
-        const MfOut tv = product(h16_, rs_, b.tv, base, tv_, L, f(b.b_tv), b.tk.type == kTypeW8, true);
+        rows16(LnMod{txt_, mod_t_, mod_t_ + C, C}, L, C, h16_, rs2_, s_);   // rs_ is the image rows' still
+        const MfOut tq = product(h16_, rs2_, b.tq, base, tq_, L, f(b.b_tq), false, true);
+        const MfOut tk = product(h16_, rs2_, b.tk, base, tk_, L, f(b.b_tk), b.tq.type == kTypeW8, true);
+        const MfOut tv = product(h16_, rs2_, b.tv, base, tv_, L, f(b.b_tv), b.tk.type == kTypeW8, true);
         // each context: its v heads' scales, its rows normed (the image's rotated) into [text, image], the attention,
         // its output back to each stream's rows (FP16, scaled by row)
         for (int i = 0; i < n; ++i) {
@@ -935,13 +941,15 @@ void MfDit::forward(const float* x, float sigma, int64_t h, int64_t w, int n, fl
         for (int64_t m0 = 0; m0 < R; m0 += mlp_rows_) {
             const int64_t mr = std::min(mlp_rows_, R - m0);
             rows16(LnMod{img_ + m0 * C, mod_i_ + 3 * C, mod_i_ + 4 * C, C}, mr, C, h16_, rs_, s_);
-            rows16(Gelu{product(h16_, rs_, b.imlp1, base, gu_, mr, f(b.b_imlp1), false, true)}, mr, F_, h16_, rs_, s_);
-            gate_add(img_ + m0 * C, product(h16_, rs_, b.imlp2, base, a_, mr, f(b.b_imlp2), false, true),
+            // the GELU reads the first product's sums with rs_, so its own rows' scales go to rs2_
+            rows16(Gelu{product(h16_, rs_, b.imlp1, base, gu_, mr, f(b.b_imlp1), false, true)}, mr, F_, h16_, rs2_,
+                   s_);
+            gate_add(img_ + m0 * C, product(h16_, rs2_, b.imlp2, base, a_, mr, f(b.b_imlp2), false, true),
                      mod_i_ + 5 * C, mr, C, s_);
         }
         rows16(LnMod{txt_, mod_t_ + 3 * C, mod_t_ + 4 * C, C}, L, C, h16_, rs_, s_);
-        rows16(Gelu{product(h16_, rs_, b.tmlp1, base, gu_, L, f(b.b_tmlp1), false, true)}, L, F_, h16_, rs_, s_);
-        gate_add(txt_, product(h16_, rs_, b.tmlp2, base, a_, L, f(b.b_tmlp2), false, true), mod_t_ + 5 * C, L, C,
+        rows16(Gelu{product(h16_, rs_, b.tmlp1, base, gu_, L, f(b.b_tmlp1), false, true)}, L, F_, h16_, rs2_, s_);
+        gate_add(txt_, product(h16_, rs2_, b.tmlp2, base, a_, L, f(b.b_tmlp2), false, true), mod_t_ + 5 * C, L, C,
                  s_);
         blocks_stream_.end(bi);
         if (bi == 0 && keep0_) {

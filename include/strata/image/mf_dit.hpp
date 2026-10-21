@@ -43,25 +43,26 @@
 
 namespace strata::image {
 
-/// A product's output [T][C] as its readers take it: FP32 (f), or a W8A8 product's int32 sums (i) with the
-/// activations' scales (sx, a row), the weights' (sw, a column) and the bias (b, null: none).
+/// A product's output [T][C] as its readers take it: FP32 sums (f) times the rows' scales (rs, null: 1), or a W8A8
+/// product's int32 sums (i) times the activations' scales (sx, a row) and the weights' (sw, a column); plus the bias
+/// (b, null: none).
 struct MfOut {
     const float* f = nullptr;
     const int32_t* i = nullptr;
-    const float *sx = nullptr, *sw = nullptr, *b = nullptr;
+    const float *rs = nullptr, *sx = nullptr, *sw = nullptr, *b = nullptr;
     int64_t C = 0;
     float at(int64_t t, int64_t c) const {
-        if (i == nullptr) return f[t * C + c];
-        return (float) i[t * C + c] * sx[t] * sw[c] + (b != nullptr ? b[c] : 0.f);
+        const float v = i != nullptr ? (float) i[t * C + c] * sx[t] * sw[c]
+                                     : (rs != nullptr ? f[t * C + c] * rs[t] : f[t * C + c]);
+        return b != nullptr ? v + b[c] : v;
     }
     /// the rows from r on
     MfOut from(int64_t r) const {
         MfOut o = *this;
         if (f != nullptr) o.f += r * C;
-        if (i != nullptr) {
-            o.i += r * C;
-            o.sx += r;
-        }
+        if (i != nullptr) o.i += r * C;
+        if (rs != nullptr) o.rs += r;
+        if (sx != nullptr) o.sx += r;
         return o;
     }
 };
@@ -145,7 +146,7 @@ private:
     };
     // y [T][w.n] = (x16 [T][w.k], rows scaled down by rs) . w^T, the rows times rs again, plus bias (rs, bias null:
     // none).  same_input: x16 is the previous product's, which was W8A8 too (its int8 input is taken again).  defer:
-    // a W8A8 product leaves y its int32 sums for the reader to scale (the view says how to read y either way).
+    // y is left the product's sums, for the reader to scale and add the bias to as the view says.
     MfOut product(const uint16_t* x16, const float* rs, const W& w, const uint8_t* base, float* y, int64_t T,
                   const float* bias, bool same_input = false, bool defer = false);
     // a block's modulation y [w.n] = SiLU(temb) . w^T + bias (tsil: its FP16 copy, for a 16-bit w)
@@ -176,9 +177,10 @@ private:
     float *img_ = nullptr, *txt_ = nullptr, *q_ = nullptr, *k_ = nullptr, *v_ = nullptr, *a_ = nullptr,
           *gu_ = nullptr, *mod_i_ = nullptr, *mod_t_ = nullptr, *temb_ = nullptr, *nmod_ = nullptr;
     float *tq_ = nullptr, *tk_ = nullptr, *tv_ = nullptr;   // the text rows' q, k, v
-    // the FP16 inputs' row scales (rs_ the current product's, rs_io_ / rs_to_ the attention's outputs by stream), the
+    // the FP16 inputs' row scales (rs_ the current product's, rs2_ the text rows' q, k, v's and the MLP's second's
+    // while rs_ is still read, rs_io_ / rs_to_ the attention's outputs by stream), the
     // attention's v heads' scales (hs_, a context's heads) and their rows' maxima
-    float *rs_ = nullptr, *rs_io_ = nullptr, *rs_to_ = nullptr, *hs_ = nullptr, *vpart_ = nullptr;
+    float *rs_ = nullptr, *rs2_ = nullptr, *rs_io_ = nullptr, *rs_to_ = nullptr, *hs_ = nullptr, *vpart_ = nullptr;
     uint16_t *h16_ = nullptr, *jq16_ = nullptr, *jk16_ = nullptr, *jv16_ = nullptr, *jo16_ = nullptr,
              *io16_ = nullptr, *to16_ = nullptr, *t16_ = nullptr;
     float *cos_ = nullptr, *sin_ = nullptr, *cos_id_ = nullptr, *sin_id_ = nullptr, *attn_scratch_ = nullptr;
