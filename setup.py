@@ -4253,10 +4253,28 @@ def agent_cache_note(args, ram: float, model_ram_gb: float) -> list[str]:
             "(docs/DETAILS.md)"]
 
 
+def gpu_sel(value) -> list:
+    """A config's "gpu" as a list of card numbers: 0, [0, 2] or the string form "0,2" (which serve splits
+    the same way).  [] when it names none.  Without this, a string "0,1" reached gpu_info() whole and
+    calibrate died with "there is no GPU 0,1" on a dual-GPU config."""
+    if value is None or value == "":
+        return []
+    items = value if isinstance(value, (list, tuple)) else str(value).split(",")
+    sel = []
+    for x in items:
+        x = str(x).strip()
+        if x == "":
+            continue
+        sel.append(int(x) if x.isdigit() else x)
+    return sel
+
+
 def hardware_key(cfg: dict) -> str:
     """What a calibration is valid for: this GPU, CPU and RAM, and the model with its context and images setting
     (the context's KV cache and the image encoder take VRAM from the expert cache)."""
     sel = cfg.get("gpu")
+    if isinstance(sel, str):
+        sel = gpu_sel(sel)
     gl = [gpu_info(i) or {} for i in sel] if isinstance(sel, list) else [gpu_info(sel) or {}]
     if cfg.get("split_pci"):                             # a layer split (setup --gpus): its other cards
         gl += [next((x for x in gpus() if x["pci"] == pci), {}) for pci in cfg["split_pci"]]
