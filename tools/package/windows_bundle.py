@@ -58,7 +58,7 @@ COMPONENTS = [
           *(f"app/engine/{e}" for e in ENGINE_EXES), f"app/engine/{AOTRITON_DLLS[0]}"]),
     ("oneMath (XeStrata's fork)", "onemath", "Apache-2.0", "https://github.com/MistVVK/oneMath", ["onemath:LICENSE"],
      [f"app/engine/{d}" for d in ONEMATH_DLLS]),
-    ("rocBLAS's, hipBLASLt's and hipblas-common's headers (compiled into onemath_blas_rocblas.dll)",
+    ("ROCm BLAS headers (rocBLAS, hipBLASLt and hipblas-common; compiled into onemath_blas_rocblas.dll)",
      "ROCm 7.1 (Ubuntu 26.04's)", "MIT",
      "https://github.com/ROCm/rocm-libraries", ["rocm:LICENSE-*.txt"], []),
     ("intel/llvm (DPC++) SYCL runtime, with Unified Runtime, UMF and hwloc", "intel-llvm",
