@@ -158,6 +158,12 @@ bool has_sg32(sycl::queue& q) {
 // values; a sub-group of 32 a row, 8 rows a work-group (or, without sub-groups of 32, a work-item a row).
 constexpr int64_t kSG = 32, kRows = 8;
 
+// the row's scale is taken from a bound of |op.value| where the op has a cheaper one than the value itself
+template<class Op, class St> float bound(const Op& op, int64_t t, int64_t c, const St& st) {
+    if constexpr (requires { op.bound(t, c); }) return op.bound(t, c);
+    else return sycl::fabs(op.value(t, c, st));
+}
+
 template<class Op> struct Rows16 {
     Op op;
     int64_t T, C;
@@ -171,7 +177,7 @@ template<class Op> struct Rows16 {
         const auto sum = [&](float v) { return sycl::reduce_over_group(sg, v, sycl::plus<float>()); };
         const auto st = op.stats(t, lane, kSG, sum);
         float m = 0.f;
-        for (int64_t c = lane; c < C; c += kSG) m = sycl::fmax(m, sycl::fabs(op.value(t, c, st)));
+        for (int64_t c = lane; c < C; c += kSG) m = sycl::fmax(m, bound(op, t, c, st));
         const float sc = pow2_scale(sycl::reduce_over_group(sg, m, sycl::maximum<float>()));
         const float inv = 1.f / sc;
         for (int64_t c = lane; c < C; c += kSG) y16[t * C + c] = f16_from_f32(op.value(t, c, st) * inv);
@@ -193,7 +199,7 @@ template<class Op> void rows16(const Op& op, int64_t T, int64_t C, uint16_t* y16
         const auto t = static_cast<int64_t>(id[0]);
         const auto st = op.stats(t, 0, 1, [](float v) { return v; });
         float m = 0.f;
-        for (int64_t c = 0; c < C; ++c) m = sycl::fmax(m, sycl::fabs(op.value(t, c, st)));
+        for (int64_t c = 0; c < C; ++c) m = sycl::fmax(m, bound(op, t, c, st));
         const float sc = pow2_scale(m), inv = 1.f / sc;
         for (int64_t c = 0; c < C; ++c) y16[t * C + c] = f16_from_f32(op.value(t, c, st) * inv);
         rs[t] = sc;
@@ -230,6 +236,9 @@ struct Gelu {
         const float v = x.at(t, c);
         return 0.5f * v * (1.f + sycl::tanh(0.7978845608028654f * (v + 0.044715f * v * v * v)));
     }
+    // |GELU(v)| <= v for v >= 0 and below 0.17 for v < 0: the row's scale without a tanh more a value (a power of two
+    // at most one step larger, which costs FP16 nothing)
+    float bound(int64_t t, int64_t c) const { return sycl::fmax(x.at(t, c), 0.17f); }
 };
 
 // the attention's output o16 [T][C] times its heads' scales hs (head_dim channels a head)
