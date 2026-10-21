@@ -224,7 +224,8 @@ MfDit& MfPipeline::use_dit(bool edit, bool q8) {
 
 uint64_t MfPipeline::held() const {
     if (!(vae_ && te_)) return 0;
-    uint64_t b = vae_->weight_bytes() + kScratch + te_->layers_vram() + vae_->scratch_held();
+    uint64_t b = vae_->weight_bytes() + kScratch + te_->layers_vram() + vae_->scratch_held() +
+                 (vision_ ? vision_->weight_bytes() : 0);
     for (const MfDit* d : {dit_.get(), edit_dit_.get()})
         if (d != nullptr) b += d->weight_bytes();
     if (const MfDit* d = active()) b += d->blocks_vram() + d->activations_held();
@@ -285,8 +286,9 @@ void MfPipeline::set_budget(uint64_t bytes) {
 
 void MfPipeline::release(bool all) {
     if (held() == 0) return;
+    gpu::stream_sync(s_);
+    vision_.reset();
     if (all) {
-        gpu::stream_sync(s_);
         te_.reset();
         dit_.reset();
         edit_dit_.reset();
@@ -310,6 +312,18 @@ QiPlan MfPipeline::plan(int64_t hw, int n, int64_t max_text, int64_t n_ids) {
     MfDit& d = dit();
     const MfDit* o = edit_active_ ? dit_.get() : edit_dit_.get();
     p.fixed = d.weight_bytes() + (o ? o->weight_bytes() : 0) + vae_->weight_bytes() + kScratch;
+    if (vision_) {
+        // the vision encoder an edit opened stays only where the DiT's blocks and the encoder's layers all fit
+        // beside it: opening it again takes 0.2 s (B70, its 836 MB), a streamed block more each step
+        const uint64_t vw = vision_->weight_bytes(), act = hw > 0 ? d.activation_bytes(hw, n, max_text) : 0;
+        if (p.budget < p.fixed + vw + std::max(act, te_->activation_bytes(n_ids)) + d.block_bytes() +
+                           te_->layer_bytes()) {
+            gpu::stream_sync(s_);
+            vision_.reset();
+        } else {
+            p.fixed += vw;
+        }
+    }
     if (p.budget <= p.fixed)
         throw std::runtime_error("image engine: the VRAM budget (" + std::to_string(p.budget >> 20) +
                                  " MiB) is below the weights that always stay");
@@ -358,8 +372,12 @@ void MfPipeline::edit_refs(const QiRequest& r, Edit& e) {
     const int64_t h = r.height / 16, w = r.width / 16, HW = r.width * r.height;
     std::string err;
     if (!vae_->open_encoder(err)) throw std::runtime_error(err);
-    QiVision vision;
-    if (!vision.open(vision_path_, s_, err)) throw std::runtime_error(err);
+    if (!vision_) {   // kept for the next edit while the budget has room for it (plan)
+        auto v = std::make_unique<QiVision>();
+        if (!v->open(vision_path_, s_, err)) throw std::runtime_error(err);
+        vision_ = std::move(v);
+    }
+    QiVision& vision = *vision_;
     e.rows = (int64_t) r.refs.size() * h * w;
     const int64_t Z = dit_size_->latent_channels();
     float* rgb = nullptr;
@@ -447,7 +465,8 @@ std::vector<uint8_t> MfPipeline::generate(const QiRequest& r, QiTimes* times, Qi
         std::vector<std::pair<int64_t, int64_t>> sizes;
         sizes.reserve(r.refs.size());
         for (const QiRef& f : r.refs) sizes.emplace_back(f.width, f.height);
-        const uint64_t more = need(0, r.width, r.height, sizes).least - need(0, r.width, r.height).least;
+        uint64_t more = need(0, r.width, r.height, sizes).least - need(0, r.width, r.height).least;
+        if (vision_) more -= std::min(more, vision_->weight_bytes());   // held already
         if (held() + more > budget()) release(false);
         edit_refs(r, e);
         vae_->drop_scratch();
