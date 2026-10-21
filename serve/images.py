@@ -72,7 +72,6 @@ import sys
 import tempfile
 import threading
 import time
-import zlib
 from pathlib import Path
 from typing import Any
 
@@ -392,17 +391,17 @@ def made_size(job: dict) -> tuple[int, int]:
 
 def png_rgba(rgba: bytes, width: int, height: int, made_w: int, made_h: int) -> bytes:
     """A PNG (8-bit RGBA, as stable-diffusion.cpp writes) of the middle width x height of an RGBA8 image of
-    made_w x made_h."""
+    made_w x made_h.  Pillow's adaptive row filters at zlib's level 1: 58 ms and 1.5 MB for a 1024 x 1024 image,
+    where filter 0 at level 6 took 100 ms and 2.0 MB (a tenth of a Turbo image's time on a B70)."""
+    import io
+    from PIL import Image
     x0, y0 = (made_w - width) // 2, (made_h - height) // 2
-    rows = bytearray()
-    for y in range(y0, y0 + height):
-        o = (y * made_w + x0) * 4
-        rows += b"\0" + rgba[o:o + width * 4]           # filter type 0 a row
-
-    def chunk(kind: bytes, data: bytes) -> bytes:
-        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
-    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
-            + chunk(b"IDAT", zlib.compress(bytes(rows), 6)) + chunk(b"IEND", b""))
+    im = Image.frombuffer("RGBA", (made_w, made_h), rgba, "raw", "RGBA", 0, 1)
+    if (width, height) != (made_w, made_h):
+        im = im.crop((x0, y0, x0 + width, y0 + height))
+    out = io.BytesIO()
+    im.save(out, format="PNG", compress_level=1)
+    return out.getvalue()
 
 
 def prompt_ids(tok, prompt: str, refs: int = 0, family: str = "qwen-image") -> list[int]:
