@@ -14,6 +14,7 @@
 
 #include "strata/image/pipeline.hpp"
 #include "strata/image/qi_stream.hpp"
+#include "strata/image/qi_kernels.hpp"
 #include "strata/prefill/gemm.hpp"
 
 #include <cstdint>
@@ -114,6 +115,7 @@ private:
         const void* d = nullptr;
         uint64_t row_bytes = 0;
         bool packed = false;    // Q8_0 rewritten for q8_mma_gemm (q8_mma_repack)
+        bool w8 = false;        // rewritten as int8 rows and a scale a row (qi_rows_i8) for prefill::Gemm::i8
     };
     struct Block {
         W q, k, v, o, gu, down;   // d: the offset within the block's region (LayerStream)
@@ -122,8 +124,15 @@ private:
     };
     W upload(const std::string& name);
     const float* upload_f32(const std::string& name, float add = 0.0f);
-    void product(const uint16_t* x16, const W& w, float* y, int64_t T, int64_t ldy = 0, int64_t row0 = 0,
-                 int64_t rows = -1);
+    // y [T][rows] (row stride ldy) = x16 . w's rows row0 .. row0 + rows - 1.  A W8A8 one (W::w8): same_input takes
+    // the previous one's int8 input again (x16 unread), and defer leaves y its int32 sums, their scales in i8_; true
+    // when it did.
+    bool product(const uint16_t* x16, const W& w, float* y, int64_t T, int64_t ldy = 0, int64_t row0 = 0,
+                 int64_t rows = -1, bool same_input = false, bool defer = false);
+    // the int8 input of a W8A8 product of T rows of K, and the next of the two scale arrays (*sx)
+    int8_t* xq8(int64_t T, int64_t K, float** sx);
+    // the MLP's rows from m0: gate_up, SwiGLU, down, gated into x (n_text of them text rows)
+    void mlp(const W& wgu, const W& wdown, float* x, const float* gate, int64_t n_text, int64_t mr);
     void step_modulation(float t);
     /// The rotary tables [n_text + H W][64] of a context's positions into cos and sin (device).
     void rope_tables(const std::vector<float>& pre_pos, int64_t n_text, int64_t target_pos, int64_t H, int64_t W,
@@ -155,8 +164,13 @@ private:
     float *cos_ = nullptr, *sin_ = nullptr, *attn_scratch_ = nullptr;
     // the int8 products' activations (W::packed): xq_ for xq_bytes_
     bool packed_ = false;   // some block's products take them
+    bool w8_ = false;       // some block's products are W8A8 ones (W::w8): xq_ holds their activations
     void* xq_ = nullptr;
     size_t xq_bytes_ = 0;
+    float* xs_ = nullptr;    // W8A8: two arrays of xs_rows_ scales, taken in turn (xs_next_), so that a product's
+    int64_t xs_rows_ = 0;    // deferred sums keep theirs while the next input is quantized
+    int xs_next_ = 0;
+    QiI8 i8_;                // the last deferred product's scales
     int64_t rope_H_ = -1, rope_W_ = -1, rope_text_ = -1;
     float *text_ = nullptr;           // the prefix's rows [n_text][C] (the projected text, the references' tokens)
     std::vector<float> pre_pos_;      // the prefix rows' positions [n_text][3]
