@@ -489,14 +489,27 @@ if(STRATA_ENABLE_XE)
   if(NOT STRATA_LICENSE STREQUAL "contrib")
     set(_strata_onemkl OFF)   # oneMKL is not free software
   endif()
-  # Windows: oneMKL's backend only, which runs where oneMKL is installed (the engine adds its folders to the DLL search,
-  # src/prefill/gemm.cpp); oneMath's FindcuBLAS and rocBLAS backend find Linux's libraries only, so there the NVIDIA and
-  # AMD GPUs take XeStrata's own kernels
+  # Windows: oneMKL's backend, which runs where oneMKL is installed, and cuBLAS's where the build has Windows' import
+  # libraries for cuBLAS and the CUDA runtime (STRATA_CUDA_WINDOWS_LIBS: the lib/x64 of NVIDIA's redistributable
+  # archives, tools/package/windows.sh), which runs where cuBLAS is installed (the engine adds both's folders to the DLL
+  # search, src/prefill/gemm.cpp).  oneMath's rocBLAS backend finds Linux's libraries only, so there the AMD GPUs take
+  # XeStrata's own kernels
+  set(STRATA_CUDA_WINDOWS_LIBS "" CACHE PATH
+      "Windows: the folder of cuBLAS's, the CUDA runtime's and the CUDA driver's import libraries (oneMath's cuBLAS)")
   set(_strata_math_cuda "${_strata_cuda_archs}")
   set(_strata_math_hip "${_strata_hip_archs}")
   if(WIN32)
-    set(_strata_math_cuda "")
     set(_strata_math_hip "")
+    if(_strata_math_cuda AND EXISTS "${STRATA_CUDA_WINDOWS_LIBS}/cublas.lib")
+      set(_strata_cuda_cublas ON)
+      set(CUDA_TOOLKIT_INCLUDE "${_strata_cuda_root}/include" CACHE PATH "the CUDA headers (oneMath's cuBLAS)" FORCE)
+      foreach(lib cublas CUDART CUDA)
+        string(TOLOWER ${lib} file)
+        set(CUDA_${lib}_LIBRARY "${STRATA_CUDA_WINDOWS_LIBS}/${file}.lib" CACHE FILEPATH "an import library" FORCE)
+      endforeach()
+    else()
+      set(_strata_math_cuda "")
+    endif()
   endif()
   if(_strata_onemkl OR _strata_math_cuda OR _strata_math_hip)
     if(_strata_onemkl AND NOT MKL_ROOT)
@@ -549,7 +562,7 @@ if(STRATA_ENABLE_XE)
       # container) the toolkit's link stub, which names the same libcuda.so.1 the driver gives at run time.  It goes on
       # the library path while oneMath is added: FindCUDA clears CUDA_CUDA_LIBRARY on its first run and searches again.
       find_library(_strata_libcuda cuda NO_CACHE HINTS "${_strata_cuda_root}/lib64" "${_strata_cuda_root}/lib")
-      if(NOT _strata_libcuda)
+      if(NOT _strata_libcuda AND NOT WIN32)
         find_path(_strata_libcuda_stubs libcuda.so NO_CACHE NO_DEFAULT_PATH
                   PATHS "${_strata_cuda_root}/lib64/stubs" "${_strata_cuda_root}/lib/stubs"
                         "${_strata_cuda_root}/targets/${CMAKE_SYSTEM_PROCESSOR}-linux/lib/stubs"
@@ -574,8 +587,8 @@ if(STRATA_ENABLE_XE)
       set(_strata_onemath_url URL ${STRATA_ONEMATH_SOURCE})
     else()
       set(_strata_onemath_url
-        URL https://github.com/MistVVK/oneMath/archive/refs/tags/xestrata-6.tar.gz
-        URL_HASH SHA256=3ad78fab71856953d1e335cb416868b1057be357ef327ffa7d3b2beebbdfca9c)
+        URL https://github.com/MistVVK/oneMath/archive/refs/tags/xestrata-7.tar.gz
+        URL_HASH SHA256=caf2185f865445be6ca62c5d534f9a7e5126f7213f14b57e23cd639e84cf2b0a)
     endif()
     # another archive is another tree: start from it again
     if(NOT "${_strata_onemath_url}" STREQUAL "${_STRATA_ONEMATH_KEY}")

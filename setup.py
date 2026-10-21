@@ -1399,30 +1399,39 @@ def check_igc(makers: set) -> None:
          "with Podman (Fedora 44 inside: README, Install).")
 
 
-def windows_cudnn() -> bool:
-    """Whether the image engine finds cuDNN on Windows, where it looks (open_cudnn in src/image/qi_sdpa.cpp): the PATH,
-    NVIDIA's installer's folders, the Python beside the engine (pip's nvidia-cudnn-cu12)."""
-    if any((Path(d) / "cudnn64_9.dll").is_file() for d in os.environ.get("PATH", "").split(os.pathsep) if d):
-        return True
-    root = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "NVIDIA" / "CUDNN"
-    if root.is_dir() and any(root.glob("*/bin/**/cudnn64_9.dll")):
-        return True
-    pip = Path(sys.executable).parent / "Lib" / "site-packages" / "nvidia" / "cudnn" / "bin"
-    return (pip / "cudnn64_9.dll").is_file()
+def windows_nvidia_libs() -> list:
+    """The NVIDIA libraries the engine would not find on Windows, where it looks (add_library_dirs in
+    src/prefill/gemm.cpp, open_cudnn in src/image/qi_sdpa.cpp): the PATH, the CUDA toolkit's (CUDA_PATH), NVIDIA's
+    cuDNN installer's folders, the Python beside the engine (pip's nvidia-*-cu12).  Their pip packages' names."""
+    path = [Path(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+    if os.environ.get("CUDA_PATH"):
+        path.append(Path(os.environ["CUDA_PATH"]) / "bin")
+    pip = Path(sys.executable).parent / "Lib" / "site-packages" / "nvidia"
+    missing = []
+    for pkg, sub, dll in (("nvidia-cublas-cu12", "cublas", "cublas64_12.dll"),
+                          ("nvidia-cuda-runtime-cu12", "cuda_runtime", "cudart64_12.dll"),
+                          ("nvidia-cudnn-cu12", "cudnn", "cudnn64_9.dll")):
+        dirs = path + [pip / sub / "bin"]
+        if sub == "cudnn":
+            root = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "NVIDIA" / "CUDNN"
+            dirs += [p.parent for p in root.glob("*/bin/**/cudnn64_9.dll")] if root.is_dir() else []
+        if not any((d / dll).is_file() for d in dirs):
+            missing.append(pkg)
+    return missing
 
 
 def check_runtime(makers: set) -> None:
     """Stops when the GPUs of `makers` lack their makers' packages, and says how to install them; names oneMKL and
     cuBLAS too when they are missing, without stopping (XeStrata's own kernels do their work).  Windows: the GPU
     makers' drivers bring what the engine runs on (Level Zero, the CUDA driver), the 7z the rest, and the launcher
-    checks the Visual C++ runtime; the engine there has no oneMath yet, so oneMKL and cuBLAS have no use.  cuDNN (the
-    image attention on NVIDIA GPUs) is named when the engine would not find it, with pip's command for the Python the
-    7z carries."""
+    checks the Visual C++ runtime.  NVIDIA's cuBLAS, CUDA runtime and cuDNN are named when the engine would not find
+    them, with pip's command for the Python the 7z carries."""
     if WIN:
-        if "nvidia" in makers and (packaged_engine().get("license") == "contrib") and not windows_cudnn():
-            warn("the image engine's attention is faster with NVIDIA's cuDNN (not free software; without it "
-                 "XeStrata's own kernel does the work):")
-            say(f'  "{sys.executable}" -m pip install nvidia-cudnn-cu12')
+        missing = windows_nvidia_libs() if "nvidia" in makers and packaged_engine().get("license") == "contrib" else []
+        if missing:
+            warn("faster with NVIDIA's " + ", ".join(missing) + " (not free software: cuBLAS for the matrix products, "
+                 "cuDNN for the image engine's attention; without them XeStrata's own kernels do the work):")
+            say(f'  "{sys.executable}" -m pip install ' + " ".join(missing))
         return
     check_igc(makers)
     need, fast, repos = runtime_missing(makers)

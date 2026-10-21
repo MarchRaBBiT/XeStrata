@@ -35,7 +35,7 @@ SYCL_DLLS = ("sycl9.dll", "ur_win_proxy_loader.dll", "ur_loader.dll", "ur_adapte
              "ur_adapter_level_zero.dll", "ur_adapter_level_zero_v2.dll", "xptifw.dll")
 ENGINE_EXES = ("strata.exe", "strata-device.exe", "strata-image.exe", "strata-vision-cpu.exe")
 # oneMath and its oneMKL backend (the engine's build folder's bin/), which loads oneMKL where the user installed it
-ONEMATH_DLLS = ("onemath.dll", "onemath_blas_mklgpu.dll")
+ONEMATH_DLLS = ("onemath.dll", "onemath_blas_mklgpu.dll", "onemath_blas_cublas.dll")
 # what a Windows PC brings (the Visual C++ runtime, which xestrata.exe checks for) and what must never be carried
 FORBIDDEN = ("vcruntime*.dll", "msvcp*.dll", "concrt*.dll", "ucrtbase*.dll", "api-ms-win-*.dll", "nvcuda.dll",
              "nvml.dll", "cublas*.dll", "cudart*.dll", "mkl_*.dll", "amdhip64*.dll", "amd_comgr*.dll")

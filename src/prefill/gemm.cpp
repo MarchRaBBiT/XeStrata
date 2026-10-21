@@ -22,6 +22,10 @@
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
+#if defined(_WIN32)
+#define NOMINMAX
+#include <windows.h>
+#endif
 #endif
 
 #include <algorithm>
@@ -58,11 +62,13 @@ struct Backend {
 std::mutex g_mutex;
 std::unordered_map<sycl::device, Backend> g_backends;
 
-// Windows: oneMKL's DLLs, which the 7z does not carry (not free software), where Intel's installer puts them, for
-// oneMath's oneMKL backend to load: after the PATH the user set (setvars.bat, a Python environment's), oneAPI's mkl and
-// tbb folders (ONEAPI_ROOT, which the installer sets, else its default folder) and MKLROOT's.  Without them the backend
-// does not load and the products take XeStrata's own kernels.
-void add_onemkl_dirs() {
+// Windows: the GPU makers' libraries the 7z does not carry (not free software), where their installers put them, for
+// oneMath's backends to load: after the PATH the user set (setvars.bat, a Python environment's), oneAPI's mkl and tbb
+// folders (ONEAPI_ROOT, which the installer sets, else its default folder) and MKLROOT's for oneMKL; the CUDA
+// toolkit's (CUDA_PATH) and the folders pip's nvidia-cublas-cu12 and nvidia-cuda-runtime-cu12 make in the Python the
+// 7z carries (<7z>\python beside <7z>\app\engine) for cuBLAS.  Without them the backend does not load and the products
+// take XeStrata's own kernels.
+void add_library_dirs() {
 #if defined(_WIN32)
     static std::once_flag once;
     std::call_once(once, [] {
@@ -73,6 +79,13 @@ void add_onemkl_dirs() {
         for (const std::string& r : roots)
             for (const char* sub : {"mkl\\latest\\bin", "tbb\\latest\\bin"}) dirs.push_back(r + "\\" + sub);
         if (const char* m = std::getenv("MKLROOT")) dirs.push_back(std::string(m) + "\\bin");
+        if (const char* c = std::getenv("CUDA_PATH")) dirs.push_back(std::string(c) + "\\bin");
+        char exe[MAX_PATH] = {};
+        if (GetModuleFileNameA(nullptr, exe, MAX_PATH) > 0) {
+            const std::filesystem::path pip = std::filesystem::path(exe).parent_path().parent_path().parent_path() /
+                                              "python" / "Lib" / "site-packages" / "nvidia";
+            for (const char* sub : {"cublas", "cuda_runtime"}) dirs.push_back((pip / sub / "bin").string());
+        }
         const char* old = std::getenv("PATH");
         std::string path = old != nullptr ? old : "";
         for (const std::string& d : dirs) {
@@ -86,7 +99,7 @@ void add_onemkl_dirs() {
 
 // The backend of `dev`, its trial's outcome taken in (waited for) the first time
 Backend backend(const sycl::device& dev) {
-    add_onemkl_dirs();
+    add_library_dirs();
     std::shared_future<Trial> ready;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -194,7 +207,7 @@ void Gemm::prepare() {
     // first prompt): one small product of each type on a queue of its own, beside the model's loading.  An error of the
     // BF16 one (thrown, or reported by the queue afterwards) leaves the BF16 products to XeStrata's own kernels.
     sycl::queue& c = core::Runtime::get().compute();
-    add_onemkl_dirs();
+    add_library_dirs();
     std::lock_guard<std::mutex> lock(g_mutex);
     Backend& b = g_backends[c.get_device()];
     if (!b.blas || b.ready.valid()) return;

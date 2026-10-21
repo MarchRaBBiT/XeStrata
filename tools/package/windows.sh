@@ -41,6 +41,20 @@ cudnn_tar="cudnn-linux-x86_64-9.27.0.42_cuda12-archive.tar.xz"
 echo "dc45f8c5fd44955c6e950c690ea92c28ea848ffb1fefbaabf3a9d175d961263a  /cache/$cudnn_tar" | sha256sum -c -
 mkdir -p /opt/cudnn
 tar -xJf "/cache/$cudnn_tar" -C /opt/cudnn --strip-components=1 --wildcards '*/include/*'
+# Windows' import libraries for cuBLAS, the CUDA runtime and the CUDA driver (oneMath's cuBLAS backend, which loads
+# cuBLAS where the user installed it): from NVIDIA's redistributable archives for CUDA 12.4, their SHA-256 checked
+mkdir -p /build/cudalib
+cuda_lib() {   # archive path, its SHA-256
+  f=/cache/$(basename "$1")
+  [ -f "$f" ] || curl -fsSL -o "$f" "https://developer.download.nvidia.com/compute/cuda/redist/$1"
+  echo "$2  $f" | sha256sum -c -
+  unzip -q -j -o "$f" '*/lib/x64/cublas.lib' '*/lib/x64/cudart.lib' '*/lib/x64/cuda.lib' -d /build/cudalib || true
+}
+cuda_lib cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.4.127-archive.zip \
+  6a1c32e68ee1a95ca17334691ff9ad1ffe7f352c24a083d55e4c96b8063b2bcb
+cuda_lib libcublas/windows-x86_64/libcublas-windows-x86_64-12.4.5.8-archive.zip \
+  698140f12da055a3709eee2e022fcfe7bc8edf31f30115e3f7a5c877a9491de5
+for l in cublas cudart cuda; do [ -f "/build/cudalib/$l.lib" ] || { echo "no $l.lib" >&2; exit 1; }; done
 
 # build.sh's compiler cache, shared with the Ubuntu packages (container.sh)
 if [ -n "${CCACHE_DIR:-}" ]; then
@@ -99,7 +113,7 @@ cmake -G Ninja -S "$src" -B /build/engine -DCMAKE_BUILD_TYPE=Release \
   -DSTRATA_XWIN=/build/xwin -DSTRATA_SYCL_WINDOWS="$sycl" -DSTRATA_CUDA_ARCHS="$archs" -DSTRATA_CUDA_PATH="$cuda_path" \
   -DSTRATA_CUDA_PTX= -DSTRATA_ONEMKL=ON -DMKL_ROOT=/build/mkl -DSTRATA_HIP_ARCHS="$hip_archs" -DSTRATA_ENABLE_XE=ON \
   -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_BUILD_TESTS=OFF -DSTRATA_PORTABLE=ON -DSTRATA_GGML_DIR="$llama" \
-  -DSTRATA_CUDNN_ROOT=/opt/cudnn
+  -DSTRATA_CUDNN_ROOT=/opt/cudnn -DSTRATA_CUDA_WINDOWS_LIBS=/build/cudalib
 cmake --build /build/engine --target strata strata-device strata-image onemath_backend_libs -j "$jobs"
 # the image encoder on the CPU (tools/vision, llama.cpp's mtmd), with the same toolchain (#24: the config pointed to
 # it and the package had none); the Vulkan one is Linux's only
