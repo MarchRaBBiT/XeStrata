@@ -5,7 +5,9 @@
 // (the query rows, the key rows) and kept:
 //   * Intel GPUs: oneDNN's SDPA through its graph API (Q . K^T, the scale, the softmax, . V fused into one partition);
 //   * NVIDIA GPUs (contrib-llvm): cuDNN's SDPA through cudnn-frontend, cuDNN opened at the first attention
-//     (libcudnn.so.9, or STRATA_CUDNN_LIB: the user's installation, not free software), on the queue's CUDA stream.
+//     (libcudnn.so.9, or STRATA_CUDNN_LIB: the user's installation, not free software), on the queue's CUDA stream;
+//   * AMD GPUs: aotriton's flash attention (MIT; its library and its kernels' images beside the engine), on the
+//     queue's HIP stream.
 // A GPU or a build without one, or a failure, leaves it to the engine's own kernel.
 
 #include "strata/image/qi_kernels.hpp"
@@ -21,6 +23,11 @@
 namespace cudnn_frontend {
 void* cudnn_dlhandle = nullptr;   // cudnn_frontend_shim.h's: libcudnn opened at the first attention
 }
+#endif
+
+#if STRATA_AOTRITON
+#include <aotriton/flash.h>
+#include <sycl/ext/oneapi/backend/hip.hpp>
 #endif
 
 #if STRATA_ONEDNN
@@ -188,8 +195,71 @@ bool cudnn_sdpa(sycl::queue& q, const uint16_t* q16, const uint16_t* k16, const 
 }  // namespace
 #endif
 
+#if STRATA_AOTRITON
+namespace {
+
+struct Aot {
+    bool failed = false;
+    int32_t* counter = nullptr;   // the persistent kernels' work counter, zeroed before each call
+};
+std::unordered_map<sycl::device, Aot> g_aot;
+
+bool aot_sdpa(sycl::queue& q, const uint16_t* q16, const uint16_t* k16, const uint16_t* v16, int64_t q0, int64_t q1,
+              int64_t T, int64_t heads, int64_t hd, uint16_t* out16) {
+    namespace ao = aotriton;
+    std::lock_guard<std::mutex> lock(g_mu);
+    Aot& d = g_aot[q.get_device()];
+    if (d.failed) return false;
+    if (d.counter == nullptr) d.counter = sycl::malloc_device<int32_t>(1, q);
+    const uint64_t row = (uint64_t) (heads * hd);
+    auto view = [&](const uint16_t* p, int64_t rows) {
+        return ao::TensorView<4>(reinterpret_cast<intptr_t>(p),
+                                 std::array<uint64_t, 4>{1, (uint64_t) heads, (uint64_t) rows, (uint64_t) hd},
+                                 std::array<uint64_t, 4>{(uint64_t) rows * row, (uint64_t) hd, row, 1}, ao::kFloat16);
+    };
+    ao::v3::flash::attn_fwd_params p;
+    p.Q = view(q16 + q0 * (int64_t) row, q1 - q0);
+    p.K = view(k16, T);
+    p.V = view(v16, T);
+    p.Out = view(out16, q1 - q0);
+    p.B = ao::TensorView<4>::get_null_tensor(ao::kFloat16);
+    p.A = ao::TensorView<2>::get_null_tensor(ao::kFloat16);
+    p.L = ao::TensorView<2>::get_null_tensor(ao::kFloat32);
+    p.Sm_scale = 1.0f / std::sqrt((float) hd);
+    p.dropout_p = 0.0f;
+    p.philox_seed_ptr = ao::TensorView<0>::get_null_tensor(ao::kUInt64);
+    p.philox_offset1 = ao::TensorView<0>::get_null_tensor(ao::kUInt64);
+    p.philox_offset2 = 0;
+    p.philox_seed_output = ao::TensorView<0>::get_null_tensor(ao::kUInt64);
+    p.philox_offset_output = ao::TensorView<0>::get_null_tensor(ao::kUInt64);
+    p.encoded_softmax = ao::TensorView<4>::get_null_tensor(ao::kFloat16);
+    p.persistent_atomic_counter = ao::TensorView<0>(reinterpret_cast<intptr_t>(d.counter), ao::kInt32);
+    p.causal_type = ao::v3::flash::CausalType::None;
+    p.window_left = 0;
+    p.window_right = 0;
+    p.Max_seqlen_q = (int32_t) (q1 - q0);
+    p.Max_seqlen_k = (int32_t) T;
+    q.memset(d.counter, 0, sizeof(int32_t));
+    const hipStream_t hs = sycl::get_native<sycl::backend::ext_oneapi_hip>(q);
+    const hipError_t e = ao::v3::flash::attn_fwd(p, ao::v3::flash::attn_fwd_params::kVersion, ao::Stream(hs));
+    if (e != hipSuccess) {
+        std::fprintf(stderr, "strata-image: aotriton's attention is not taken on this GPU (HIP error %d): the engine's "
+                             "own kernel\n", (int) e);
+        d.failed = true;
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+#endif
+
 bool qi_sdpa(const uint16_t* q16, const uint16_t* k16, const uint16_t* v16, int64_t q0, int64_t q1, int64_t T,
              int64_t heads, int64_t head_dim, uint16_t* out16, void* stream) {
+#if STRATA_AOTRITON
+    if (q1 > q0 && core::Runtime::get().stream(stream).get_device().get_backend() == sycl::backend::ext_oneapi_hip)
+        return aot_sdpa(core::Runtime::get().stream(stream), q16, k16, v16, q0, q1, T, heads, head_dim, out16);
+#endif
 #if STRATA_CUDNN
     if (q1 > q0 && core::Runtime::get().stream(stream).get_device().get_backend() == sycl::backend::ext_oneapi_cuda)
         return cudnn_sdpa(core::Runtime::get().stream(stream), q16, k16, v16, q0, q1, T, heads, head_dim, out16);
