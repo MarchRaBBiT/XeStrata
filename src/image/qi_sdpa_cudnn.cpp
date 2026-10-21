@@ -127,6 +127,9 @@ void open_cudnn(cudnnHandle_t& handle) {
     }
 #else
     libs.emplace_back("libcudnn.so.9");
+    // cudnn-frontend opens the first of libcudart.so.12 and .13 it finds: the CUDA version the engine was built with
+    // (cuDNN's for it on the library path, setup.py's cudnn_lib_dirs), not another a PC also has
+    setenv("CUDNN_FRONTEND_CUDART_LIB_NAME", ("libcudart.so." + std::to_string(CUDART_VERSION / 1000)).c_str(), 0);
 #endif
     std::string why = "cuDNN is not installed";
     for (const std::string& lib : libs) {
