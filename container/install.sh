@@ -29,10 +29,11 @@ else
 fi
 dnf install -y -q "$rpm"
 
-# the GPU makers' packages, by maker, from the engine's record
+# the GPU makers' packages, by maker, from the engine's record; not pip's names of cuDNN and the CUDA runtime
+# (cudnn_pip), which xestrata --setup names for the data folder (mounted from the host), with this image's pip
 runtime=$(python3 -c 'import json, sys
 r = json.load(open(sys.argv[1])).get("runtime") or {}
-skip = () if sys.argv[2] == "1" else ("onemkl", "cublas")
+skip = ("cudnn_pip",) + (() if sys.argv[2] == "1" else ("onemkl", "cublas"))
 print(" ".join(n for k, v in r.items() if k not in skip for n in v))' /usr/lib64/xestrata/engine/BUILD.json \
   "$XESTRATA_NONFREE")
 case " $runtime " in
@@ -65,5 +66,5 @@ for n in $runtime; do
 done
 runtime=$names
 # shellcheck disable=SC2086
-dnf install -y -q $runtime mesa-vulkan-drivers
+dnf install -y -q $runtime mesa-vulkan-drivers python3-pip
 dnf clean all
