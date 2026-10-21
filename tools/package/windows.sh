@@ -142,11 +142,12 @@ for p in Gui Cli; do
 done
 
 # Python's embeddable distribution and the Windows wheels of requirements.txt (the build helpers are in
-# requirements-build.txt) and colorama, which tqdm takes on Windows
+# requirements-build.txt), colorama, which tqdm takes on Windows, and pip, with which the user adds the GPU makers'
+# libraries xestrata --setup names (the embeddable distribution has neither pip nor ensurepip)
 curl -fsSL -o "/build/python-$python_ver-embed-amd64.zip" \
   "https://www.python.org/ftp/python/$python_ver/python-$python_ver-embed-amd64.zip"
 cp "$src/requirements.txt" /build/requirements.txt
-echo colorama >> /build/requirements.txt
+printf 'colorama\npip\n' >> /build/requirements.txt
 pyver=$(echo "$python_ver" | cut -d. -f1-2)
 python3 -m pip download -q --only-binary=:all: --platform win_amd64 --python-version "$pyver" --implementation cp \
   -r /build/requirements.txt -d /build/wheels

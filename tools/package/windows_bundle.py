@@ -48,7 +48,7 @@ FORBIDDEN = ("vcruntime*.dll", "msvcp*.dll", "concrt*.dll", "ucrtbase*.dll", "ap
 # the Python packages the 7z carries (requirements.txt, and colorama, which tqdm takes on
 # Windows): a wheel not named here stops the script
 WHEELS = ("numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "pillow", "psutil", "markupsafe", "certifi",
-          "charset-normalizer", "charset_normalizer", "idna", "urllib3", "colorama")
+          "charset-normalizer", "charset_normalizer", "idna", "urllib3", "colorama", "pip")
 
 # name, version (a key of `versions`, or the text), license, source, license texts (paths relative to `roots`' keys, or
 # URLs), the files in the folder it covers (globs relative to its top)
@@ -295,7 +295,9 @@ def main() -> None:
             fail(f"{dist.name}: no license text in the wheel")
         kept = []
         for text in wheel_texts:
-            dst = lic / f"python-{field('Name').lower()}-{text.name}"
+            # a text below licenses/'s own folders (pip's of the packages it vendors, all named LICENSE) by its path
+            parts = text.relative_to(dist).parts
+            dst = lic / f"python-{field('Name').lower()}-{'-'.join(parts[1:]) if len(parts) > 2 else text.name}"
             shutil.copy2(text, dst)
             kept.append(dst.relative_to(top).as_posix())
         record = (dist / "RECORD").read_text().splitlines()
