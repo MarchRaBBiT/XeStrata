@@ -180,7 +180,8 @@ void dw3x3_gelu(const float* t, const float* w, const float* b, int64_t H, int64
         for (int64_t dy = -1; dy <= 1; ++dy)
             for (int64_t dx = -1; dx <= 1; ++dx) {
                 const int64_t yy = y + dy, xx = x + dx;
-                if (yy >= 0 && yy < H && xx >= 0 && xx < W) a += w[c * 9 + (dy + 1) * 3 + dx + 1] * t[(yy * W + xx) * C + c];
+                if (yy >= 0 && yy < H && xx >= 0 && xx < W)
+                    a += w[c * 9 + (dy + 1) * 3 + dx + 1] * t[(yy * W + xx) * C + c];
             }
         out[i] = 0.5f * a * (1.f + sycl::erf(a * 0.70710678118654752f));
     });
@@ -382,7 +383,8 @@ bool MfVae::open(const std::string& path, void* stream, std::string& err, bool d
                     for (int j = 0; j < 3; ++j) {
                         const auto w = st.f32(p + names[j] + ".weight");
                         const auto bb = st.f32(p + names[j] + ".bias");
-                        for (int64_t k = 0; k < C_ * C_; ++k) h[(size_t) (j * C_ * C_ + k)] = kernels::f16_from_f32(w[(size_t) k]);
+                        for (int64_t k = 0; k < C_ * C_; ++k)
+                            h[(size_t) (j * C_ * C_ + k)] = kernels::f16_from_f32(w[(size_t) k]);
                         std::copy(bb.begin(), bb.end(), b.begin() + j * C_);
                     }
                     uint16_t* dw = alloc<uint16_t>(allocs_, (int64_t) h.size());
