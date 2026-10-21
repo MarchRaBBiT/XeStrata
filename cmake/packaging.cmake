@@ -81,6 +81,15 @@ if(TARGET onemath)
   install(DIRECTORY ${CMAKE_BINARY_DIR}/lib/ DESTINATION ${_pkg_engine}/lib
           FILES_MATCHING PATTERN "libonemath*.so*")
 endif()
+if(TARGET strata_dnnl)
+  # oneDNN, the image engine's attention on Intel GPUs (built beside the engine for its SYCL runtime)
+  install(DIRECTORY ${_strata_onednn_dir}/lib/ DESTINATION ${_pkg_engine}/lib FILES_MATCHING PATTERN "libdnnl.so*")
+endif()
+if(_strata_aotriton_lib)
+  # aotriton, the image engine's attention on AMD GPUs: its library and its kernels' images, which it finds beside it
+  install(DIRECTORY ${_strata_aotriton_lib}/ DESTINATION ${_pkg_engine}/lib FILES_MATCHING PATTERN "libaotriton*.so*")
+  install(DIRECTORY ${_strata_aotriton_lib}/aotriton.images DESTINATION ${_pkg_engine}/lib)
+endif()
 # Each library finds the others in its own folder; a backend's RUNPATH into the build machine's CUDA or oneMKL is
 # replaced: the distribution's linker paths find cuBLAS (ld.so.conf.d), and setup puts oneMKL's folder on the engine's
 # library path (Fedora's rpmbuild refuses a RUNPATH outside the system's folders).
@@ -131,6 +140,16 @@ install(FILES third_party/main/stb/LICENSE   # stb_image, compiled into strata-i
 if(TARGET onemath)
   install(FILES third_party/main/oneMath/LICENSE DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/${STRATA_PACKAGE_NAME}
           RENAME LICENSE.oneMath)
+endif()
+if(TARGET strata_dnnl)
+  install(FILES third_party/main/oneDNN/LICENSE DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/${STRATA_PACKAGE_NAME}
+          RENAME LICENSE.oneDNN)
+  install(FILES third_party/main/oneDNN/THIRD-PARTY-PROGRAMS
+          DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/${STRATA_PACKAGE_NAME} RENAME THIRD-PARTY-PROGRAMS.oneDNN)
+endif()
+if(_strata_aotriton_lib)
+  install(FILES third_party/main/aotriton/LICENSE DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/${STRATA_PACKAGE_NAME}
+          RENAME LICENSE.aotriton)
 endif()
 install(FILES NOTICE COPYING COPYING.LESSER DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/${STRATA_PACKAGE_NAME})
 
@@ -203,7 +222,8 @@ set(CPACK_RPM_PACKAGE_AUTOREQPROV ON)
 # The bundled libraries are found through the engine's own RUNPATH: they neither need nor give the system anything,
 # and the GPU makers' libraries they open are suggested, not required.  No /usr/lib/.build-id links, which every
 # package would own.
-set(_pkg_not_required libsycl libur_ libumf libonemath                      # bundled
+set(_pkg_not_required libsycl libur_ libumf libonemath libdnnl libaotriton  # bundled
+                      libcudnn                                              # NVIDIA's, the user's
                       libcuda libnvidia-ml libcublas                        # NVIDIA's
                       libmkl_                                               # Intel's oneMKL
                       libamdhip64 libhsa-runtime64 libamd_comgr             # AMD's ROCm

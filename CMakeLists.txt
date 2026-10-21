@@ -749,6 +749,7 @@ if(STRATA_ENABLE_XE)
       set_property(SOURCE src/image/qi_sdpa.cpp APPEND PROPERTY COMPILE_DEFINITIONS STRATA_AOTRITON=1
                    __HIP_PLATFORM_AMD__)
       target_link_libraries(strata_image PRIVATE ${_strata_aot_dir}/lib/libaotriton_v2.so hip::amdhip64)
+      set(_strata_aotriton_lib ${_strata_aot_dir}/lib)   # for the packages
     endif()
   endif()
   # NVIDIA GPUs (contrib-llvm): cuDNN's SDPA through cudnn-frontend (Apache-2.0, header-only, the tag pinned here),
