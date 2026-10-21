@@ -675,8 +675,9 @@ if(STRATA_ENABLE_XE)
     set_target_properties(strata_dnnl PROPERTIES IMPORTED_LOCATION ${_strata_onednn_dir}/lib/libdnnl.so
                           INTERFACE_INCLUDE_DIRECTORIES ${_strata_onednn_dir}/include)
     add_dependencies(strata_image strata_onednn)
+    target_sources(strata_image PRIVATE src/image/qi_sdpa_onednn.cpp)
     target_link_libraries(strata_image PRIVATE strata_dnnl)
-    target_compile_definitions(strata_image PRIVATE STRATA_ONEDNN=1)
+    set_property(SOURCE src/image/qi_sdpa.cpp APPEND PROPERTY COMPILE_DEFINITIONS STRATA_ONEDNN=1)
   endif()
   # AMD GPUs: aotriton's flash attention (MIT, https://github.com/ROCm/aotriton, release 0.14.2b): its library for the
   # build's ROCm (hip's version) and its kernels' images for the build's AMD architectures, fetched (their SHA-256
@@ -740,14 +741,15 @@ if(STRATA_ENABLE_XE)
       endif()
     endif()
     if(_strata_aot_dir AND EXISTS ${_strata_aot_dir}/lib/libaotriton_v2.so AND TARGET hip::amdhip64)
-      # hip's headers for this file only (its stream type), not hip::host's options for the SYCL sources; a system
+      # hip's headers for its file only (its stream type), not hip::host's options for the SYCL sources; a system
       # folder (Fedora's /usr/include) stays out of -I, which would break the C++ headers' #include_next
       get_target_property(_strata_hip_inc hip::amdhip64 INTERFACE_INCLUDE_DIRECTORIES)
       list(REMOVE_ITEM _strata_hip_inc ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES} /usr/include)
-      set_property(SOURCE src/image/qi_sdpa.cpp APPEND PROPERTY INCLUDE_DIRECTORIES ${_strata_aot_dir}/include
+      target_sources(strata_image PRIVATE src/image/qi_sdpa_aotriton.cpp)
+      set_property(SOURCE src/image/qi_sdpa_aotriton.cpp APPEND PROPERTY INCLUDE_DIRECTORIES ${_strata_aot_dir}/include
                    ${_strata_hip_inc})
-      set_property(SOURCE src/image/qi_sdpa.cpp APPEND PROPERTY COMPILE_DEFINITIONS STRATA_AOTRITON=1
-                   __HIP_PLATFORM_AMD__)
+      set_property(SOURCE src/image/qi_sdpa_aotriton.cpp APPEND PROPERTY COMPILE_DEFINITIONS __HIP_PLATFORM_AMD__)
+      set_property(SOURCE src/image/qi_sdpa.cpp APPEND PROPERTY COMPILE_DEFINITIONS STRATA_AOTRITON=1)
       target_link_libraries(strata_image PRIVATE ${_strata_aot_dir}/lib/libaotriton_v2.so hip::amdhip64)
       set(_strata_aotriton_lib ${_strata_aot_dir}/lib)   # for the packages
     endif()
@@ -768,11 +770,13 @@ if(STRATA_ENABLE_XE)
         URL_HASH SHA256=130f3e98e3f07defd60bf39b250ae7d96c61ca99443782ce77fd470964fbd899
         DOWNLOAD_EXTRACT_TIMESTAMP FALSE SOURCE_DIR ${CMAKE_BINARY_DIR}/_deps/strata_cudnn_fe-src
         SUBBUILD_DIR ${CMAKE_BINARY_DIR}/_deps/strata_cudnn_fe-subbuild)
-      set_property(SOURCE src/image/qi_sdpa.cpp APPEND PROPERTY INCLUDE_DIRECTORIES
+      target_sources(strata_image PRIVATE src/image/qi_sdpa_cudnn.cpp)
+      set_property(SOURCE src/image/qi_sdpa_cudnn.cpp APPEND PROPERTY INCLUDE_DIRECTORIES
                    ${strata_cudnn_fe_SOURCE_DIR}/include ${_strata_cudnn_inc} ${_strata_cuda_root}/include)
-      set_property(SOURCE src/image/qi_sdpa.cpp APPEND PROPERTY COMPILE_DEFINITIONS STRATA_CUDNN=1
+      set_property(SOURCE src/image/qi_sdpa_cudnn.cpp APPEND PROPERTY COMPILE_DEFINITIONS
                    NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING CUDNN_FRONTEND_SKIP_JSON_LIB)
-      set_property(SOURCE src/image/qi_sdpa.cpp APPEND PROPERTY COMPILE_OPTIONS -w)   # its headers' own warnings
+      set_property(SOURCE src/image/qi_sdpa_cudnn.cpp APPEND PROPERTY COMPILE_OPTIONS -w)   # its headers' warnings
+      set_property(SOURCE src/image/qi_sdpa.cpp APPEND PROPERTY COMPILE_DEFINITIONS STRATA_CUDNN=1)
       target_link_libraries(strata_image PRIVATE ${CMAKE_DL_LIBS})
       set(_strata_cudnn_frontend ON)   # its license text goes with the packages
     else()
