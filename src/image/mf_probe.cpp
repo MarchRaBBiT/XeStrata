@@ -5,11 +5,14 @@
 //
 //   strata-image-mf-probe text TEXT_ENCODER.gguf GOLDEN_DIR
 //   strata-image-mf-probe vae VAE.safetensors GOLDEN_DIR   (golden_vae.py's vae_cond, vae_s, vae_img)
+//   strata-image-mf-probe dit DIT.safetensors GOLDEN_DIR [q8|bf16 [VAE.safetensors OUT.f32]]
+//       (block 0, the first velocity, the final latent; with the VAE the image as FP32 [3][H][W] to OUT.f32)
 //
 // Prints how far each part's output is from the run's (cosine and relative L1) and its time.
 
 #include "strata/core/runtime.hpp"
 #include "strata/core/gpu.hpp"
+#include "strata/image/mf_dit.hpp"
 #include "strata/image/mf_vae.hpp"
 #include "strata/image/qi_text.hpp"
 
@@ -162,10 +165,78 @@ int vae(const std::string& path, const std::string& dir) {
     compare("image", got.data(), img.data(), img.size());
     double se = 0;
     for (size_t i = 0; i < img.size(); ++i) {
-        const double a = std::min(1.0, std::max(-1.0, (double) got[i])), b = std::min(1.0, std::max(-1.0, (double) img[i]));
+        const double a = std::min(1.0, std::max(-1.0, (double) got[i]));
+        const double b = std::min(1.0, std::max(-1.0, (double) img[i]));
         se += (a - b) * (a - b) * 127.5 * 127.5;
     }
     std::printf("image PSNR %.2f dB (8-bit)\n", 10 * std::log10(255.0 * 255.0 / (se / (double) img.size())));
+    return 0;
+}
+
+// the DiT from the run's text states, noise and sigmas: block 0's streams and the first velocity, then the whole
+// sampling's latent
+int dit(const std::string& path, const std::string& dir, bool q8, const std::string& vae_path = "",
+        const std::string& out_path = "") {
+    void* s = strata::core::Runtime::get().create_stream();
+    strata::image::MfDit d;
+    std::string err;
+    auto t0 = std::chrono::steady_clock::now();
+    if (!d.open(path, s, err, false, q8)) throw std::runtime_error(err);
+    std::printf("open (%s): %.1f s\n", q8 ? "Q8_0" : "bf16", seconds_since(t0));
+    std::vector<int64_t> ns, ts;
+    const auto noise = npy<float>(dir + "/noise.npy", &ns);   // [1][128][h][w]
+    const int64_t Cl = ns[1], h = ns[2], w = ns[3], HW = h * w, C = d.hidden();
+    const auto txt = npy<float>(dir + "/txt.npy", &ts);
+    const auto lens = npy<int64_t>(dir + "/txt_lens.npy");
+    const auto sig = npy<float>(dir + "/sigmas.npy");
+    std::ifstream af(dir + "/args.json");
+    const std::string args((std::istreambuf_iterator<char>(af)), std::istreambuf_iterator<char>());
+    const size_t ci = args.find("\"cfg\":");
+    const float cfg = ci == std::string::npos ? 1.f : std::stof(args.substr(ci + 6));
+    const int64_t D = ts[1];
+    d.set_context(0, txt.data(), lens[0]);
+    if (lens.size() > 1) d.set_context(1, txt.data() + lens[0] * D, lens[1]);
+    const int n = cfg > 1.f && lens.size() > 1 ? 2 : 1;
+    std::vector<float> xt((size_t) (HW * Cl));   // the noise as tokens [h w][128]
+    for (int64_t c = 0; c < Cl; ++c)
+        for (int64_t p = 0; p < HW; ++p) xt[(size_t) (p * Cl + c)] = noise[(size_t) (c * HW + p)];
+    float* x = put(xt);
+    float* out = nullptr;
+    if (!strata::gpu::alloc_device(&out, (size_t) (n * HW * Cl) * 4)) throw std::runtime_error("GPU memory");
+    d.keep_block0(true);
+    d.forward(x, sig[0], h, w, n, out);
+    strata::gpu::stream_sync(s);
+    t0 = std::chrono::steady_clock::now();
+    d.forward(x, sig[0], h, w, n, out);
+    strata::gpu::stream_sync(s);
+    std::printf("forward (%d context%s): %.1f ms\n", n, n > 1 ? "s" : "", 1e3 * seconds_since(t0));
+    const auto bi = npy<float>(dir + "/blk0_img.npy"), bt = npy<float>(dir + "/blk0_txt.npy");
+    compare("blk0 img", fetch(d.block0_img(), (size_t) (HW * C)).data(), bi.data(), (size_t) (HW * C));
+    compare("blk0 txt", fetch(d.block0_txt(), (size_t) (lens[0] * C)).data(), bt.data(), (size_t) (lens[0] * C));
+    auto o = fetch(out, (size_t) (n * HW * Cl));
+    if (n == 2)
+        for (size_t i = 0; i < (size_t) (HW * Cl); ++i) o[i] = o[HW * Cl + i] + cfg * (o[i] - o[HW * Cl + i]);
+    const auto v0 = npy<float>(dir + "/v0.npy");
+    compare("v0", o.data(), v0.data(), v0.size());
+    std::vector<float> sigmas(sig.begin(), sig.end());
+    t0 = std::chrono::steady_clock::now();
+    d.sample(x, h, w, sigmas, cfg);
+    strata::gpu::stream_sync(s);
+    std::printf("sample %zu steps: %.2f s\n", sigmas.size() - 1, seconds_since(t0));
+    const auto lat = npy<float>(dir + "/latent.npy");
+    compare("latent", fetch(x, (size_t) (HW * Cl)).data(), lat.data(), lat.size());
+    if (!vae_path.empty()) {   // the image: rgb [3][16 h][16 w] FP32 (about -1 .. 1) to out_path
+        strata::image::MfVae v;
+        if (!v.open(vae_path, s, err)) throw std::runtime_error(err);
+        float* rgb = nullptr;
+        if (!strata::gpu::alloc_device(&rgb, (size_t) (3 * HW * 256) * 4)) throw std::runtime_error("GPU memory");
+        v.decode_raw(x, h, w, rgb);
+        strata::gpu::stream_sync(s);
+        const auto img = fetch(rgb, (size_t) (3 * HW * 256));
+        std::ofstream(out_path, std::ios::binary).write(reinterpret_cast<const char*>(img.data()),
+                                                         (std::streamsize) (img.size() * 4));
+        std::printf("image: %s\n", out_path.c_str());
+    }
     return 0;
 }
 
@@ -176,7 +247,11 @@ int main(int argc, char** argv) {
         const std::string what = argc > 1 ? argv[1] : "";
         if (what == "text" && argc == 4) return text(argv[2], argv[3]);
         if (what == "vae" && argc == 4) return vae(argv[2], argv[3]);
-        std::fprintf(stderr, "usage: %s text TEXT_ENCODER.gguf GOLDEN_DIR | vae VAE.safetensors GOLDEN_DIR\n", argv[0]);
+        if (what == "dit" && (argc == 4 || argc == 5 || argc == 7))
+            return dit(argv[2], argv[3], argc == 4 || std::string(argv[4]) != "bf16", argc == 7 ? argv[5] : "",
+                       argc == 7 ? argv[6] : "");
+        std::fprintf(stderr, "usage: %s text TEXT_ENCODER.gguf GOLDEN_DIR | vae VAE.safetensors GOLDEN_DIR | "
+                     "dit DIT.safetensors GOLDEN_DIR [q8|bf16 [VAE.safetensors OUT.f32]]\n", argv[0]);
         return 2;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "strata-image-mf-probe: %s\n", e.what());
