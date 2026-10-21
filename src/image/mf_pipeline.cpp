@@ -181,16 +181,17 @@ void MfPipeline::ensure_open() {
     edit_active_ = false;   // the DiT is opened by the request, which knows its size
 }
 
-// Q8_0 or FP16 for a request of `rows` image rows (an edit's references' included): FP16 when its blocks all fit the
-// budget beside the weights that stay, the larger of the DiT's activations and the encoder's, and the encoder's two
-// slots
+// 8 bits or FP16 for a request of `rows` image rows (an edit's references' included): FP16 when its blocks all fit
+// the budget beside the weights that stay, the larger of the DiT's activations and the encoder's, and the encoder's
+// layers, all of them: FP16 blocks that leave the encoder a few slots cost more than they give (RTX 4070, an edit:
+// its text and image read 0.5 s slower, a second in all against the 8-bit DiT's 3.2)
 bool MfPipeline::want_q8(int64_t rows, int n, int64_t max_text, int64_t n_ids) const {
     if (q8_ >= 0) return q8_ == 1;
     const MfDit& d16 = *dit16_size_;
     const uint64_t fixed = d16.weight_bytes() + vae_size_->weight_bytes() + kScratch +
                            (vision_size_ ? vae_size_->encoder_bytes() : 0);
     const uint64_t work = std::max(d16.activation_bytes(rows, n, max_text), te_size_->activation_bytes(n_ids));
-    return fixed + d16.block_bytes() + work + te_size_->layer_min() > budget();
+    return fixed + d16.block_bytes() + work + te_size_->layer_bytes() > budget();
 }
 
 // the DiT for a generation or an edit: the other gives its VRAM back (its Q8_0 kept in RAM with keep_, else let go),

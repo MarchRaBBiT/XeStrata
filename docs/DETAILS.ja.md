@@ -1299,10 +1299,10 @@ Qwen-Image-2.1-Turbo と Qwen-Image-2.1 の重みは Qwen Research License で�
 
 `--images mage-flow-turbo` なら、Microsoft の Mage-Flow-Turbo（4B、4 ステップ）で作ります。`mage-flow`（強化学習で調整した版、20 ステップ）と `mage-flow-base`（元のモデル、30 ステップ）は CFG を掛けます（既定の強さ 5）。
 setup は生成用と編集用の画像のモデル（Comfy-Org の bf16 の safetensors）、VAE、文の読み手（Qwen3-VL-4B）、編集のための画像の読み手（Qwen3-VL-4B の mmproj）をダウンロードします。文の読み手の大きさの選び方は Qwen-Image-2.1 と同じで、画像のモデルの大きさは 1 つです。
-エンジンは画像のモデルのブロックが VRAM に全部入るときは 16 ビット（FP16）のまま置いてそのまま掛け、入らないときは読み込むときに Q8_0 にして、VRAM に入らないブロックを RAM から流します（`--image-dit-q8 on` で常に Q8_0、`off` で常に 16 ビット）。
+エンジンは画像のモデルのブロックが文の読み手の層と一緒に VRAM に全部入るときは 16 ビット（FP16）のまま置いてそのまま掛け、入らないときは読み込むときに 8 ビットにして、VRAM に入らないブロックを RAM から流します（`--image-dit-q8 on` で常に 8 ビット、`off` で常に 16 ビット）。8 ビットは、GPU の計算ライブラリが int8 の積を持つとき（contrib-llvm の Intel・NVIDIA、AMD）は重みを 256 個ずつアダマール行列で回して行ごとの尺度の int8 にし、活性も同じく回してトークンごとに int8 にして掛けます（ComfyUI の int8_convrot と同じ形。時刻の変調の層だけは Q8_0）。ほかは Q8_0 で、掛けるたびに 16 ビットに戻します。
 `-uncensored` なら、文の読み手を huihui-ai の Qwen3-VL-4B（拒否の方向を取り除いたもの、noctrex の GGUF）に替えます。
 API では `steps`（既定はそれぞれのステップ数）、CFG の強さ `true_cfg_scale` か `guidance_scale`（1 なら CFG なし）、`negative_prompt`（既定は空白 1 文字）を受けます。マスクと透明な背景はありません。
-編集（`POST /v1/images/edits`、Web のページの Images のタブ、会話の `edit_image`）は、エンジンが編集用の画像のモデルに差し替えて作ります。参照画像は 3 枚まで（編集のモデルの学習と同じ）、ステップ数の既定は Turbo が 4、ほかの 2 つは 30 です。使っていない方の画像のモデルは Q8_0 のまま RAM に残し（`--image-dit-keep off` なら残さず、差し替えのたびにファイルから読み直します）、差し替えは数秒です。
+編集（`POST /v1/images/edits`、Web のページの Images のタブ、会話の `edit_image`）は、エンジンが編集用の画像のモデルに差し替えて作ります。参照画像は 3 枚まで（編集のモデルの学習と同じ）、ステップ数の既定は Turbo が 4、ほかの 2 つは 30 です。使っていない方の画像のモデルは 8 ビットのまま RAM に残し（`--image-dit-keep off` なら残さず、差し替えのたびにファイルから読み直します）、差し替えは数秒です。
 Mage-Flow の重みは MIT ですが、Microsoft の README は研究のためのモデルで、製品やサービスに使うことは想定していないとしています。XeStrata は Mage-Flow の内容のフィルターも透かしも入れていません。
 
 サーバーは `POST /v1/images/generations`（OpenAI の images API の形。`seed` と、Qwen-Image-2.1 では `steps` も受けます）で画像を作り、Web のページには「Images」のタブが出ます。

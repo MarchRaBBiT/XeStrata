@@ -41,8 +41,8 @@ def main(argv=None) -> int:
                          "model, 20 steps) or mage-flow-base (its base model, 30 steps); -uncensored: the text encoder "
                          "(Qwen3-VL-8B, Mage-Flow's 4B) with the refusal direction removed")
     ap.add_argument("--dit-q8", choices=["auto", "on", "off"],
-                    help="Mage-Flow: its DiT 16-bit in VRAM when it fits there, else Q8_0 (auto, the default); on "
-                         "always Q8_0, off always 16-bit")
+                    help="Mage-Flow: its DiT 16-bit in VRAM when it fits there with the text encoder, else 8 bits "
+                         "(auto, the default); on always 8 bits, off always 16-bit")
     ap.add_argument("--dit-keep", choices=["on", "off"],
                     help="Mage-Flow: keep the DiT not in use (the generation's or the edit's) in RAM (on, the default)")
     ap.add_argument("--print", action="store_true", help="print the images section instead of writing it")

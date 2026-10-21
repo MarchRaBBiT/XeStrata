@@ -3094,7 +3094,7 @@ def setup_images(a, gpu: dict, models_dir: Path, eng: Path, text_gb: float | Non
     _, dit, enc = QI.IMAGE_MODELS[a.images]
     label, steps, _ = QI.DITS[dit]
     asked = a.image_quant or QI.DEFAULT_QUANT
-    if QI.is_mage(dit):   # Mage-Flow's DiT comes in one size (bf16: the engine's FP16 or Q8_0 of it, --image-dit-q8)
+    if QI.is_mage(dit):   # Mage-Flow's DiT comes in one size (bf16: the engine's FP16 or 8 bits of it, --image-dit-q8)
         if a.image_quant:
             warn(f"--image-quant {a.image_quant}: {label} comes in one size, which the engine quantizes itself "
                  "(--image-dit-q8 auto|on|off)")
@@ -5061,8 +5061,9 @@ def main() -> int:
                          "text model leaves, after its text encoder; the GPU's memory does not decide it)")
     ap.add_argument("--image-dit-q8", choices=["auto", "on", "off"],
                     help="Mage-Flow: auto (default) keeps its image model in VRAM as 16-bit when it fits there "
-                         "(faster, nearer the reference) and quantizes it to Q8_0 when it does not (half the VRAM and "
-                         "the bytes streamed); on always Q8_0, off always 16-bit")
+                         "with the text encoder (nearer the reference) and quantizes it to 8 bits when it does not "
+                         "(half the VRAM and the bytes streamed; int8 products where the GPU's math library has "
+                         "them, else Q8_0); on always 8 bits, off always 16-bit")
     ap.add_argument("--image-dit-keep", choices=["on", "off"],
                     help="Mage-Flow: on (default) keeps the image model not in use (the generation's or the edit's) in "
                          "RAM as Q8_0, so switching is quick; off lets it go (about 4.4 GB less RAM) and reads it from "

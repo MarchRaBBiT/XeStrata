@@ -9,8 +9,9 @@
 //                [--dit-keep 0|1]
 //
 // The DiT's file says the model: a GGUF is Qwen-Image-2.1's, a safetensors file Mage-Flow's (its bf16 weights as
-// Comfy-Org has them; its blocks FP16 on the GPU when they fit the budget, else quantized to Q8_0 as they are read:
-// --dit-q8 auto, the default; 1 always Q8_0, 0 always FP16).  Mage-Flow's edits take
+// Comfy-Org has them; its blocks FP16 on the GPU when they fit the budget with the text encoder's layers, else
+// quantized to 8 bits as they are read (MfDit: W8A8 or Q8_0): --dit-q8 auto, the default; 1 always 8 bits, 0 always
+// FP16).  Mage-Flow's edits take
 // its edit DiT (--edit-dit) and Qwen3-VL-4B's mmproj (--vision), up to three --ref; --dit-keep 1, the default, keeps the
 // DiT not in use in RAM between a generation and an edit (0: read from its file again).
 //

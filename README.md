@@ -228,8 +228,8 @@ More VRAM makes it faster.
 
 Mage-Flow (Microsoft, MIT) has one image model for generation and another for edits: setup installs both, and the engine switches to the edit one for an edit.
 It comes in one size: the download is the two image models (bf16), the text encoder (Qwen3-VL-4B Q8_0), the VAE and the vision encoder for the edits, 21.9 GB together, and the RAM about 16 GB.
-The engine keeps the image model in VRAM as 16-bit when it fits there; when it does not, the engine turns it into Q8_0 as it loads it and streams what does not fit from RAM (`--image-dit-q8 on` always Q8_0, `off` always 16-bit).
-The image model not in use stays in RAM as Q8_0, so switching is quick; `--image-dit-keep off` lets it go, the RAM about 12 GB, and reads it from the file again at each switch.
+The engine keeps the image model in VRAM as 16-bit when it fits there with the text encoder; when it does not, the engine turns it into 8 bits as it loads it and streams what does not fit from RAM (`--image-dit-q8 on` always 8 bits, `off` always 16-bit). With 8 bits the products take int8 weights and activations where the GPU's math library has int8 products (Intel and NVIDIA in the contrib-llvm mode, AMD), and Q8_0 elsewhere.
+The image model not in use stays in RAM in 8 bits, so switching is quick; `--image-dit-keep off` lets it go, the RAM about 12 GB, and reads it from the file again at each switch.
 An edit takes up to 3 reference images, and no mask or transparent background.
 
 Images are made through `POST /v1/images/generations` and `/v1/images/edits` (vLLM-Omni compatible, so OpenAI compatible), the Images tab of the web page, and the chat ([details](docs/DETAILS.md#image-generation-optional)).
