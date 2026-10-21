@@ -492,14 +492,27 @@ if(STRATA_ENABLE_XE)
   # Windows: oneMKL's backend, which runs where oneMKL is installed, and cuBLAS's where the build has Windows' import
   # libraries for cuBLAS and the CUDA runtime (STRATA_CUDA_WINDOWS_LIBS: the lib/x64 of NVIDIA's redistributable
   # archives, tools/package/windows.sh), which runs where cuBLAS is installed (the engine adds both's folders to the DLL
-  # search, src/prefill/gemm.cpp).  oneMath's rocBLAS backend finds Linux's libraries only, so there the AMD GPUs take
-  # XeStrata's own kernels
+  # search, src/prefill/gemm.cpp); and rocBLAS's where the build has rocBLAS's and hipBLASLt's headers and Windows'
+  # import libraries (STRATA_ROCM_WINDOWS_LIBS: tools/package/win_rocm.sh) and the Windows HIP's (beside the SYCL
+  # runtime for Windows, tools/intel_llvm_build.py), which runs where AMD's Python packages put rocBLAS and hipBLASLt
   set(STRATA_CUDA_WINDOWS_LIBS "" CACHE PATH
       "Windows: the folder of cuBLAS's, the CUDA runtime's and the CUDA driver's import libraries (oneMath's cuBLAS)")
+  set(STRATA_ROCM_WINDOWS_LIBS "" CACHE PATH
+      "Windows: rocBLAS's and hipBLASLt's headers (include/) and import libraries (lib/) (oneMath's rocBLAS)")
   set(_strata_math_cuda "${_strata_cuda_archs}")
   set(_strata_math_hip "${_strata_hip_archs}")
   if(WIN32)
-    set(_strata_math_hip "")
+    set(_strata_rocm_win_hip "${STRATA_SYCL_WINDOWS}/../hip")
+    if(_strata_math_hip AND EXISTS "${STRATA_ROCM_WINDOWS_LIBS}/lib/rocblas.lib"
+       AND EXISTS "${_strata_rocm_win_hip}/lib/amdhip64.lib")
+      # the fork's rocBLAS backend takes these in a cross build for Windows
+      set(ROCM_WINDOWS_INCLUDE "${STRATA_ROCM_WINDOWS_LIBS}/include;${_strata_rocm_win_hip}/include")
+      set(HIP_WINDOWS_LIBRARY "${_strata_rocm_win_hip}/lib/amdhip64.lib")
+      set(ROCBLAS_WINDOWS_LIBRARY "${STRATA_ROCM_WINDOWS_LIBS}/lib/rocblas.lib")
+      set(HIPBLASLT_WINDOWS_LIBRARY "${STRATA_ROCM_WINDOWS_LIBS}/lib/hipblaslt.lib")
+    else()
+      set(_strata_math_hip "")
+    endif()
     if(_strata_math_cuda AND EXISTS "${STRATA_CUDA_WINDOWS_LIBS}/cublas.lib")
       set(_strata_cuda_cublas ON)
       set(CUDA_TOOLKIT_INCLUDE "${_strata_cuda_root}/include" CACHE PATH "the CUDA headers (oneMath's cuBLAS)" FORCE)
@@ -533,6 +546,8 @@ if(STRATA_ENABLE_XE)
       # the backend's own GPU code takes one architecture (the products themselves run inside rocBLAS and hipBLASLt)
       set(ENABLE_ROCBLAS_BACKEND ON)
       list(GET _strata_hip_archs 0 HIP_TARGETS)
+    endif()
+    if(_strata_math_hip AND NOT WIN32)
       strata_hip_cxx(HIP_CXX_COMPILER)
       strata_hip_prefixes(_strata_rocm_prefixes)        # after what is given: AMD's trees, for find_package(hip)
       list(APPEND CMAKE_PREFIX_PATH ${_strata_rocm_prefixes})
@@ -587,8 +602,8 @@ if(STRATA_ENABLE_XE)
       set(_strata_onemath_url URL ${STRATA_ONEMATH_SOURCE})
     else()
       set(_strata_onemath_url
-        URL https://github.com/MistVVK/oneMath/archive/refs/tags/xestrata-7.tar.gz
-        URL_HASH SHA256=caf2185f865445be6ca62c5d534f9a7e5126f7213f14b57e23cd639e84cf2b0a)
+        URL https://github.com/MistVVK/oneMath/archive/refs/tags/xestrata-8.tar.gz
+        URL_HASH SHA256=592dadf2822ccd661efb6f9b91ea2741b25e4fd354ef496a2702b6c63be8c940)
     endif()
     # another archive is another tree: start from it again
     if(NOT "${_strata_onemath_url}" STREQUAL "${_STRATA_ONEMATH_KEY}")
