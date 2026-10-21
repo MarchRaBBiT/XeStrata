@@ -59,7 +59,6 @@ for l in cublas cudart cuda; do [ -f "/build/cudalib/$l.lib" ] || { echo "no $l.
 # build.sh's compiler cache, shared with the Ubuntu packages (container.sh)
 if [ -n "${CCACHE_DIR:-}" ]; then
   export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache CCACHE_COMPILERCHECK=content
-  trap 'chown -R "$XESTRATA_UID:$XESTRATA_GID" "$CCACHE_DIR" /cache' EXIT
   ccache -z
 fi
 jobs=${XESTRATA_JOBS:-$(nproc)}
@@ -166,4 +165,3 @@ cp /build/out/*.7z /out/
   echo "packages:"
   dpkg-query -W -f '  ${Package} ${Version}\n'
 } > /out/BUILDINFO
-chown -R "$XESTRATA_UID:$XESTRATA_GID" /out

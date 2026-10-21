@@ -188,18 +188,18 @@ cmake --build build/contrib-llvm -j 28
 ccache -s          # the hits
 ```
 
-## Building the packages (Docker)
+## Building the packages (Podman)
 
-The deb and rpm packages (`tools/package/build.sh`, [BUILD.md](BUILD.md#the-deb-and-rpm-packages)) are built in Docker containers.
+The deb and rpm packages and the Windows 7z (`tools/package/build.sh`, [BUILD.md](BUILD.md#the-deb-and-rpm-packages)) are built in rootless Podman containers.
 
 ```sh
-sudo apt install docker.io            # 29.1.3
-sudo usermod -aG docker "$USER"       # after logging in again it runs without sudo
+sudo apt install podman               # 5.7.0 (Fedora: sudo dnf install podman)
+grep "^$USER:" /etc/subuid /etc/subgid   # if nothing: sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$USER"
 ```
 
-The docker group has the same power as root.
+Rootless, it needs neither sudo nor a group with root's power, and the container's root is this user (what the container writes is this user's).
 The containers get no GPU, so nothing extra for GPUs (such as nvidia-container-toolkit) is needed.
-A build makes intel/llvm too; for Fedora 44's free packages the container grew to 6.8 GB at most (measured every minute; the cuda variants add the CUDA toolkit). The container is removed at the end.
+A build makes intel/llvm too; for Fedora 44's free packages the container grew to 6.8 GB at most (measured every minute; the cuda variants add the CUDA toolkit). The container is removed at the end. The images and containers are kept in `~/.local/share/containers`.
 
 ## Windows cross build
 

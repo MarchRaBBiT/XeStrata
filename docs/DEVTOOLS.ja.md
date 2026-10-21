@@ -188,18 +188,18 @@ cmake --build build/contrib-llvm -j 28
 ccache -s          # ヒットの数
 ```
 
-## パッケージのビルド（Docker）
+## パッケージのビルド（Podman）
 
-deb と rpm のパッケージ（`tools/package/build.sh`、[BUILD.ja.md](BUILD.ja.md#deb-と-rpm-のパッケージ)）は、Docker のコンテナの中でビルドします。
+deb と rpm のパッケージと Windows の 7z（`tools/package/build.sh`、[BUILD.ja.md](BUILD.ja.md#deb-と-rpm-のパッケージ)）は、rootless の Podman のコンテナの中でビルドします。
 
 ```sh
-sudo apt install docker.io            # 29.1.3
-sudo usermod -aG docker "$USER"       # ログインし直すと sudo なしで動きます
+sudo apt install podman               # 5.7.0（Fedora: sudo dnf install podman）
+grep "^$USER:" /etc/subuid /etc/subgid   # 出なければ: sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$USER"
 ```
 
-docker グループは root と同じ権限を持ちます。
+rootless なので sudo も特別なグループも要らず、コンテナの root はこのユーザーです（コンテナが書いたファイルはこのユーザーのもの）。
 コンテナには GPU を渡さないので、GPU のための追加の道具（nvidia-container-toolkit など）は要りません。
-1 回のビルドで intel/llvm も作り、Fedora 44 の free でコンテナは最大 6.8 GB になりました（1 分ごとに測った値。cuda の版は CUDA ツールキットの分だけ増えます）。コンテナは終わると消えます。
+1 回のビルドで intel/llvm も作り、Fedora 44 の free でコンテナは最大 6.8 GB になりました（1 分ごとに測った値。cuda の版は CUDA ツールキットの分だけ増えます）。コンテナは終わると消えます。イメージとコンテナは `~/.local/share/containers` に置かれます。
 
 ## Windows 向けのクロスビルド
 

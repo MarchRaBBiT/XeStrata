@@ -29,13 +29,13 @@ Rules for the whole run:
 ```sh
 git status --short --untracked-files=no   # must be empty, on dev
 gh auth status 2>&1 | grep -v -i token    # logged in to github.com as MistVVK
-docker info --format '{{.ServerVersion}}' # the package builds run in Docker
+podman info --format '{{.Version.Version}}' # the package builds run in rootless Podman
 git fetch origin main --tags
 git merge-base --is-ancestor main dev     # main must fast-forward to dev
 git tag -l 'xe*' --sort=-v:refname | head -n 1; git ls-remote --tags origin 'xe*'
 ```
 
-Stop and report if a tracked file has changes, gh is not logged in, Docker does not answer, or `main` has commits `dev` lacks.
+Stop and report if a tracked file has changes, gh is not logged in, Podman does not answer, or `main` has commits `dev` lacks.
 Untracked files (a record not yet committed, for example) may stay: the packages are built from the tag, and the push takes only commits.
 The newest `xe*` tag is the previous release (none before the first one).
 

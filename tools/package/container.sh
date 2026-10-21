@@ -111,7 +111,6 @@ esac
 # apart; the compilers are compared by their content, as intel/llvm's clang is built anew in each container.
 if [ -n "${CCACHE_DIR:-}" ]; then
   export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache CCACHE_COMPILERCHECK=content
-  trap 'chown -R "$XESTRATA_UID:$XESTRATA_GID" "$CCACHE_DIR"' EXIT
   ccache -z
 fi
 if [ "$license" = contrib ]; then
@@ -243,4 +242,3 @@ find . -maxdepth 1 \( -name '*.deb' -o -name '*.rpm' \) -exec cp {} /out/ \;
     fedora*) rpm -qa --qf '  %{NAME} %{VERSION}-%{RELEASE}\n' | sort ;;
   esac
 } > /out/BUILDINFO
-chown -R "$XESTRATA_UID:$XESTRATA_GID" /out
