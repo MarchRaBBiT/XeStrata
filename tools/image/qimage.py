@@ -20,7 +20,8 @@ undistilled one) sampled in 40 steps on the scheduler's shifted sigmas instead o
             against the SHA-256 the Hugging Face API lists for it at the pinned revision.
 
 Mage-Flow (Microsoft, MIT; mage-flow-turbo, mage-flow, mage-flow-base): its DiT as Comfy-Org has it (bf16 safetensors,
-one size: the engine quantizes its blocks to Q8_0 as it reads them, "dit_q8"), its VAE, and Qwen3-VL-4B as its text
+one size: the engine keeps its blocks FP16 in VRAM when they fit, else quantizes them to Q8_0 as it reads them,
+"dit_q8"), its VAE, and Qwen3-VL-4B as its text
 encoder (Unsloth's GGUF, or with -uncensored huihui-ai's abliterated one as noctrex quantized it), with its edit model
 (the DiT the engine switches to for an edit, "edit_model") and Qwen3-VL-4B's vision encoder, in its own folder
 (mage-flow).  Only its text encoder is lowered for the RAM.
@@ -229,14 +230,16 @@ def local_path(models_dir: Path, name: str) -> Path:
 
 def image_config(quant: str, exe: Path, models_dir: Path, *, model: str = DEFAULT_MODEL, uma: bool = False,
                  policy: str = "auto", ssd_offload: bool = False, text_quant: str = DEFAULT_TEXT_QUANT,
-                 dit_q8: bool = True, dit_keep: bool = True) -> dict:
+                 dit_q8: bool | None = None, dit_keep: bool = True) -> dict:
     """The run config's "images" section for `model` (IMAGE_MODELS; serve/images.py reads it).  dit_q8: Mage-Flow's
-    blocks quantized to Q8_0 as the engine reads them (else bf16); dit_keep: its DiT not in use kept in RAM."""
+    blocks as Q8_0 (True), FP16 (False) or by the VRAM (None, the default: no "dit_q8" in the section); dit_keep: its
+    DiT not in use kept in RAM."""
     name, dit, text_encoder = IMAGE_MODELS[model]
     if is_mage(dit):
-        return {"model_name": name, "family": "mage-flow", "exe": str(exe), "quant": "bf16",
+        q8 = {"dit_q8": bool(dit_q8)} if dit_q8 is not None else {}
+        return {**q8, "model_name": name, "family": "mage-flow", "exe": str(exe), "quant": "bf16",
                 "diffusion_model": str(local_path(models_dir, f"{dit}-bf16")), "steps": DITS[dit][1],
-                "schedule": "mage", "cfg_scale": MF_CFG[dit], "dit_q8": bool(dit_q8), "mask": False,
+                "schedule": "mage", "cfg_scale": MF_CFG[dit], "mask": False,
                 "edit_model": str(local_path(models_dir, f"{MF_EDIT[dit][0]}-bf16")), "edit_steps": MF_EDIT[dit][1],
                 "vision": str(local_path(models_dir, "mf-mmproj")), "dit_keep": bool(dit_keep),
                 "transparency": False, "vae": str(local_path(models_dir, "mf-vae")),

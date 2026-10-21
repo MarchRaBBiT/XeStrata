@@ -480,8 +480,8 @@ class ImageEngine:
                "--text", str(self.cfg["llm"])]
         if self.cfg.get("vision"):
             cmd += ["--vision", str(self.cfg["vision"])]
-        if self.cfg.get("dit_q8") is False:
-            cmd += ["--dit-q8", "0"]
+        if self.cfg.get("dit_q8") is not None:   # Mage-Flow's DiT: Q8_0 or FP16 as the config says, else by the VRAM
+            cmd += ["--dit-q8", "1" if self.cfg["dit_q8"] else "0"]
         if self.cfg.get("edit_model"):
             cmd += ["--edit-dit", str(self.cfg["edit_model"])]
         if self.cfg.get("dit_keep") is False:

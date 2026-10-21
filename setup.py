@@ -35,7 +35,7 @@ answers, no questions), --setup (install another model / change settings instead
 generation on XeStrata's image engine, POST /v1/images/generations: Qwen-Image-2.1-Turbo in 8 steps, or its base
 model Qwen-Image-2.1 in 40; mage-flow-turbo|mage-flow|mage-flow-base[-uncensored]: Mage-Flow in 4, 20 or 30;
 -uncensored: the text encoder with the refusal direction removed; --image-quant Q4_K_M|Q6_K|Q8_0 (Qwen-Image),
---image-dit-q8 on|off and --image-dit-keep on|off (Mage-Flow), --image-ssd-offload on|off, --image-gpu-policy
+--image-dit-q8 auto|on|off and --image-dit-keep on|off (Mage-Flow), --image-ssd-offload on|off, --image-gpu-policy
 auto|keep|shrink|unload).
 
 Setup recommends, it never forces: the recommended answers are the defaults (--yes, or Enter), and a bigger choice
@@ -3094,12 +3094,12 @@ def setup_images(a, gpu: dict, models_dir: Path, eng: Path, text_gb: float | Non
     _, dit, enc = QI.IMAGE_MODELS[a.images]
     label, steps, _ = QI.DITS[dit]
     asked = a.image_quant or QI.DEFAULT_QUANT
-    if QI.is_mage(dit):   # Mage-Flow's DiT comes in one size (bf16, the engine's Q8_0 of it with --image-dit-q8 on)
+    if QI.is_mage(dit):   # Mage-Flow's DiT comes in one size (bf16: the engine's FP16 or Q8_0 of it, --image-dit-q8)
         if a.image_quant:
             warn(f"--image-quant {a.image_quant}: {label} comes in one size, which the engine quantizes itself "
-                 "(--image-dit-q8 on|off)")
+                 "(--image-dit-q8 auto|on|off)")
         asked = QI.dit_quants(dit)[-1]
-    dit_q8 = getattr(a, "image_dit_q8", None) != "off"
+    dit_q8 = {"on": True, "off": False}.get(getattr(a, "image_dit_q8", None) or "auto")   # None: by the VRAM
     dit_keep = getattr(a, "image_dit_keep", None) != "off"
     tasked = QI.DEFAULT_TEXT_QUANT
     ssd = getattr(a, "image_ssd_offload", None) == "on"
@@ -5059,9 +5059,10 @@ def main() -> int:
     ap.add_argument("--image-quant", choices=["Q4_K_M", "Q6_K", "Q8_0"],
                     help="the image model's size (default Q8_0, lowered when its files would not fit the RAM the "
                          "text model leaves, after its text encoder; the GPU's memory does not decide it)")
-    ap.add_argument("--image-dit-q8", choices=["on", "off"],
-                    help="Mage-Flow: on (default) quantizes its image model to Q8_0 as the engine reads it (half the "
-                         "VRAM and RAM, the pinned RAM of what does not fit included); off keeps bf16")
+    ap.add_argument("--image-dit-q8", choices=["auto", "on", "off"],
+                    help="Mage-Flow: auto (default) keeps its image model in VRAM as 16-bit when it fits there "
+                         "(faster, nearer the reference) and quantizes it to Q8_0 when it does not (half the VRAM and "
+                         "the bytes streamed); on always Q8_0, off always 16-bit")
     ap.add_argument("--image-dit-keep", choices=["on", "off"],
                     help="Mage-Flow: on (default) keeps the image model not in use (the generation's or the edit's) in "
                          "RAM as Q8_0, so switching is quick; off lets it go (about 4.4 GB less RAM) and reads it from "
