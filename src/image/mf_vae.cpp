@@ -20,7 +20,10 @@ namespace strata::image {
 
 namespace gpu = strata::gpu;
 
-namespace {
+// The kernels' helpers in a namespace of this file's own, not an anonymous one: SYCL names a lambda's kernel by its
+// mangled type, and an anonymous namespace mangles the same in every file (_GLOBAL__N_1), so a helper of the same
+// name and signature in another image file (qi_vae.cpp's to_rgba) gave its kernel to both.
+namespace mf_vae_detail {
 
 using strata::kernels::f16_from_f32;
 using strata::kernels::f32_from_f16;
@@ -298,7 +301,9 @@ void to_rgba(const float* rgb, int64_t HW, float* rgba, void* s) {
     });
 }
 
-}  // namespace
+}  // namespace mf_vae_detail
+
+using namespace mf_vae_detail;
 
 MfVae::MfVae() = default;
 

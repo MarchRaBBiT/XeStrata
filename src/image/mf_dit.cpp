@@ -24,7 +24,10 @@ namespace strata::image {
 
 namespace gpu = strata::gpu;
 
-namespace {
+// The kernels' helpers in a namespace of this file's own, not an anonymous one: SYCL names a lambda's kernel by its
+// mangled type, and an anonymous namespace mangles the same in every file (_GLOBAL__N_1), so a helper of the same
+// name and signature in another image file (qi_vae.cpp's to_rgba) gave its kernel to both.
+namespace mf_dit_detail {
 
 namespace syclex = sycl::ext::oneapi::experimental;
 using strata::kernels::f16_from_f32;
@@ -291,7 +294,9 @@ void euler(float* x, const float* out, int64_t n, int ctxs, float cfg, float ds,
     });
 }
 
-}  // namespace
+}  // namespace mf_dit_detail
+
+using namespace mf_dit_detail;
 
 MfDit::MfDit() = default;
 
