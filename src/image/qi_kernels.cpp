@@ -4,17 +4,21 @@
 
 #include "strata/image/qi_kernels.hpp"
 
+#include "strata/core/per_device.hpp"
 #include "strata/core/runtime.hpp"
 #include "strata/kernels/f16_bits.hpp"
 
 #include <sycl/sycl.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
 namespace strata::image {
 
 namespace {
+
+namespace syclex = sycl::ext::oneapi::experimental;
 
 using strata::kernels::f16_from_f32;
 using strata::kernels::f32_from_f16;
@@ -26,6 +30,43 @@ void finish(void* stream, const sycl::event& e, const char* what) {
 }
 
 constexpr float kEps = 1e-6f;
+
+// qi_qk_norm_rope16 a sub-group of 32 a head (t, h), HEADS heads a work-group
+struct QkRope {
+    static constexpr int64_t SG = 32, HEADS = 8, LANES = SG * HEADS;
+    const float *q, *k, *v, *wq, *wk, *cos, *sin;
+    int64_t n, heads, head_dim;
+    uint16_t *q16, *k16, *v16;
+    void operator()(sycl::nd_item<1> it) const {
+        const auto sg = it.get_sub_group();
+        const int64_t g = static_cast<int64_t>(it.get_group_linear_id()) * HEADS + sg.get_group_linear_id();
+        const int64_t lane = sg.get_local_linear_id(), half = head_dim / 2;
+        if (g >= n) return;   // the whole sub-group
+        const int64_t t = g / heads, base = g * head_dim;
+        for (int which = 0; which < 2; ++which) {
+            const float* src = which == 0 ? q : k;
+            const float* w = which == 0 ? wq : wk;
+            float ss = 0.f;
+            for (int64_t p = lane; p < half; p += SG) {
+                const auto ab = *reinterpret_cast<const sycl::vec<float, 2>*>(src + base + 2 * p);
+                ss += ab[0] * ab[0] + ab[1] * ab[1];
+            }
+            const float r =
+                1.f / sycl::sqrt(sycl::reduce_over_group(sg, ss, sycl::plus<float>()) / (float) head_dim + kEps);
+            uint16_t* dst = which == 0 ? q16 : k16;
+            for (int64_t p = lane; p < half; p += SG) {
+                const auto ab = *reinterpret_cast<const sycl::vec<float, 2>*>(src + base + 2 * p);
+                const float a = ab[0] * r * w[2 * p], b = ab[1] * r * w[2 * p + 1];
+                const float c = cos[t * half + p], sn = sin[t * half + p];
+                // the pair (a, b) = (even, odd): a' = a c - b s, b' = a s + b c
+                dst[base + 2 * p] = f16_from_f32(a * c - b * sn);
+                dst[base + 2 * p + 1] = f16_from_f32(a * sn + b * c);
+            }
+        }
+        for (int64_t d = lane; d < head_dim; d += SG) v16[base + d] = f16_from_f32(v[base + d]);
+    }
+    auto get(syclex::properties_tag) const { return syclex::properties{syclex::sub_group_size<SG>}; }
+};
 
 }  // namespace
 
@@ -67,9 +108,27 @@ void qi_qk_norm_rope16(const float* q, const float* k, const float* v, const flo
                        uint16_t* q16, uint16_t* k16, uint16_t* v16, void* stream) {
     if (T <= 0) return;
     if (head_dim % 2 != 0 || head_dim > 256) throw std::invalid_argument("qi_qk_norm_rope16: head_dim");
-    const size_t local = (size_t) head_dim;
     const int64_t half = head_dim / 2;
-    const auto e = queue_for(stream).parallel_for(
+    sycl::queue& q0 = queue_for(stream);
+    // a sub-group of 32 a head, 8 heads a work-group, the sum of squares within the sub-group; where the GPU has no
+    // sub-groups of 32, a work-group a head and its sum over the work-group.  The work-group's sum went through local
+    // memory and barriers: RX 9060 XT 13.3 ms for Qwen-Image-2.1's 4,114 rows of 24 heads, RTX 4070 0.7.
+    static core::PerDevice<bool> sg32;
+    const bool by_sg = sg32.get(q0.get_device(), [&q0] {
+        const auto sizes = q0.get_device().get_info<sycl::info::device::sub_group_sizes>();
+        return std::find(sizes.begin(), sizes.end(), (size_t) 32) != sizes.end();
+    });
+    if (by_sg) {
+        const int64_t n = T * heads;
+        const auto e = q0.parallel_for(
+            sycl::nd_range<1>(sycl::range<1>((size_t) ((n + QkRope::HEADS - 1) / QkRope::HEADS * QkRope::LANES)),
+                              sycl::range<1>((size_t) QkRope::LANES)),
+            QkRope{q, k, v, wq, wk, cos, sin, n, heads, head_dim, q16, k16, v16});
+        finish(stream, e, "qi_qk_norm_rope16");
+        return;
+    }
+    const size_t local = (size_t) head_dim;
+    const auto e = q0.parallel_for(
         sycl::nd_range<1>(sycl::range<1>((size_t) (T * heads) * local), sycl::range<1>(local)),
         [=](sycl::nd_item<1> it) {
             const int64_t g = static_cast<int64_t>(it.get_group_linear_id()), d = static_cast<int64_t>(it.get_local_linear_id());
