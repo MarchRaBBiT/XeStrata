@@ -304,6 +304,7 @@ MfDit::MfDit() = default;
 
 MfDit::~MfDit() {
     blocks_stream_.drop();
+    drop_refs();
     for (void* p : allocs_) gpu::free(p);
 }
 
@@ -527,6 +528,7 @@ void MfDit::ensure(int64_t hw, int n, int64_t max_text) {
     key_lim_ = alloc<int32_t>(allocs_, 2 * max_text);
     if (std::strcmp(qi_attention_path(), "plain (FP32)") == 0) attn_scratch_ = alloc<float>(allocs_, TP * C_);
     b0_img_ = alloc<float>(allocs_, hw * C_);
+    xin_ = alloc<float>(allocs_, hw * in_ch_);
     b0_txt_ = alloc<float>(allocs_, max_text * C_);
     cap_hw_ = hw;
     cap_n_ = n;
@@ -544,44 +546,75 @@ void MfDit::drop_activations() {
     for (void* p : {(void*) img_, (void*) txt_, (void*) q_, (void*) k_, (void*) v_, (void*) a_, (void*) gu_,
                     (void*) h16_, (void*) jq16_, (void*) jk16_, (void*) jv16_, (void*) jo16_, (void*) io16_,
                     (void*) to16_, (void*) cos_, (void*) sin_, (void*) cos_id_, (void*) sin_id_, (void*) key_lim_,
-                    (void*) attn_scratch_, (void*) b0_img_, (void*) b0_txt_})
+                    (void*) attn_scratch_, (void*) b0_img_, (void*) b0_txt_, (void*) xin_})
         release(allocs_, p);
     img_ = txt_ = q_ = k_ = v_ = a_ = gu_ = cos_ = sin_ = cos_id_ = sin_id_ = nullptr;
-    attn_scratch_ = b0_img_ = b0_txt_ = nullptr;
+    attn_scratch_ = b0_img_ = b0_txt_ = xin_ = nullptr;
     h16_ = jq16_ = jk16_ = jv16_ = jo16_ = io16_ = to16_ = nullptr;
     key_lim_ = nullptr;
     cap_hw_ = cap_n_ = cap_text_ = 0;
 }
 
-// the image rows' 2D multi-scale RoPE: pairs 0 .. 7 the frame (0 for a generated image), then axes_[1] / 2 pairs by
-// the row and axes_[2] / 2 by the column, each centred on the image (rows -(h - h / 2) .. h / 2 - 1)
+// the image rows' 2D multi-scale RoPE: pairs 0 .. 7 by the frame (0 the target, j an edit's reference j), then
+// axes_[1] / 2 pairs by the row and axes_[2] / 2 by the column, each centred on its image (rows -(h - h / 2) ..
+// h / 2 - 1); the target's rows, then each reference's
 void MfDit::rope_tables(int64_t h, int64_t w) {
-    if (h == rope_h_ && w == rope_w_) return;
+    if (h == rope_h_ && w == rope_w_ && refs_gen_ == rope_refs_) return;
     const int64_t half = hd_ / 2, a0 = axes_[0] / 2, a1 = axes_[1] / 2;
-    const int64_t y0 = h - h / 2, x0 = w - w / 2;   // the centre's row and column
-    std::vector<float> c((size_t) (h * w * half)), s(c.size());
-    for (int64_t y = 0; y < h; ++y)
-        for (int64_t x = 0; x < w; ++x)
-            for (int64_t j = 0; j < half; ++j) {
-                double pos = 0, dim = (double) axes_[0], k = (double) j;
-                if (j >= a0 && j < a0 + a1) {
-                    pos = (double) (y - y0);
-                    dim = (double) axes_[1];
-                    k = (double) (j - a0);
-                } else if (j >= a0 + a1) {
-                    pos = (double) (x - x0);
-                    dim = (double) axes_[2];
-                    k = (double) (j - a0 - a1);
+    std::vector<std::pair<int64_t, int64_t>> images{{h, w}};
+    images.insert(images.end(), ref_sizes_.begin(), ref_sizes_.end());
+    std::vector<float> c((size_t) ((h * w + ref_rows_) * half)), s(c.size());
+    size_t row = 0;
+    for (size_t f = 0; f < images.size(); ++f) {
+        const int64_t ih = images[f].first, iw = images[f].second;
+        const int64_t y0 = ih - ih / 2, x0 = iw - iw / 2;   // the centre's row and column
+        for (int64_t y = 0; y < ih; ++y)
+            for (int64_t x = 0; x < iw; ++x, ++row)
+                for (int64_t j = 0; j < half; ++j) {
+                    double pos = (double) f, dim = (double) axes_[0], k = (double) j;
+                    if (j >= a0 && j < a0 + a1) {
+                        pos = (double) (y - y0);
+                        dim = (double) axes_[1];
+                        k = (double) (j - a0);
+                    } else if (j >= a0 + a1) {
+                        pos = (double) (x - x0);
+                        dim = (double) axes_[2];
+                        k = (double) (j - a0 - a1);
+                    }
+                    const double ang = pos * std::pow(10000.0, -2.0 * k / dim);
+                    c[row * (size_t) half + (size_t) j] = (float) std::cos(ang);
+                    s[row * (size_t) half + (size_t) j] = (float) std::sin(ang);
                 }
-                const double ang = pos * std::pow(10000.0, -2.0 * k / dim);
-                c[(size_t) ((y * w + x) * half + j)] = (float) std::cos(ang);
-                s[(size_t) ((y * w + x) * half + j)] = (float) std::sin(ang);
-            }
+    }
     gpu::stream_sync(s_);
     gpu::copy(cos_, c.data(), c.size() * 4);
     gpu::copy(sin_, s.data(), s.size() * 4);
     rope_h_ = h;
     rope_w_ = w;
+    rope_refs_ = refs_gen_;
+}
+
+void MfDit::drop_refs() {
+    if (refs_ != nullptr) {
+        gpu::stream_sync(s_);
+        release(allocs_, refs_);
+    }
+    refs_ = nullptr;
+    ref_rows_ = 0;
+    ref_sizes_.clear();
+}
+
+void MfDit::set_refs(const float* z, const std::vector<std::pair<int64_t, int64_t>>& sizes) {
+    drop_refs();
+    ++refs_gen_;
+    int64_t rows = 0;
+    for (const auto& [rh, rw] : sizes) rows += rh * rw;
+    if (rows == 0) return;
+    refs_ = alloc<float>(allocs_, rows * in_ch_);
+    gpu::copy_async(refs_, z, (size_t) (rows * in_ch_) * 4, s_);
+    gpu::stream_sync(s_);
+    ref_rows_ = rows;
+    ref_sizes_ = sizes;
 }
 
 // the time's embedding as the reference makes it in bf16 (it was trained with this rounding): the sinusoid of the
@@ -624,7 +657,8 @@ void MfDit::set_context(int i, const float* states, int64_t rows) {
 }
 
 void MfDit::forward(const float* x, float sigma, int64_t h, int64_t w, int n, float* out) {
-    const int64_t HW = h * w, C = C_, R = n * HW;
+    // HW: a context's image rows, the target's (TW) and an edit's references' after them
+    const int64_t TW = h * w, HW = TW + ref_rows_, C = C_, R = n * HW;
     int64_t L = 0, maxL = 0;
     for (int i = 0; i < n; ++i) {
         L += ctx_[i].rows;
@@ -634,6 +668,11 @@ void MfDit::forward(const float* x, float sigma, int64_t h, int64_t w, int n, fl
     rope_tables(h, w);
     const int64_t TP = qi_attn_rows(HW + cap_text_);
     // the image's input projection (each context the same rows), the text stream's start
+    if (ref_rows_ > 0) {
+        gpu::copy_async(xin_, x, (size_t) (TW * in_ch_) * 4, s_);
+        gpu::copy_async(xin_ + TW * in_ch_, refs_, (size_t) (ref_rows_ * in_ch_) * 4, s_);
+        x = xin_;
+    }
     qi_to_f16(x, HW * in_ch_, h16_, s_);
     product(h16_, nullptr, img_in_, nullptr, img_, HW, b_img_in_);
     for (int i = 1; i < n; ++i) gpu::copy_async(img_ + i * HW * C, img_, (size_t) (HW * C) * 4, s_);
@@ -709,9 +748,17 @@ void MfDit::forward(const float* x, float sigma, int64_t h, int64_t w, int n, fl
         }
     }
     // the output: AdaLayerNormContinuous (its emb: scale, then shift) and the projection to the latent's channels
+    // (the target's rows of each context)
     product(tsil, nullptr, nout_, nullptr, nmod_, 1, b_nout_);
-    rows16(LnMod{img_, nmod_ + C, nmod_, C}, R, C, h16_, rs_, s_);
-    product(h16_, rs_, pout_, nullptr, out, R, b_pout_);
+    if (ref_rows_ == 0) {
+        rows16(LnMod{img_, nmod_ + C, nmod_, C}, R, C, h16_, rs_, s_);
+        product(h16_, rs_, pout_, nullptr, out, R, b_pout_);
+        return;
+    }
+    for (int i = 0; i < n; ++i) {
+        rows16(LnMod{img_ + i * HW * C, nmod_ + C, nmod_, C}, TW, C, h16_, rs_, s_);
+        product(h16_, rs_, pout_, nullptr, out + i * TW * in_ch_, TW, b_pout_);
+    }
 }
 
 void MfDit::sample(float* x, int64_t h, int64_t w, const std::vector<float>& sigmas, float cfg,

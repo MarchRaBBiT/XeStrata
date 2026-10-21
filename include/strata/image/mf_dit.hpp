@@ -19,6 +19,11 @@
 //
 // Guidance: up to two contexts (the prompt and the negative prompt) run through each product together, the image's
 // rows twice, the weights read once a step; the attention one context at a time.
+//
+// Edits (the edit models): the references' latent tokens (clean, the same every step) follow the target's rows in
+// each context, [target, reference 1, ..., reference N], and take part in every block; each image's rows are rotated
+// by its own size's centred positions and by its frame (0 the target, j reference j), and only the target's rows
+// give the velocity.
 #pragma once
 
 #include "strata/image/qi_stream.hpp"
@@ -49,6 +54,12 @@ public:
     void set_context(int i, const float* states, int64_t rows);
     int64_t context_rows(int i) const { return ctx_[i].rows; }
 
+    /// An edit's references: their latent tokens z (device FP32, [sum of h w][128], reference by reference) and their
+    /// sizes in latent positions (h, w); none (the default) for a generation.
+    void set_refs(const float* z, const std::vector<std::pair<int64_t, int64_t>>& sizes);
+    /// The rows the references add to each context's image rows.
+    int64_t ref_rows() const { return ref_rows_; }
+
     /// The velocity [n][h w][128] (device FP32) of the latent tokens x [h w][128] (device FP32) at noise level sigma,
     /// for the contexts 0 .. n - 1 (n 1 or 2).
     void forward(const float* x, float sigma, int64_t h, int64_t w, int n, float* out);
@@ -69,8 +80,8 @@ public:
     uint64_t blocks_vram() const { return blocks_stream_.vram(); }
     void drop_blocks() { blocks_stream_.drop(); }
     uint64_t weight_bytes() const { return weight_bytes_; }   // what stays on the GPU besides the blocks
-    /// The working buffers n contexts of an h x w image take (text rows up to max_text a context), with the MLP a band
-    /// of mlp_rows image rows at a time (0: all).
+    /// The working buffers n contexts of hw image rows (an edit's references' included) take (text rows up to
+    /// max_text a context), with the MLP a band of mlp_rows image rows at a time (0: all).
     uint64_t activation_bytes(int64_t hw, int n, int64_t max_text, int64_t mlp_rows = 0) const;
     void set_mlp_rows(int64_t rows) { mlp_cap_ = rows; }
     uint64_t activations_held() const {
@@ -107,6 +118,7 @@ private:
                  const float* bias);
     void ensure(int64_t hw, int n, int64_t max_text);
     void rope_tables(int64_t h, int64_t w);
+    void drop_refs();
     void time_embedding(float sigma);
 
     std::unique_ptr<MappedFile> file_;
@@ -138,7 +150,12 @@ private:
     float *cos_ = nullptr, *sin_ = nullptr, *cos_id_ = nullptr, *sin_id_ = nullptr, *attn_scratch_ = nullptr;
     int32_t* key_lim_ = nullptr;
     float *b0_img_ = nullptr, *b0_txt_ = nullptr;
-    int64_t rope_h_ = -1, rope_w_ = -1;
+    int64_t rope_h_ = -1, rope_w_ = -1, rope_refs_ = -1;
+    // an edit's references
+    float* refs_ = nullptr;   // [ref_rows_][in_ch_]
+    int64_t ref_rows_ = 0, refs_gen_ = 0;
+    std::vector<std::pair<int64_t, int64_t>> ref_sizes_;
+    float* xin_ = nullptr;    // the image rows' input [hw + ref_rows_][in_ch_]
 };
 
 }  // namespace strata::image
