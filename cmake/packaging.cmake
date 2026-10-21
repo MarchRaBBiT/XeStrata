@@ -50,7 +50,7 @@ set(_pkg_engine ${CMAKE_INSTALL_LIBDIR}/xestrata/engine)
 set(_pkg_engine_abs ${CMAKE_INSTALL_FULL_LIBDIR}/xestrata/engine)
 
 # ---- the engine
-set_target_properties(strata PROPERTIES INSTALL_RPATH "$ORIGIN/lib")
+set_target_properties(strata strata-image PROPERTIES INSTALL_RPATH "$ORIGIN/lib")
 install(TARGETS strata strata-image RUNTIME DESTINATION ${_pkg_engine})
 install(PROGRAMS ${STRATA_PACKAGE_VISION_DIR}/strata-vision-cpu ${STRATA_PACKAGE_VISION_DIR}/strata-vision-vulkan
         DESTINATION ${_pkg_engine})
