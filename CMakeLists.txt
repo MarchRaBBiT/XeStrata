@@ -678,10 +678,10 @@ if(STRATA_ENABLE_XE)
     target_link_libraries(strata_image PRIVATE strata_dnnl)
     target_compile_definitions(strata_image PRIVATE STRATA_ONEDNN=1)
   endif()
-  # NVIDIA GPUs (contrib-llvm): cuDNN's SDPA through cudnn-frontend (Apache-2.0, header-only, the tag pinned here), which
-  # opens cuDNN at run time (libcudnn.so.9: the user's installation, not free software; without it the engine's own
-  # kernel).  cuDNN's headers (cudnn.h) are found under STRATA_CUDNN_ROOT, CUDNN_PATH or the CUDA toolkit's folder; the
-  # build goes on without them.
+  # NVIDIA GPUs (contrib-llvm): cuDNN's SDPA through cudnn-frontend (Apache-2.0, header-only, the tag pinned here),
+  # which opens cuDNN at run time (libcudnn.so.9: the user's installation, not free software; without it the engine's
+  # own kernel).  cuDNN's headers (cudnn.h) are found under STRATA_CUDNN_ROOT, CUDNN_PATH or the CUDA toolkit's folder;
+  # the build goes on without them.
   set(STRATA_CUDNN_ROOT "" CACHE PATH "cuDNN's folder (its include/cudnn.h), for the image attention on NVIDIA GPUs")
   if(_strata_cuda_archs AND STRATA_LICENSE STREQUAL "contrib" AND NOT WIN32)
     find_path(_strata_cudnn_inc cudnn.h NO_CACHE HINTS "${STRATA_CUDNN_ROOT}/include" "$ENV{CUDNN_PATH}/include"
