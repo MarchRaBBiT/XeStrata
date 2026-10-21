@@ -490,9 +490,10 @@ if(STRATA_ENABLE_XE)
     set(_strata_onemkl OFF)   # oneMKL is not free software
   endif()
   # Windows: oneMKL's backend, which runs where oneMKL is installed, and cuBLAS's where the build has Windows' import
-  # libraries for cuBLAS and the CUDA runtime (STRATA_CUDA_WINDOWS_LIBS: the lib/x64 of NVIDIA's redistributable
-  # archives, tools/package/windows.sh), which runs where cuBLAS is installed (the engine adds both's folders to the DLL
-  # search, src/prefill/gemm.cpp); and rocBLAS's where the build has rocBLAS's and hipBLASLt's headers and Windows'
+  # libraries for cuBLAS and the CUDA runtime (STRATA_CUDA_WINDOWS_LIBS: those of NVIDIA's redistributable archives) and
+  # the CUDA headers in its include/ (tools/package/windows.sh; a Linux toolkit's can sit among the build machine's C
+  # library's, as Ubuntu's do), which runs where cuBLAS is installed (the engine adds both's folders to the DLL search,
+  # src/prefill/gemm.cpp); and rocBLAS's where the build has rocBLAS's and hipBLASLt's headers and Windows'
   # import libraries (STRATA_ROCM_WINDOWS_LIBS: tools/package/win_rocm.sh) and the Windows HIP's (beside the SYCL
   # runtime for Windows, tools/intel_llvm_build.py), which runs where AMD's Python packages put rocBLAS and hipBLASLt
   set(STRATA_CUDA_WINDOWS_LIBS "" CACHE PATH
@@ -513,9 +514,11 @@ if(STRATA_ENABLE_XE)
     else()
       set(_strata_math_hip "")
     endif()
-    if(_strata_math_cuda AND EXISTS "${STRATA_CUDA_WINDOWS_LIBS}/cublas.lib")
+    if(_strata_math_cuda AND EXISTS "${STRATA_CUDA_WINDOWS_LIBS}/cublas.lib"
+       AND EXISTS "${STRATA_CUDA_WINDOWS_LIBS}/include/cublas_v2.h")
       set(_strata_cuda_cublas ON)
-      set(CUDA_TOOLKIT_INCLUDE "${_strata_cuda_root}/include" CACHE PATH "the CUDA headers (oneMath's cuBLAS)" FORCE)
+      set(CUDA_TOOLKIT_INCLUDE "${STRATA_CUDA_WINDOWS_LIBS}/include" CACHE PATH "the CUDA headers (oneMath's cuBLAS)"
+          FORCE)
       foreach(lib cublas CUDART CUDA)
         string(TOLOWER ${lib} file)
         set(CUDA_${lib}_LIBRARY "${STRATA_CUDA_WINDOWS_LIBS}/${file}.lib" CACHE FILEPATH "an import library" FORCE)
@@ -602,8 +605,8 @@ if(STRATA_ENABLE_XE)
       set(_strata_onemath_url URL ${STRATA_ONEMATH_SOURCE})
     else()
       set(_strata_onemath_url
-        URL https://github.com/MistVVK/oneMath/archive/refs/tags/xestrata-8.tar.gz
-        URL_HASH SHA256=592dadf2822ccd661efb6f9b91ea2741b25e4fd354ef496a2702b6c63be8c940)
+        URL https://github.com/MistVVK/oneMath/archive/refs/tags/xestrata-9.tar.gz
+        URL_HASH SHA256=493f51583f18c9430a01612294480b7ba1bd1b339a3d7ec553ef550c0264b8f9)
     endif()
     # another archive is another tree: start from it again
     if(NOT "${_strata_onemath_url}" STREQUAL "${_STRATA_ONEMATH_KEY}")

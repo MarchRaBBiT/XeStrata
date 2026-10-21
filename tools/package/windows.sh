@@ -47,7 +47,7 @@ mkdir -p /opt/cudnn
 tar -xJf "/cache/$cudnn_tar" -C /opt/cudnn --strip-components=1 --wildcards '*/include/*'
 # Windows' import libraries for cuBLAS, the CUDA runtime and the CUDA driver (oneMath's cuBLAS backend, which loads
 # cuBLAS where the user installed it): from NVIDIA's redistributable archives for CUDA 12.4, their SHA-256 checked
-mkdir -p /build/cudalib
+mkdir -p /build/cudalib/include
 cuda_lib() {   # archive path, its SHA-256
   f=/cache/$(basename "$1")
   [ -f "$f" ] || curl -fsSL -o "$f" "https://developer.download.nvidia.com/compute/cuda/redist/$1"
@@ -59,6 +59,11 @@ cuda_lib cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.4.127-archive.
 cuda_lib libcublas/windows-x86_64/libcublas-windows-x86_64-12.4.5.8-archive.zip \
   698140f12da055a3709eee2e022fcfe7bc8edf31f30115e3f7a5c877a9491de5
 for l in cublas cudart cuda; do [ -f "/build/cudalib/$l.lib" ] || { echo "no $l.lib" >&2; exit 1; }; done
+# and the headers, those of the same toolkit (the same on Windows), apart from the C library's that Ubuntu's toolkit
+# has its own among
+dpkg -L nvidia-cuda-dev libcu++-dev | sed -n 's|^/usr/include/||p' |
+  while read -r h; do [ -f "/usr/include/$h" ] && echo "$h"; done | tar -C /usr/include -cf - -T - |
+  tar -C /build/cudalib/include -xf -
 # Windows' import libraries and the headers for rocBLAS and hipBLASLt (oneMath's rocBLAS backend, which loads them
 # where the user installed them)
 sh "$src/tools/package/win_rocm.sh" /build/rocmwin
