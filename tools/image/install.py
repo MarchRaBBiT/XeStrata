@@ -36,9 +36,12 @@ def main(argv=None) -> int:
     ap.add_argument("--ssd-offload", choices=["on", "off"],
                     help="on: keep the size even when the RAM is short (the rest read from the SSD)")
     ap.add_argument("--model", choices=list(QI.IMAGE_MODELS), default=QI.DEFAULT_MODEL,
-                    help="qwen-image-turbo (default: Qwen-Image-2.1-Turbo, 8 steps) or qwen-image-base "
-                         "(Qwen-Image-2.1, 40 steps); -uncensored: the text encoder (Qwen3-VL-8B) with the refusal "
-                         "direction removed")
+                    help="qwen-image-turbo (default: Qwen-Image-2.1-Turbo, 8 steps), qwen-image-base "
+                         "(Qwen-Image-2.1, 40 steps), mage-flow-turbo (Mage-Flow-Turbo, 4 steps), mage-flow (its RL "
+                         "model, 20 steps) or mage-flow-base (its base model, 30 steps); -uncensored: the text encoder "
+                         "(Qwen3-VL-8B, Mage-Flow's 4B) with the refusal direction removed")
+    ap.add_argument("--dit-q8", choices=["on", "off"],
+                    help="Mage-Flow: its DiT as Q8_0 in VRAM (on, the default) or bf16 as the file has it")
     ap.add_argument("--print", action="store_true", help="print the images section instead of writing it")
     ap.add_argument("--yes", action="store_true")
     a = ap.parse_args(argv)
@@ -48,7 +51,7 @@ def main(argv=None) -> int:
         data, _ = S.data_folder(None)
         a.models_dir = str(data / "models")
     ns = argparse.Namespace(images=a.model, image_quant=a.quant, image_gpu_policy=a.gpu_policy, yes=a.yes,
-                            image_ssd_offload=a.ssd_offload)
+                            image_ssd_offload=a.ssd_offload, image_dit_q8=a.dit_q8)
     path = Path(a.config) if a.config else None
     cfg = json.loads(path.read_text(encoding="utf-8-sig")) if path is not None and path.is_file() else {}
     eng = Path(cfg["exe"]).parent if cfg.get("exe") else ROOT / "engine"     # the text engine's folder

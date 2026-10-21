@@ -33,8 +33,9 @@ answers, no questions), --setup (install another model / change settings instead
 --models-dir DIR, --gguf-dir DIR (use GGUF files you already have), --check (only check this PC), --check-update
 (whether a newer XeStrata release is out), --images qwen-image-turbo|qwen-image-base|...-uncensored|no (image
 generation on XeStrata's image engine, POST /v1/images/generations: Qwen-Image-2.1-Turbo in 8 steps, or its base
-model Qwen-Image-2.1 in 40; -uncensored: the text encoder with the refusal direction removed; --image-quant
-Q4_K_M|Q6_K|Q8_0, --image-ssd-offload on|off, --image-gpu-policy auto|keep|shrink|unload).
+model Qwen-Image-2.1 in 40; mage-flow-turbo|mage-flow|mage-flow-base[-uncensored]: Mage-Flow in 4, 20 or 30;
+-uncensored: the text encoder with the refusal direction removed; --image-quant Q4_K_M|Q6_K|Q8_0 (Qwen-Image),
+--image-dit-q8 on|off (Mage-Flow), --image-ssd-offload on|off, --image-gpu-policy auto|keep|shrink|unload).
 
 Setup recommends, it never forces: the recommended answers are the defaults (--yes, or Enter), and a bigger choice
 than it recommends - a longer context, a size it thinks will not fit - is kept, with what it risks.  With --yes, an
@@ -3089,9 +3090,15 @@ def setup_images(a, gpu: dict, models_dir: Path, eng: Path, text_gb: float | Non
     exe = eng / IMAGE_EXE
     if not exe.exists():
         fail(f"the image engine is missing ({exe})", "run setup again to compile the engine (it builds both)")
-    asked = a.image_quant or QI.DEFAULT_QUANT
     _, dit, enc = QI.IMAGE_MODELS[a.images]
     label, steps, _ = QI.DITS[dit]
+    asked = a.image_quant or QI.DEFAULT_QUANT
+    if QI.is_mage(dit):   # Mage-Flow's DiT comes in one size (bf16, the engine's Q8_0 of it with --image-dit-q8 on)
+        if a.image_quant:
+            warn(f"--image-quant {a.image_quant}: {label} comes in one size, which the engine quantizes itself "
+                 "(--image-dit-q8 on|off)")
+        asked = QI.dit_quants(dit)[-1]
+    dit_q8 = getattr(a, "image_dit_q8", None) != "off"
     tasked = QI.DEFAULT_TEXT_QUANT
     ssd = getattr(a, "image_ssd_offload", None) == "on"
     quant, tquant = asked, tasked
@@ -3119,7 +3126,8 @@ def setup_images(a, gpu: dict, models_dir: Path, eng: Path, text_gb: float | Non
         "POST /v1/images/generations)")
     tfile = QI.FILES[QI.text_file(enc, tquant)]
     say(f"  Text encoder: {Path(tfile[1]).name} ({tfile[0]}"
-        + (", Qwen3-VL-8B with its refusal direction removed)" if enc == "uncensored" else ")"))
+        + (f", Qwen3-VL-{'4B' if QI.is_mage(dit) else '8B'} with its refusal direction removed)"
+           if enc.endswith("uncensored") else ")"))
     say("  " + QI.license_note(dit))
     names = QI.file_names(quant, enc, tquant, dit)
     need = sum(QI.FILES[k][2] for k in names) / 1e9
@@ -3134,7 +3142,7 @@ def setup_images(a, gpu: dict, models_dir: Path, eng: Path, text_gb: float | Non
         download(QI.file_url(name, hf_endpoint()), dst, f"image model: {Path(path).name}")
         verify_sha256(dst, size, sha)
     cfg = QI.image_config(quant, exe, models_dir, model=a.images, uma=bool((gpu or {}).get("integrated")),
-                          policy=a.image_gpu_policy or "auto", ssd_offload=ssd, text_quant=tquant)
+                          policy=a.image_gpu_policy or "auto", ssd_offload=ssd, text_quant=tquant, dit_q8=dit_q8)
     if lowered:
         cfg["quant_lowered"] = lowered
     ok(f"image generation: {quant}, text encoder {tquant}, GPU policy {cfg['gpu_policy']}")
@@ -5034,16 +5042,22 @@ def main() -> int:
                     help="the most image tokens a picture becomes (default 1024 with the encoder on the GPU, 300 on "
                          "the CPU): more reads small text and charts better, and takes longer to encode; remembered "
                          "for this model")
-    ap.add_argument("--images", metavar="qwen-image-turbo|qwen-image-base[-uncensored]|no",
+    ap.add_argument("--images", metavar="qwen-image-turbo|qwen-image-base|mage-flow-turbo|mage-flow|"
+                    "mage-flow-base[-uncensored]|no",
                     help="image generation (POST /v1/images/generations) on XeStrata's image engine: "
                          "qwen-image-turbo (Qwen-Image-2.1-Turbo, 8 steps) or qwen-image-base (its base model "
                          "Qwen-Image-2.1, 40 steps by default, about 5 times as long an image); the text encoder "
                          "Unsloth's Qwen3-VL-8B or, -uncensored, AtomicChat's with its refusal direction removed "
                          "(either Q8_0, lowered first (Q6_K, Q5_K, Q4_K) when the files would not fit the RAM the "
-                         "text model leaves); no = take it out of the config")
+                         "text model leaves); mage-flow-turbo (Mage-Flow-Turbo, 4 steps), mage-flow (20 steps, "
+                         "guidance 5) or mage-flow-base (30 steps, guidance 5), the text encoder Unsloth's "
+                         "Qwen3-VL-4B or, -uncensored, huihui-ai's abliterated one; no = take it out of the config")
     ap.add_argument("--image-quant", choices=["Q4_K_M", "Q6_K", "Q8_0"],
                     help="the image model's size (default Q8_0, lowered when its files would not fit the RAM the "
                          "text model leaves, after its text encoder; the GPU's memory does not decide it)")
+    ap.add_argument("--image-dit-q8", choices=["on", "off"],
+                    help="Mage-Flow: on (default) quantizes its image model to Q8_0 as the engine reads it (half the "
+                         "VRAM and RAM, the pinned RAM of what does not fit included); off keeps bf16")
     ap.add_argument("--image-ssd-offload", choices=["on", "off"],
                     help="on: keep the image model's and its text encoder's sizes even when the RAM is short, and "
                          "read what does not fit from the SSD (slower); off (default): smaller sizes instead")
