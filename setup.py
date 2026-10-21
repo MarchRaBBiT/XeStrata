@@ -1330,18 +1330,18 @@ def repo_added(url: str) -> bool:
 
 def runtime_missing(makers: set) -> tuple:
     """For the package's engine: the GPU makers' packages (BUILD.json's runtime) that the GPUs of `makers` need and
-    are not installed, those that would make them faster (oneMKL, cuBLAS: contrib), and the commands that add the
+    are not installed, those that would make them faster (oneMKL, cuBLAS, cuDNN: contrib), and the commands that add the
     repositories those come from.  Empty for an engine without the record."""
     rt = packaged_engine().get("runtime") or {}
     need = [n for m in ("intel", "amd") if m in makers for n in rt.get(m, []) if not pkg_installed(n)]
-    fast = [n for m, k in (("intel", "onemkl"), ("nvidia", "cublas")) if m in makers for n in rt.get(k, [])
-            if not pkg_installed(n)]
+    fast = [n for m, k in (("intel", "onemkl"), ("nvidia", "cublas"), ("nvidia", "cudnn")) if m in makers
+            for n in rt.get(k, []) if not pkg_installed(n)]
     d = distro_family()
     repos = []
     if any(n in rt.get("onemkl", []) for n in fast) and d in INTEL_REPO and \
             not repo_added("repos.intel.com/oneapi"):
         repos.append(INTEL_REPO[d])
-    if d == "fedora" and any(n in rt.get("cublas", []) for n in fast) and \
+    if d == "fedora" and any(n in rt.get("cublas", []) + rt.get("cudnn", []) for n in fast) and \
             not repo_added("developer.download.nvidia.com/compute/cuda"):
         repos.append(NVIDIA_REPO_FEDORA)
     return need, fast, repos

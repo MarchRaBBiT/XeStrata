@@ -42,7 +42,16 @@ python3-requests, python3-pil, python3-psutil"
               cuda_path=/usr/lib/cuda cublas=libcublas12 ;;
         *) v=$(echo "$cuda_ver" | tr . -)
            apt-get install -y -q --no-install-recommends "cuda-toolkit-$v"
-           cuda_path=/usr/local/cuda-$cuda_ver cublas=libcublas-$v ;;
+           # cuDNN's headers, for the image engine's attention, which opens cuDNN where the user installed it
+           # (Ubuntu's nvidia-cudnn): from NVIDIA's redistributable archive (no Ubuntu package has them), its SHA-256
+           # checked, kept in the downloads' cache
+           cudnn_tar="cudnn-linux-x86_64-9.27.0.42_cuda13-archive.tar.xz"
+           [ -f "/cache/$cudnn_tar" ] || curl -fsSL -o "/cache/$cudnn_tar" \
+             "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/$cudnn_tar"
+           echo "dd3245ba3aca8593934fc946d08649ad3a5ee8500e8da3870bc23bf7ddccd7f9  /cache/$cudnn_tar" | sha256sum -c -
+           mkdir -p /opt/cudnn
+           tar -xJf "/cache/$cudnn_tar" -C /opt/cudnn --strip-components=1 --wildcards '*/include/*'
+           cuda_path=/usr/local/cuda-$cuda_ver cublas=libcublas-$v cudnn=nvidia-cudnn cudnn_root=/opt/cudnn ;;
       esac
       curl -fsSL "$intel_key" | gpg --dearmor > /usr/share/keyrings/oneapi-archive-keyring.gpg
       echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" \
@@ -68,8 +77,11 @@ python3-requests, python3-pillow, python3-psutil"
       dnf config-manager addrepo \
         --from-repofile=https://developer.download.nvidia.com/compute/cuda/repos/fedora44/x86_64/cuda-fedora44.repo
       v=$(echo "$cuda_ver" | tr . -)
-      dnf install -y -q "cuda-toolkit-$v"
+      # cuDNN's headers (NVIDIA's repository, as the toolkit): the image engine's attention opens cuDNN where the user
+      # installed it
+      dnf install -y -q "cuda-toolkit-$v" "libcudnn9-devel-cuda-${cuda_ver%%.*}"
       cuda_path=/usr/local/cuda-$cuda_ver
+      cudnn=libcudnn9-cuda-${cuda_ver%%.*}
       # by its package's name, as on Ubuntu: dnf gives libcublas.so.13()(64bit) to DCGM's private copy
       # (datacenter-gpu-manager-4-cuda13-cublas, in /usr/libexec), which the engine does not find
       cublas=libcublas-$v
@@ -139,7 +151,7 @@ set -- -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
 if [ "$license" = contrib ]; then
   # the PTX version: the toolkit's (empty); the driver must support this CUDA version
   set -- "$@" -DSTRATA_CUDA_ARCHS="$archs" -DSTRATA_ONEMKL=ON -DMKL_ROOT=/opt/intel/oneapi/mkl/latest \
-    -DSTRATA_CUDA_PATH="$cuda_path" -DSTRATA_CUDA_PTX=
+    -DSTRATA_CUDA_PATH="$cuda_path" -DSTRATA_CUDA_PTX= ${cudnn_root:+-DSTRATA_CUDNN_ROOT=$cudnn_root}
 fi
 cmake -G Ninja -S "$src" -B /build/engine "$@"
 targets="strata strata-image onemath_backend_libs"   # oneMath's backends: rocBLAS (AMD GPUs) in every package
@@ -172,14 +184,15 @@ else
     ubuntu*) mklpkg=$(dpkg -S "$mkl" | cut -d: -f1) ;;
     fedora*) mklpkg=$(rpm -qf --qf '%{NAME}' "$mkl") ;;
   esac
-  suggests="$level_zero, $vulkan_icd, $cublas, $mklpkg, $rocm"
+  suggests="$level_zero, $vulkan_icd, $cublas${cudnn:+, $cudnn}, $mklpkg, $rocm"
 fi
 # the same, by GPU maker, for setup to tell what a PC lacks (BUILD.json's "runtime"): what each maker's GPUs need,
-# and in the contrib packages oneMKL and cuBLAS, which make them faster
+# and in the contrib packages oneMKL, cuBLAS and cuDNN (the image engine's attention), which make them faster
 json_list() { printf '["%s"]' "$(echo "$1" | sed 's/, */", "/g')"; }
 runtime="{\"intel\": $(json_list "$level_zero"), \"amd\": $(json_list "$rocm")"
 if [ "$license" = contrib ]; then
   runtime="$runtime, \"onemkl\": $(json_list "$mklpkg"), \"cublas\": $(json_list "$cublas")"
+  [ -n "${cudnn:-}" ] && runtime="$runtime, \"cudnn\": $(json_list "$cudnn")"
 fi
 runtime="$runtime}"
 case "$distro" in

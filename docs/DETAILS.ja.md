@@ -1286,6 +1286,7 @@ XeStrata はそれを、プロンプトの `<|image_pad|>` のトークンの位
 
 `./setup.sh --images qwen-image-turbo` で、文章のモデルとは別に Qwen-Image-2.1-Turbo で画像を作れるようにします（upstream 0.1.44）。
 画像は XeStrata 自身の画像のエンジン `strata-image` が作ります。setup が文章のエンジンと一緒にビルドし、同じ SYCL のカーネルでどのメーカーの GPU でも動きます。
+画像の注意は、Intel の GPU では oneDNN、AMD の GPU では aotriton（どちらもパッケージに入ります）、NVIDIA の GPU では cuDNN が入っていれば cuDNN（contrib-llvm。`xestrata --setup` が入れ方を示します）で取り、ほかは XeStrata の核で取ります。画像のモデルの積は、GPU の計算ライブラリが int8 の積を持つとき（contrib-llvm の Intel・NVIDIA、AMD）は重みと活性を int8 にして掛けます。
 setup は画像のモデル、VAE、文の読み手（Qwen3-VL-8B）と、編集のための画像の読み手（Qwen3-VL の mmproj）をダウンロードして、設定に `"images"` を足します。
 画像のモデルは既定で Q8_0 です。VRAM に入らない層はエンジンが RAM から流し込むので、GPU のメモリでは大きさを選びません。
 文の読み手も既定で Q8_0 です。選ぶのは RAM です。4 つのファイル（編集のための画像の読み手を含む）とエンジンの分（両方が Q8_0 で約 20.2 GB）が文章のモデルの残す RAM に入らなければ、setup はまず文の読み手を Q6_K、Q5_K、Q4_K の順に下げ、それでも入らないときに画像のモデルを入る中で最も大きいもの（Q6_K、Q4_K_M）に下げます。画像のモデルを下げたときは、文の読み手をその横に入る中で最も大きいものにします。

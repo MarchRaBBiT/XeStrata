@@ -1313,6 +1313,7 @@ the model uses interleaved M-RoPE.
 
 `./setup.sh --images qwen-image-turbo` sets up image generation with Qwen-Image-2.1-Turbo beside the text model (upstream 0.1.44).
 Images are made by XeStrata's own image engine, `strata-image`, which setup builds with the text engine: the same SYCL kernels, on every maker's GPU.
+The image attention runs through oneDNN on Intel GPUs and aotriton on AMD GPUs (both in the packages), through cuDNN on NVIDIA GPUs where it is installed (contrib-llvm; `xestrata --setup` says how), and through XeStrata's own kernel elsewhere. Where the GPU's math library has int8 products (Intel and NVIDIA in the contrib-llvm mode, AMD), the image models' products take int8 weights and activations.
 Setup downloads the image model, its VAE, its text encoder (Qwen3-VL-8B) and, for the edits, its vision encoder (Qwen3-VL's mmproj), and adds an `"images"` section to the config.
 The image model is Q8_0 by default. The engine streams from RAM the layers that do not fit in VRAM, so the GPU's memory does not decide the size.
 Its text encoder is Q8_0 by default too. The RAM decides both: when the four files (the vision encoder for the edits among them) and the engine's own (about 20.2 GB with both at Q8_0) do not fit the RAM the text model leaves, setup first lowers the text encoder (Q6_K, Q5_K, Q4_K), and only when that does not fit either takes the largest image model that fits (Q6_K, Q4_K_M), with the largest text encoder that fits beside it.
