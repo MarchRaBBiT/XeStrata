@@ -811,6 +811,7 @@ print(r.choices[0].message.content)
   `xestrata-<model>.json` に `"api_key": "長い秘密の文字列"` を書く（または環境変数 `STRATA_API_KEY`）と、クライアントはそれを API キーとして送ります。
   カンマで区切ると、複数のキーを受けます（`"key1,key2"`、llama.cpp と同じ。`--api-key key1,key2` も同じ）。
   空の API キーを指定すると、server は起動しません（認証を切ることになるためです）。
+  キーなしでネットワークに出すのを選ぶときは、`"api_key": "none"`（または `--no-api-key`）と書きます。server は起動し、キーのない警告を 1 度出します（MCP のツールがあれば、ツールがこの PC のファイルを読み書きできることも）。
   ストリーミングの答えには `X-Accel-Buffering: no` を付けるので、nginx のようなプロキシも 1 トークンずつ渡します。
   ウェブの画面の設定と MCP のツールは、XeStrata 自身のページにだけ答えます。
   アドレスの違うプロキシやトンネルから開くときは、そのアドレスを足します（例: `"trusted_origins": ["https://strata.example.com"]`）。

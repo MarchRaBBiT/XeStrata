@@ -831,6 +831,7 @@ on easy questions all three think briefly, on hard ones `high` thinks longest an
   add `"api_key": "some-long-secret"` to `xestrata-<model>.json` (or set the `STRATA_API_KEY` environment variable); clients then send it as their API key.
   Several keys, separated by commas, are all accepted (`"key1,key2"`, as llama.cpp does; `--api-key key1,key2` likewise).
   An API key that is given but empty refuses to start the server (it would switch authentication off).
+  To serve on the network without a key on purpose, write `"api_key": "none"` (or pass `--no-api-key`): the server starts and warns once that it has no key (and, with MCP tools, that the tools can read and change files on this PC).
   Streamed answers carry `X-Accel-Buffering: no`, so nginx-style proxies pass each token on at once.
   The web app's settings and MCP tools only answer XeStrata's own page.
   When you open it through a proxy or tunnel whose address differs, add that address, e.g. `"trusted_origins": ["https://strata.example.com"]`.
