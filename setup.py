@@ -3678,10 +3678,24 @@ def has_data(folder: Path) -> bool:
     return False
 
 
+def in_trash(path: str | os.PathLike) -> bool:
+    """#3410: True when ``path`` is inside a Trash / Recycle Bin folder (a Strata folder that was deleted with the file
+    manager is still a folder there, and was remembered as an install): ~/.local/share/Trash/files/.., /.Trash-1000/..,
+    ~/.Trash/.., $RECYCLE.BIN\\.."""
+    # a Windows-shaped path read on Linux has no separators for Path
+    parts = [x.lower() for p in Path(path).parts for x in str(p).split("\\")]
+    for i, x in enumerate(parts):
+        if x in (".trash", "$recycle.bin", "recycler", "$recycle.bin.old") or x.startswith(".trash-"):
+            return True
+        if x == "trash" and i + 1 < len(parts) and parts[i + 1] in ("files", "info", "expunged"):
+            return True                                  # the XDG Trash: ~/.local/share/Trash/files
+    return False
+
+
 def other_installs(settings: dict) -> list:
     """Strata folders besides this one that may hold model files: the ones this user ran before, and Strata* folders
     next to this one (a zip unpacked again lands in e.g. `Strata-main (1)\\Strata-main`)."""
-    cands = [Path(p) for p in settings.get("installs", [])]
+    cands = [Path(p) for p in settings.get("installs", []) if not in_trash(p)]
     for base in dict.fromkeys((ROOT.parent, ROOT.parent.parent)):
         try:
             for d in base.iterdir():
@@ -3852,7 +3866,7 @@ def data_folder(requested: str | None, move: bool = False, yes: bool = True, set
             ok(f"model files from {folder} moved to {dest} (a new copy of Strata finds them there)")
     # the Strata folders this user ran (a package's folder holds no model files or configs: not one of them)
     installs = [*([] if PACKAGED else [str(ROOT)])] + \
-        [p for p in settings.get("installs", []) if p != str(ROOT) and Path(p).is_dir()]
+        [p for p in settings.get("installs", []) if p != str(ROOT) and Path(p).is_dir() and not in_trash(p)]
     save_settings({**settings, "data_dir": str(dest), "installs": installs[:20]})
     return dest, elsewhere
 
