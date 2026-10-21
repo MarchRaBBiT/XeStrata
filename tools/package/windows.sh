@@ -5,8 +5,8 @@
 # container, with the commit's files in /src, /out for the 7z and /cache for the downloads kept between builds (xwin's
 # and NuGet's).  Everything is built here, on Linux, for Windows (docs/DEVTOOLS.md#windows-cross-build): intel/llvm's
 # contrib toolchain (whose tools the next step runs), intel/llvm's SYCL runtime for Windows, the engine (the
-# contrib-llvm mode: Intel's GPUs through Level Zero, NVIDIA's through CUDA, AMD's through HIP; oneMath with its oneMKL
-# backend, which runs where the user installed oneMKL), the
+# contrib-llvm mode: Intel's GPUs through Level Zero, NVIDIA's through CUDA, AMD's through HIP; oneMath with its oneMKL,
+# cuBLAS and rocBLAS backends, which run where the user installed oneMKL, cuBLAS and rocBLAS), the
 # launchers (windows/launcher, .NET), and Python's embeddable distribution with the packages setup.py uses;
 # tools/package/windows_bundle.py makes the folder, its notices and the 7z.
 set -eu
@@ -29,11 +29,13 @@ apt-get update -q
 # beside them, which llvm-rc preprocesses with (oneDNN's version resource);
 # nvidia-cuda-toolkit: CUDA 12.4, for intel/llvm's CUDA target and the engine's NVIDIA code (not free software);
 # dotnet-sdk-10.0 for the launchers; ROCm's HIP (free software) for intel/llvm's HIP target and the Windows HIP
-# adapter's headers, and the device libraries the AMD code links (as container.sh); python3-venv and patch for
+# adapter's headers, and the device libraries the AMD code links (as container.sh), with rocBLAS's and hipBLASLt's
+# headers and libraries (tools/package/win_rocm.sh); python3-venv and patch for
 # aotriton's build (its configure makes a venv for its code generator, and XeStrata's patch goes onto its source)
 apt-get install -y -q --no-install-recommends git cmake ninja-build g++ libhwloc-dev libzstd-dev python3 python3-pip \
   python3-venv curl ca-certificates unzip ccache lld lld-21 llvm-21 clang-21 dotnet-sdk-10.0 7zip nvidia-cuda-toolkit \
-  opencl-headers patch xz-utils libamdhip64-dev rocm-device-libs-21
+  opencl-headers patch xz-utils libamdhip64-dev rocm-device-libs-21 librocblas-dev libhipblaslt-dev \
+  libhipblas-common-dev
 cuda_path=/usr/lib/cuda
 # cuDNN's headers (the same on Windows), for the image engine's attention, which opens cuDNN where the user installed
 # it (cudnn64_9.dll): from NVIDIA's redistributable archive, its SHA-256 checked, kept in /cache
@@ -57,6 +59,9 @@ cuda_lib cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.4.127-archive.
 cuda_lib libcublas/windows-x86_64/libcublas-windows-x86_64-12.4.5.8-archive.zip \
   698140f12da055a3709eee2e022fcfe7bc8edf31f30115e3f7a5c877a9491de5
 for l in cublas cudart cuda; do [ -f "/build/cudalib/$l.lib" ] || { echo "no $l.lib" >&2; exit 1; }; done
+# Windows' import libraries and the headers for rocBLAS and hipBLASLt (oneMath's rocBLAS backend, which loads them
+# where the user installed them)
+sh "$src/tools/package/win_rocm.sh" /build/rocmwin
 
 # build.sh's compiler cache, shared with the Ubuntu packages (container.sh)
 if [ -n "${CCACHE_DIR:-}" ]; then
@@ -114,7 +119,7 @@ cmake -G Ninja -S "$src" -B /build/engine -DCMAKE_BUILD_TYPE=Release \
   -DSTRATA_XWIN=/build/xwin -DSTRATA_SYCL_WINDOWS="$sycl" -DSTRATA_CUDA_ARCHS="$archs" -DSTRATA_CUDA_PATH="$cuda_path" \
   -DSTRATA_CUDA_PTX= -DSTRATA_ONEMKL=ON -DMKL_ROOT=/build/mkl -DSTRATA_HIP_ARCHS="$hip_archs" -DSTRATA_ENABLE_XE=ON \
   -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_BUILD_TESTS=OFF -DSTRATA_PORTABLE=ON -DSTRATA_GGML_DIR="$llama" \
-  -DSTRATA_CUDNN_ROOT=/opt/cudnn -DSTRATA_CUDA_WINDOWS_LIBS=/build/cudalib
+  -DSTRATA_CUDNN_ROOT=/opt/cudnn -DSTRATA_CUDA_WINDOWS_LIBS=/build/cudalib -DSTRATA_ROCM_WINDOWS_LIBS=/build/rocmwin
 cmake --build /build/engine --target strata strata-device strata-image onemath_backend_libs -j "$jobs"
 # the image encoder on the CPU (tools/vision, llama.cpp's mtmd), with the same toolchain (#24: the config pointed to
 # it and the package had none); the Vulkan one is Linux's only
@@ -145,8 +150,8 @@ version=$(sed -n 's/^set(STRATA_UPSTREAM_VERSION "\(.*\)")$/\1/p' "$src/CMakeLis
   's/^set(XESTRATA_REVISION \([0-9]*\))$/\1/p' "$src/CMakeLists.txt")
 python3 "$src/tools/package/windows_bundle.py" --src "$src" --engine /build/engine --sycl "$sycl" \
   --launcher /build/launcher --nuget /cache/nuget --python-zip "/build/python-$python_ver-embed-amd64.zip" \
-  --wheels /build/wheels --llama "$llama" --version "$version" --cuda-archs "$archs" --hip-archs "$hip_archs" \
-  --out /build/out
+  --wheels /build/wheels --llama "$llama" --rocm /build/rocmwin --version "$version" --cuda-archs "$archs" \
+  --hip-archs "$hip_archs" --out /build/out
 cp /build/out/*.7z /out/
 
 {

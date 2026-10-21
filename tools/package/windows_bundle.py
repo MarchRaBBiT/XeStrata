@@ -35,7 +35,7 @@ SYCL_DLLS = ("sycl9.dll", "ur_win_proxy_loader.dll", "ur_loader.dll", "ur_adapte
              "ur_adapter_level_zero.dll", "ur_adapter_level_zero_v2.dll", "xptifw.dll")
 ENGINE_EXES = ("strata.exe", "strata-device.exe", "strata-image.exe", "strata-vision-cpu.exe")
 # oneMath and its oneMKL backend (the engine's build folder's bin/), which loads oneMKL where the user installed it
-ONEMATH_DLLS = ("onemath.dll", "onemath_blas_mklgpu.dll", "onemath_blas_cublas.dll")
+ONEMATH_DLLS = ("onemath.dll", "onemath_blas_mklgpu.dll", "onemath_blas_cublas.dll", "onemath_blas_rocblas.dll")
 # AMD GPUs' image attention: the engine's module that opens aotriton (on an AMD GPU only), aotriton's library (built
 # in the engine's build, liblzma linked in) and its kernels' images, which it finds beside it
 AOTRITON_DLLS = ("strata_sdpa_aotriton.dll", "aotriton_v2.dll")
@@ -43,7 +43,8 @@ AOTRITON_DLLS = ("strata_sdpa_aotriton.dll", "aotriton_v2.dll")
 ONEDNN_DLLS = ("dnnl.dll",)
 # what a Windows PC brings (the Visual C++ runtime, which xestrata.exe checks for) and what must never be carried
 FORBIDDEN = ("vcruntime*.dll", "msvcp*.dll", "concrt*.dll", "ucrtbase*.dll", "api-ms-win-*.dll", "nvcuda.dll",
-             "nvml.dll", "cublas*.dll", "cudart*.dll", "mkl_*.dll", "amdhip64*.dll", "amd_comgr*.dll")
+             "nvml.dll", "cublas*.dll", "cudart*.dll", "mkl_*.dll", "amdhip64*.dll", "amd_comgr*.dll", "rocblas*.dll",
+             "*hipblaslt*.dll")
 # the Python packages the 7z carries (requirements.txt, and colorama, which tqdm takes on
 # Windows): a wheel not named here stops the script
 WHEELS = ("numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "pillow", "psutil", "markupsafe", "certifi",
@@ -57,6 +58,9 @@ COMPONENTS = [
           *(f"app/engine/{e}" for e in ENGINE_EXES)]),
     ("oneMath (XeStrata's fork)", "onemath", "Apache-2.0", "https://github.com/MistVVK/oneMath", ["onemath:LICENSE"],
      [f"app/engine/{d}" for d in ONEMATH_DLLS]),
+    ("rocBLAS's, hipBLASLt's and hipblas-common's headers (compiled into onemath_blas_rocblas.dll)",
+     "ROCm 7.1 (Ubuntu 26.04's)", "MIT",
+     "https://github.com/ROCm/rocm-libraries", ["rocm:LICENSE-*.txt"], []),
     ("intel/llvm (DPC++) SYCL runtime, with Unified Runtime, UMF and hwloc", "intel-llvm",
      "Apache-2.0 WITH LLVM-exception; UMF Apache-2.0 WITH LLVM-exception; hwloc BSD-3-Clause; Level Zero loader "
      "headers MIT; AMD's HIP headers MIT", "https://github.com/intel/llvm", ["sycl:licenses/*"],
@@ -161,7 +165,7 @@ def unbundle_runtime(site: Path) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    for name in ("src", "engine", "sycl", "launcher", "nuget", "wheels", "llama", "out"):
+    for name in ("src", "engine", "sycl", "launcher", "nuget", "wheels", "llama", "rocm", "out"):
         ap.add_argument(f"--{name}", type=Path, required=True)
     ap.add_argument("--python-zip", type=Path, required=True)
     ap.add_argument("--version", required=True)
@@ -249,7 +253,7 @@ def main() -> None:
     for pkg in ("avalonia", "avalonia.angle.windows.natives", "skiasharp", "harfbuzzsharp", "fsharp.core",
                 "microcom.runtime", "tmds.dbus.protocol"):
         versions[pkg] = nuget_version(a.nuget, pkg)
-    roots = {"sycl": a.sycl, "python": py, "llama": a.llama, "src": a.src, "nuget": a.nuget,
+    roots = {"sycl": a.sycl, "python": py, "llama": a.llama, "src": a.src, "nuget": a.nuget, "rocm": a.rocm,
              "onemath": a.engine / "_deps" / "strata_onemath-src"}
     rows = []
     covered: set = set()
