@@ -218,6 +218,22 @@ int dit(const std::string& path, const std::string& dir, bool q8, const std::str
         for (size_t i = 0; i < (size_t) (HW * Cl); ++i) o[i] = o[HW * Cl + i] + cfg * (o[i] - o[HW * Cl + i]);
     const auto v0 = npy<float>(dir + "/v0.npy");
     compare("v0", o.data(), v0.data(), v0.size());
+    // each later step's velocity from the reference's own latent there (its noise and velocities before), so a step's
+    // error is not the sum of those before it
+    std::vector<float> xr = xt;
+    for (size_t k = 1; k + 1 < sig.size(); ++k) {
+        const auto vp = npy<float>(dir + "/v" + std::to_string(k - 1) + ".npy");
+        for (size_t i = 0; i < xr.size(); ++i) xr[i] += (sig[k] - sig[k - 1]) * vp[i];
+        strata::gpu::copy(x, xr.data(), xr.size() * 4);
+        d.forward(x, sig[k], h, w, n, out);
+        strata::gpu::stream_sync(s);
+        o = fetch(out, (size_t) (n * HW * Cl));
+        if (n == 2)
+            for (size_t i = 0; i < (size_t) (HW * Cl); ++i) o[i] = o[HW * Cl + i] + cfg * (o[i] - o[HW * Cl + i]);
+        const auto vk = npy<float>(dir + "/v" + std::to_string(k) + ".npy");
+        compare(("v" + std::to_string(k)).c_str(), o.data(), vk.data(), vk.size());
+    }
+    strata::gpu::copy(x, xt.data(), xt.size() * 4);
     std::vector<float> sigmas(sig.begin(), sig.end());
     t0 = std::chrono::steady_clock::now();
     d.sample(x, h, w, sigmas, cfg);
