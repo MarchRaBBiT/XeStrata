@@ -5111,9 +5111,13 @@ def setup_plain(a, family: str, fam: dict, gpu: dict, chosen: list, sel: list, f
                 break
     gguf = models_dir / names_of[0]
     have = all_there(models_dir)
-    if not have and free_gb(models_dir) < d["size"] / 1e9 + 1:
-        fail(f"not enough free disk space in {models_dir}: need ~{d['size'] / 1e9 + 1:.0f} GB",
+    left = 0 if have else d["size"] / 1e9
+    if left and free_gb(models_dir) < left:
+        fail(f"not enough free disk space in {models_dir}: need ~{left:.0f} GB, {free_gb(models_dir):.0f} GB free",
              "use --models-dir on a bigger drive")
+    if left and free_gb(models_dir) < left + 1:
+        warn(f"little free disk space in {models_dir}: {free_gb(models_dir):.1f} GB free for about {left:.1f} GB. "
+             "Setup goes on and should fit")
 
     llama, eng, enc, lib_dirs = prepare_engine(a, gpu, "none")
 
@@ -6014,9 +6018,16 @@ def main() -> int:
     pack_bin = (pack_now / "experts.bin").exists() and (pack_now / "index.txt").exists()
     mtp_have = find_in(roots, "mtp/rt/experts.bin") is not None
     q2_avx = model == "Q2_0" and avx512 and family == "qwen"
-    need = to_fetch + (2 if mtp_have else 8) + (40 if q2_avx and not pack_bin else 0) + (1 if vision != "none" else 0)
-    if free_gb(models_dir) < need:
-        fail(f"not enough free disk space in {models_dir}: need ~{need:.0f} GB", "use --models-dir on a bigger drive")
+    margin = 2 if mtp_have else 8                      # working room: a guess, not bytes that will be written
+    real = to_fetch + (40 if q2_avx and not pack_bin else 0) + (1 if vision != "none" else 0)
+    need = real + margin
+    free_now = free_gb(models_dir)
+    if free_now < real:                                # upstream 537f8fef8: stop only when the bytes do not fit
+        fail(f"not enough free disk space in {models_dir}: need ~{real:.0f} GB, {free_now:.0f} GB free",
+             "use --models-dir on a bigger drive")
+    if free_now < need:
+        warn(f"little free disk space in {models_dir}: {free_now:.0f} GB free for about {real:.0f} GB of files. "
+             "Setup goes on and should fit; free up space if it stops")
 
     llama, eng, enc, lib_dirs = prepare_engine(a, gpu, vision)
     # #24: a package takes only the image encoders it carries (the Windows 7z has the CPU one, no Vulkan one)
