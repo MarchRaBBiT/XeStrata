@@ -753,13 +753,14 @@ if(STRATA_ENABLE_XE)
     endif()
   endif()
   # NVIDIA GPUs (contrib-llvm): cuDNN's SDPA through cudnn-frontend (Apache-2.0, header-only, the tag pinned here),
-  # which opens cuDNN at run time (libcudnn.so.9: the user's installation, not free software; without it the engine's
-  # own kernel).  cuDNN's headers (cudnn.h) are found under STRATA_CUDNN_ROOT, CUDNN_PATH or the CUDA toolkit's folder;
-  # the build goes on without them.
+  # which opens cuDNN at run time (libcudnn.so.9, cudnn64_9.dll: the user's installation, not free software; without
+  # it the engine's own kernel).  cuDNN's headers (cudnn.h, the same for Linux and Windows) are found under
+  # STRATA_CUDNN_ROOT, CUDNN_PATH or the CUDA toolkit's folder, outside a cross build's roots too; the build goes on
+  # without them.
   set(STRATA_CUDNN_ROOT "" CACHE PATH "cuDNN's folder (its include/cudnn.h), for the image attention on NVIDIA GPUs")
-  if(_strata_cuda_archs AND STRATA_LICENSE STREQUAL "contrib" AND NOT WIN32)
-    find_path(_strata_cudnn_inc cudnn.h NO_CACHE HINTS "${STRATA_CUDNN_ROOT}/include" "$ENV{CUDNN_PATH}/include"
-              "${_strata_cuda_root}/include")
+  if(_strata_cuda_archs AND STRATA_LICENSE STREQUAL "contrib")
+    find_path(_strata_cudnn_inc cudnn.h NO_CACHE NO_CMAKE_FIND_ROOT_PATH
+              HINTS "${STRATA_CUDNN_ROOT}/include" "$ENV{CUDNN_PATH}/include" "${_strata_cuda_root}/include")
     if(_strata_cudnn_inc)
       include(FetchContent)
       FetchContent_Populate(strata_cudnn_fe QUIET

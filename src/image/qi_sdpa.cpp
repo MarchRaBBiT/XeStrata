@@ -5,7 +5,7 @@
 // (the query rows, the key rows) and kept:
 //   * Intel GPUs: oneDNN's SDPA through its graph API (Q . K^T, the scale, the softmax, . V fused into one partition);
 //   * NVIDIA GPUs (contrib-llvm): cuDNN's SDPA through cudnn-frontend, cuDNN opened at the first attention
-//     (libcudnn.so.9, or STRATA_CUDNN_LIB: the user's installation, not free software), on the queue's CUDA stream;
+//     (the user's installation, not free software: open_cudnn), on the queue's CUDA stream;
 //   * AMD GPUs: aotriton's flash attention (MIT; its library and its kernels' images beside the engine), on the
 //     queue's HIP stream.
 // A GPU or a build without one, or a failure, leaves it to the engine's own kernel.
@@ -17,12 +17,19 @@
 #include <sycl/sycl.hpp>
 
 #if STRATA_CUDNN
-#include <cudnn_frontend.h>
-#include <dlfcn.h>
+#include <cudnn_frontend.h>   // with its dynamic loading: windows.h on Windows
 #include <sycl/backend/cuda.hpp>
+#if defined(_WIN32)
+#include <filesystem>
 namespace cudnn_frontend {
-void* cudnn_dlhandle = nullptr;   // cudnn_frontend_shim.h's: libcudnn opened at the first attention
+HMODULE cudnn_dlhandle = nullptr;   // cudnn_frontend_shim.h's: cuDNN opened at the first attention
 }
+#else
+#include <dlfcn.h>
+namespace cudnn_frontend {
+void* cudnn_dlhandle = nullptr;
+}
+#endif
 #endif
 
 #if STRATA_AOTRITON
@@ -36,11 +43,14 @@ void* cudnn_dlhandle = nullptr;   // cudnn_frontend_shim.h's: libcudnn opened at
 #include <oneapi/dnnl/dnnl_sycl.hpp>
 #endif
 
+#include <algorithm>
 #include <cmath>
+#include <functional>
 #include <cstdio>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
@@ -150,21 +160,68 @@ std::shared_ptr<fe::graph::Graph> cudnn_graph(cudnnHandle_t handle, int64_t rows
     return g;
 }
 
+// cuDNN's library opened and a handle made: STRATA_CUDNN_LIB, else the system's (libcudnn.so.9; on Windows
+// cudnn64_9.dll on the PATH, then NVIDIA's installer's folders, newest first, then the one pip put in the Python the 7z
+// carries, nvidia-cudnn-cu12), the first that makes a handle
+void open_cudnn(cudnnHandle_t& handle) {
+    if (fe::cudnn_dlhandle != nullptr) {
+        if (fe::detail::create_handle(&handle) != CUDNN_STATUS_SUCCESS) throw std::runtime_error("cudnnCreate failed");
+        return;
+    }
+    std::vector<std::string> libs;
+    if (const char* lib = std::getenv("STRATA_CUDNN_LIB")) libs.emplace_back(lib);
+#if defined(_WIN32)
+    namespace fs = std::filesystem;
+    libs.emplace_back("cudnn64_9.dll");
+    std::error_code ec;
+    std::vector<fs::path> found;
+    const char* pf = std::getenv("ProgramFiles");
+    const fs::path root = fs::path(pf != nullptr ? pf : "C:\\Program Files") / "NVIDIA" / "CUDNN";
+    for (const auto& v : fs::directory_iterator(root, ec))
+        for (const auto& b : fs::recursive_directory_iterator(v.path() / "bin", ec))
+            if (b.path().filename() == "cudnn64_9.dll") found.push_back(b.path());
+    std::sort(found.begin(), found.end(), std::greater<>());
+    for (const auto& f : found) libs.push_back(f.string());
+    char exe[MAX_PATH] = {};
+    if (GetModuleFileNameA(nullptr, exe, MAX_PATH) > 0) {
+        // <7z>\app\engine\strata-image.exe beside <7z>\python
+        const fs::path pip = fs::path(exe).parent_path().parent_path().parent_path() / "python" / "Lib" /
+                             "site-packages" / "nvidia" / "cudnn" / "bin" / "cudnn64_9.dll";
+        if (fs::exists(pip, ec)) libs.push_back(pip.string());
+    }
+#else
+    libs.emplace_back("libcudnn.so.9");
+#endif
+    std::string why = "cuDNN is not installed";
+    for (const std::string& lib : libs) {
+#if defined(_WIN32)
+        // its other DLLs beside it
+        HMODULE h = LoadLibraryExA(lib.c_str(), nullptr, lib.find('\\') != std::string::npos ?
+                                                             LOAD_WITH_ALTERED_SEARCH_PATH : 0);
+#else
+        void* h = dlopen(lib.c_str(), RTLD_NOW | RTLD_GLOBAL);
+#endif
+        if (h == nullptr) continue;
+        fe::cudnn_dlhandle = h;
+        if (fe::detail::create_handle(&handle) == CUDNN_STATUS_SUCCESS) return;
+        why = lib + ": cudnnCreate failed";
+#if defined(_WIN32)
+        FreeLibrary(h);
+#else
+        dlclose(h);
+#endif
+        fe::cudnn_dlhandle = nullptr;
+    }
+    throw std::runtime_error(why);
+}
+
 bool cudnn_sdpa(sycl::queue& q, const uint16_t* q16, const uint16_t* k16, const uint16_t* v16, int64_t q0, int64_t q1,
                 int64_t T, int64_t heads, int64_t hd, uint16_t* out16) {
     std::lock_guard<std::mutex> lock(g_mu);
     Cudnn& d = g_cudnn[q.get_device()];
     if (d.failed) return false;
     try {
-        if (d.handle == nullptr) {
-            if (fe::cudnn_dlhandle == nullptr) {
-                const char* lib = std::getenv("STRATA_CUDNN_LIB");
-                fe::cudnn_dlhandle = dlopen(lib != nullptr ? lib : "libcudnn.so.9", RTLD_NOW | RTLD_GLOBAL);
-                if (fe::cudnn_dlhandle == nullptr) throw std::runtime_error("libcudnn.so.9 is not installed");
-            }
-            if (fe::detail::create_handle(&d.handle) != CUDNN_STATUS_SUCCESS)
-                throw std::runtime_error("cudnnCreate failed");
-        }
+        if (d.handle == nullptr) open_cudnn(d.handle);
         const CUstream cs = sycl::get_native<sycl::backend::ext_oneapi_cuda>(q);
         if (fe::detail::set_stream(d.handle, cs) != CUDNN_STATUS_SUCCESS) throw std::runtime_error("cudnnSetStream");
         const auto key = std::make_tuple(q1 - q0, T, heads, hd);

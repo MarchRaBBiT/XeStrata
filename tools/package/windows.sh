@@ -33,6 +33,14 @@ apt-get install -y -q --no-install-recommends git cmake ninja-build g++ libhwloc
   curl ca-certificates unzip ccache lld lld-21 llvm-21 dotnet-sdk-10.0 7zip nvidia-cuda-toolkit opencl-headers \
   libamdhip64-dev rocm-device-libs-21
 cuda_path=/usr/lib/cuda
+# cuDNN's headers (the same on Windows), for the image engine's attention, which opens cuDNN where the user installed
+# it (cudnn64_9.dll): from NVIDIA's redistributable archive, its SHA-256 checked, kept in /cache
+cudnn_tar="cudnn-linux-x86_64-9.27.0.42_cuda12-archive.tar.xz"
+[ -f "/cache/$cudnn_tar" ] || curl -fsSL -o "/cache/$cudnn_tar" \
+  "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/$cudnn_tar"
+echo "dc45f8c5fd44955c6e950c690ea92c28ea848ffb1fefbaabf3a9d175d961263a  /cache/$cudnn_tar" | sha256sum -c -
+mkdir -p /opt/cudnn
+tar -xJf "/cache/$cudnn_tar" -C /opt/cudnn --strip-components=1 --wildcards '*/include/*'
 
 # build.sh's compiler cache, shared with the Ubuntu packages (container.sh)
 if [ -n "${CCACHE_DIR:-}" ]; then
@@ -90,7 +98,8 @@ cmake -G Ninja -S "$src" -B /build/engine -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CXX_COMPILER="$src/.tools/intel-llvm-contrib/install/bin/clang++" -DSTRATA_LICENSE=contrib \
   -DSTRATA_XWIN=/build/xwin -DSTRATA_SYCL_WINDOWS="$sycl" -DSTRATA_CUDA_ARCHS="$archs" -DSTRATA_CUDA_PATH="$cuda_path" \
   -DSTRATA_CUDA_PTX= -DSTRATA_ONEMKL=ON -DMKL_ROOT=/build/mkl -DSTRATA_HIP_ARCHS="$hip_archs" -DSTRATA_ENABLE_XE=ON \
-  -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_BUILD_TESTS=OFF -DSTRATA_PORTABLE=ON -DSTRATA_GGML_DIR="$llama"
+  -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_BUILD_TESTS=OFF -DSTRATA_PORTABLE=ON -DSTRATA_GGML_DIR="$llama" \
+  -DSTRATA_CUDNN_ROOT=/opt/cudnn
 cmake --build /build/engine --target strata strata-device strata-image onemath_backend_libs -j "$jobs"
 # the image encoder on the CPU (tools/vision, llama.cpp's mtmd), with the same toolchain (#24: the config pointed to
 # it and the package had none); the Vulkan one is Linux's only
