@@ -52,6 +52,7 @@ struct Trial {
 struct Backend {
     bool blas = !env_on("STRATA_NO_BLAS");
     bool bf16 = !strata::kernels::no_bf16_mma();
+    int i8 = -1;   // whether the backend takes int8 products (Gemm::i8_usable's trial; -1 before it)
     std::shared_future<Trial> ready;   // Gemm::prepare's trial, until it is settled
 };
 std::mutex g_mutex;
@@ -343,6 +344,64 @@ void Gemm::f16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64_
         strata::kernels::xmx_gemm(XmxType::f16, X, W, Y, T, N, K, ldy, stream_);
     else
         strata::kernels::gemm_rows(XmxType::f16, X, W, Y, T, N, K, ldy, stream_);
+}
+
+bool Gemm::i8_usable(void* stream) {
+#if STRATA_ONEMATH
+    sycl::queue& q = core::Runtime::get().stream(stream);
+    const Backend b = backend(q.get_device());
+    if (!b.blas) return false;
+    if (b.i8 >= 0) return b.i8 != 0;
+    // a small product on a queue of its own, so that an error the backend reports afterwards is caught here: a backend
+    // without int8 products (XeStrata's oneMath before xestrata-5: rocBLAS's and cuBLAS's) throws at the call
+    constexpr int64_t n = 64;
+    auto failed = std::make_shared<bool>(false);
+    sycl::queue t(q.get_context(), q.get_device(),
+                  [failed](const sycl::exception_list& l) { *failed = *failed || l.size() > 0; },
+                  sycl::property::queue::in_order{});
+    auto* x = sycl::malloc_device<int8_t>(2 * n * n, t);
+    auto* y = sycl::malloc_device<int32_t>(n * n, t);
+    bool ok = x != nullptr && y != nullptr;
+    if (ok) {
+        try {
+            t.fill<int8_t>(x, 1, 2 * n * n);
+            namespace om = oneapi::math;
+            om::blas::column_major::gemm_batch(t, om::transpose::trans, om::transpose::nontrans, n, n, n, 1.0f, x, n,
+                                               n * n, x + n * n, n, n * n, 0.0f, y, n, n * n, 1);
+            t.wait_and_throw();
+            int32_t v = 0;
+            t.memcpy(&v, y, sizeof v).wait();
+            ok = !*failed && v == n;
+        } catch (const std::exception&) {
+            ok = false;
+        }
+    }
+    t.wait();
+    if (x != nullptr) sycl::free(x, t);
+    if (y != nullptr) sycl::free(y, t);
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_backends[q.get_device()].i8 = ok ? 1 : 0;
+    return ok;
+#else
+    (void) stream;
+    return false;
+#endif
+}
+
+void Gemm::i8(const int8_t* X, const int8_t* W, int32_t* Y, int64_t T, int64_t N, int64_t K, int64_t ldy,
+              void* stream) {
+#if STRATA_ONEMATH
+    if (T <= 0 || N <= 0) return;
+    namespace om = oneapi::math;
+    if (ldy <= 0) ldy = N;
+    // one product of a batch (gemm_batch: oneMath's int8 product), the strides those of a whole matrix (oneMKL checks
+    // them even for one)
+    om::blas::column_major::gemm_batch(core::Runtime::get().stream(stream), om::transpose::trans,
+                                       om::transpose::nontrans, N, T, K, 1.0f, W, K, N * K, X, K, T * K, 0.0f, Y, ldy,
+                                       ldy * T, 1);
+#else
+    (void) X; (void) W; (void) Y; (void) T; (void) N; (void) K; (void) ldy; (void) stream;
+#endif
 }
 
 bool Gemm::f16_groups(const uint16_t* X, const uint16_t* W, int64_t w_stride, float* Y, const int32_t* bounds, int G,
