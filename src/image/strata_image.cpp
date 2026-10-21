@@ -5,10 +5,13 @@
 //   strata-image --dit DIT.gguf --vae VAE.safetensors --text TEXT_ENCODER.gguf [--vision MMPROJ.gguf]
 //                [--budget-mib M] (--ids 1,2,3 [--drop N] [--width W] [--height H] [--seed S] [--sigmas 1,...,0]
 //                [--ref IMAGE]... [--mask IMAGE] [--repeat N] --out IMAGE.rgba | --serve)
-//   strata-image --dit DIT.safetensors ... [--dit-q8 0|1]
+//   strata-image --dit DIT.safetensors ... [--dit-q8 0|1] [--edit-dit EDIT_DIT.safetensors --vision MMPROJ.gguf]
+//                [--dit-keep 0|1]
 //
 // The DiT's file says the model: a GGUF is Qwen-Image-2.1's, a safetensors file Mage-Flow's (its bf16 weights as
-// Comfy-Org has them; --dit-q8 1, the default, quantizes its blocks to Q8_0 as they are read).
+// Comfy-Org has them; --dit-q8 1, the default, quantizes its blocks to Q8_0 as they are read).  Mage-Flow's edits take
+// its edit DiT (--edit-dit) and Qwen3-VL-4B's mmproj (--vision), up to three --ref; --dit-keep 1, the default, keeps the
+// DiT not in use in RAM between a generation and an edit (0: read from its file again).
 //
 // One image: --ids, the prompt in the model's chat form, tokenized (the server's tokenizer); --drop, the leading ids of
 // the system turn; --budget-mib, the VRAM the engine may take (default: the free VRAM); --repeat, the image again N
@@ -288,7 +291,8 @@ int main(int argc, char** argv) {
         si::QiRequest r;
         uint64_t budget = 0;
         int repeat = 1;
-        bool serving = false, dit_q8 = true;
+        std::string edit_dit;
+        bool serving = false, dit_q8 = true, dit_keep = true;
         for (int i = 1; i < argc; ++i) {
             const std::string a = argv[i];
             auto val = [&]() -> std::string {
@@ -314,12 +318,15 @@ int main(int argc, char** argv) {
             else if (a == "--repeat") repeat = std::stoi(val());
             else if (a == "--serve") serving = true;
             else if (a == "--dit-q8") dit_q8 = val() != "0";
+            else if (a == "--edit-dit") edit_dit = val();
+            else if (a == "--dit-keep") dit_keep = val() != "0";
             else throw std::invalid_argument("unknown option " + a);
         }
         if (dit.empty() || vae.empty() || text.empty() || (!serving && (out.empty() || ids.empty()))) {
             std::fprintf(stderr, "usage: %s --dit F --vae F --text F [--vision F] [--budget-mib M] (--ids 1,2,3 "
                          "[--drop N] [--width W] [--height H] [--seed S] [--sigmas 1,...,0] [--ref IMAGE]... "
-                         "[--mask IMAGE] [--repeat N] --out IMAGE.rgba | --serve) [--dit-q8 0|1]\n", argv[0]);
+                         "[--mask IMAGE] [--repeat N] --out IMAGE.rgba | --serve) [--dit-q8 0|1] [--edit-dit F] "
+                         "[--dit-keep 0|1]\n", argv[0]);
             return 2;
         }
         std::unique_ptr<si::ImagePipeline> pipe;
@@ -327,7 +334,7 @@ int main(int argc, char** argv) {
         const bool mage = dit.size() > 12 && dit.compare(dit.size() - 12, 12, ".safetensors") == 0;
         if (mage) {
             auto m = std::make_unique<si::MfPipeline>();
-            if (!m->open(dit, vae, text, err, dit_q8)) throw std::runtime_error(err);
+            if (!m->open(dit, vae, text, err, dit_q8, edit_dit, vision, dit_keep)) throw std::runtime_error(err);
             pipe = std::move(m);
         } else {
             auto q = std::make_unique<si::QiPipeline>();
