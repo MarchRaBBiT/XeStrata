@@ -64,6 +64,11 @@ SPDX-FileCopyrightText = "Intel Corporation and the oneDNN contributors"
 SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
+path = ["third_party/main/cudnn-frontend/LICENSE.txt"]
+SPDX-FileCopyrightText = "NVIDIA CORPORATION & AFFILIATES"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
 path = ["third_party/main/intel-llvm/LICENSE.TXT"]
 SPDX-FileCopyrightText = "The LLVM project contributors"
 SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"

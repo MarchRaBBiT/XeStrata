@@ -1,16 +1,27 @@
 // SPDX-FileCopyrightText: 2026 MistVVK and the XeStrata contributors
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // src/image/qi_sdpa.cpp - see include/strata/image/qi_kernels.hpp (qi_sdpa): the image attention's unmasked rows through
-// a GPU maker's kernel.  Intel GPUs: oneDNN's SDPA through its graph API (Q . K^T, the scale, the softmax, . V fused into
-// one partition), the tensors' strides the engine's [rows][heads * head_dim] as they are.  A partition is compiled once a
-// shape (the query rows, the key rows) and kept.  A GPU or a build without one, or a failure, leaves it to the engine's
-// own kernel.
+// a GPU maker's kernel, the tensors' strides the engine's [rows][heads * head_dim] as they are, a plan built once a shape
+// (the query rows, the key rows) and kept:
+//   * Intel GPUs: oneDNN's SDPA through its graph API (Q . K^T, the scale, the softmax, . V fused into one partition);
+//   * NVIDIA GPUs (contrib-llvm): cuDNN's SDPA through cudnn-frontend, cuDNN opened at the first attention
+//     (libcudnn.so.9, or STRATA_CUDNN_LIB: the user's installation, not free software), on the queue's CUDA stream.
+// A GPU or a build without one, or a failure, leaves it to the engine's own kernel.
 
 #include "strata/image/qi_kernels.hpp"
 
 #include "strata/core/runtime.hpp"
 
 #include <sycl/sycl.hpp>
+
+#if STRATA_CUDNN
+#include <cudnn_frontend.h>
+#include <dlfcn.h>
+#include <sycl/backend/cuda.hpp>
+namespace cudnn_frontend {
+void* cudnn_dlhandle = nullptr;   // cudnn_frontend_shim.h's: libcudnn opened at the first attention
+}
+#endif
 
 #if STRATA_ONEDNN
 #include <oneapi/dnnl/dnnl_graph.hpp>
@@ -28,6 +39,10 @@
 #include <vector>
 
 namespace strata::image {
+
+namespace {
+[[maybe_unused]] std::mutex g_mu;   // the vendors' state, a device each
+}
 
 #if STRATA_ONEDNN
 namespace {
@@ -51,7 +66,6 @@ struct Sdpa {
     std::map<std::tuple<int64_t, int64_t, int64_t, int64_t>, dg::compiled_partition> parts;
     std::map<int64_t, sycl::half*> scales;
 };
-std::mutex g_mu;
 std::unordered_map<sycl::device, Sdpa> g_sdpa;
 
 // the graph of one shape: q [1][heads][rows][hd], k and v [1][heads][T][hd], out as q, the engine's strides
@@ -91,8 +105,95 @@ dg::compiled_partition compile(const dnnl::engine& eng, int64_t rows, int64_t T,
 }  // namespace
 #endif
 
+#if STRATA_CUDNN
+namespace {
+
+namespace fe = cudnn_frontend;
+
+struct Cudnn {
+    bool failed = false;
+    cudnnHandle_t handle = nullptr;
+    std::map<std::tuple<int64_t, int64_t, int64_t, int64_t>, std::shared_ptr<fe::graph::Graph>> graphs;
+    void* ws = nullptr;
+    int64_t ws_bytes = 0;
+};
+std::unordered_map<sycl::device, Cudnn> g_cudnn;
+
+constexpr int64_t kQ = 1, kK = 2, kV = 3, kO = 4;   // the tensors' ids in the variant pack
+
+std::shared_ptr<fe::graph::Graph> cudnn_graph(cudnnHandle_t handle, int64_t rows, int64_t T, int64_t heads,
+                                              int64_t hd) {
+    auto g = std::make_shared<fe::graph::Graph>();
+    g->set_io_data_type(fe::DataType_t::HALF)
+        .set_intermediate_data_type(fe::DataType_t::FLOAT)
+        .set_compute_data_type(fe::DataType_t::FLOAT);
+    const int64_t row = heads * hd;
+    auto Q = g->tensor(fe::graph::Tensor_attributes().set_name("Q").set_uid(kQ).set_dim({1, heads, rows, hd}).set_stride(
+        {rows * row, hd, row, 1}));
+    auto K = g->tensor(fe::graph::Tensor_attributes().set_name("K").set_uid(kK).set_dim({1, heads, T, hd}).set_stride(
+        {T * row, hd, row, 1}));
+    auto V = g->tensor(fe::graph::Tensor_attributes().set_name("V").set_uid(kV).set_dim({1, heads, T, hd}).set_stride(
+        {T * row, hd, row, 1}));
+    auto opts = fe::graph::SDPA_attributes().set_name("sdpa").set_generate_stats(false).set_attn_scale(
+        1.0f / std::sqrt((float) hd));
+    auto [O, stats] = g->sdpa(Q, K, V, opts);
+    (void) stats;
+    O->set_output(true).set_dim({1, heads, rows, hd}).set_stride({rows * row, hd, row, 1}).set_uid(kO);
+    if (!g->build(handle, {fe::HeurMode_t::A}).is_good()) throw std::runtime_error("cuDNN builds no SDPA plan");
+    return g;
+}
+
+bool cudnn_sdpa(sycl::queue& q, const uint16_t* q16, const uint16_t* k16, const uint16_t* v16, int64_t q0, int64_t q1,
+                int64_t T, int64_t heads, int64_t hd, uint16_t* out16) {
+    std::lock_guard<std::mutex> lock(g_mu);
+    Cudnn& d = g_cudnn[q.get_device()];
+    if (d.failed) return false;
+    try {
+        if (d.handle == nullptr) {
+            if (fe::cudnn_dlhandle == nullptr) {
+                const char* lib = std::getenv("STRATA_CUDNN_LIB");
+                fe::cudnn_dlhandle = dlopen(lib != nullptr ? lib : "libcudnn.so.9", RTLD_NOW | RTLD_GLOBAL);
+                if (fe::cudnn_dlhandle == nullptr) throw std::runtime_error("libcudnn.so.9 is not installed");
+            }
+            if (fe::detail::create_handle(&d.handle) != CUDNN_STATUS_SUCCESS)
+                throw std::runtime_error("cudnnCreate failed");
+        }
+        const CUstream cs = sycl::get_native<sycl::backend::ext_oneapi_cuda>(q);
+        if (fe::detail::set_stream(d.handle, cs) != CUDNN_STATUS_SUCCESS) throw std::runtime_error("cudnnSetStream");
+        const auto key = std::make_tuple(q1 - q0, T, heads, hd);
+        auto it = d.graphs.find(key);
+        if (it == d.graphs.end()) it = d.graphs.emplace(key, cudnn_graph(d.handle, q1 - q0, T, heads, hd)).first;
+        int64_t ws = 0;
+        if (!it->second->get_workspace_size(ws).is_good()) throw std::runtime_error("cuDNN's workspace");
+        if (ws > d.ws_bytes) {
+            q.wait();
+            if (d.ws != nullptr) sycl::free(d.ws, q);
+            d.ws = sycl::malloc_device(ws, q);
+            d.ws_bytes = d.ws != nullptr ? ws : 0;
+        }
+        const int64_t row = heads * hd;
+        std::unordered_map<fe::graph::Tensor_attributes::uid_t, void*> pack = {
+            {kQ, const_cast<uint16_t*>(q16 + q0 * row)}, {kK, const_cast<uint16_t*>(k16)},
+            {kV, const_cast<uint16_t*>(v16)}, {kO, out16}};
+        if (!it->second->execute(d.handle, pack, d.ws).is_good()) throw std::runtime_error("cuDNN's SDPA failed");
+        return true;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "strata-image: cuDNN's attention is not taken on this GPU (%s): the engine's own kernel\n",
+                     e.what());
+        d.failed = true;
+        return false;
+    }
+}
+
+}  // namespace
+#endif
+
 bool qi_sdpa(const uint16_t* q16, const uint16_t* k16, const uint16_t* v16, int64_t q0, int64_t q1, int64_t T,
              int64_t heads, int64_t head_dim, uint16_t* out16, void* stream) {
+#if STRATA_CUDNN
+    if (q1 > q0 && core::Runtime::get().stream(stream).get_device().get_backend() == sycl::backend::ext_oneapi_cuda)
+        return cudnn_sdpa(core::Runtime::get().stream(stream), q16, k16, v16, q0, q1, T, heads, head_dim, out16);
+#endif
 #if STRATA_ONEDNN
     if (q1 <= q0) return true;
     sycl::queue& q = core::Runtime::get().stream(stream);

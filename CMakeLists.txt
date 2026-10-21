@@ -678,6 +678,32 @@ if(STRATA_ENABLE_XE)
     target_link_libraries(strata_image PRIVATE strata_dnnl)
     target_compile_definitions(strata_image PRIVATE STRATA_ONEDNN=1)
   endif()
+  # NVIDIA GPUs (contrib-llvm): cuDNN's SDPA through cudnn-frontend (Apache-2.0, header-only, the tag pinned here), which
+  # opens cuDNN at run time (libcudnn.so.9: the user's installation, not free software; without it the engine's own
+  # kernel).  cuDNN's headers (cudnn.h) are found under STRATA_CUDNN_ROOT, CUDNN_PATH or the CUDA toolkit's folder; the
+  # build goes on without them.
+  set(STRATA_CUDNN_ROOT "" CACHE PATH "cuDNN's folder (its include/cudnn.h), for the image attention on NVIDIA GPUs")
+  if(_strata_cuda_archs AND STRATA_LICENSE STREQUAL "contrib" AND NOT WIN32)
+    find_path(_strata_cudnn_inc cudnn.h NO_CACHE HINTS "${STRATA_CUDNN_ROOT}/include" "$ENV{CUDNN_PATH}/include"
+              "${_strata_cuda_root}/include")
+    if(_strata_cudnn_inc)
+      include(FetchContent)
+      FetchContent_Populate(strata_cudnn_fe QUIET
+        URL https://github.com/NVIDIA/cudnn-frontend/archive/refs/tags/v1.31.0.tar.gz
+        URL_HASH SHA256=130f3e98e3f07defd60bf39b250ae7d96c61ca99443782ce77fd470964fbd899
+        DOWNLOAD_EXTRACT_TIMESTAMP FALSE SOURCE_DIR ${CMAKE_BINARY_DIR}/_deps/strata_cudnn_fe-src
+        SUBBUILD_DIR ${CMAKE_BINARY_DIR}/_deps/strata_cudnn_fe-subbuild)
+      set_property(SOURCE src/image/qi_sdpa.cpp APPEND PROPERTY INCLUDE_DIRECTORIES
+                   ${strata_cudnn_fe_SOURCE_DIR}/include ${_strata_cudnn_inc} ${_strata_cuda_root}/include)
+      set_property(SOURCE src/image/qi_sdpa.cpp APPEND PROPERTY COMPILE_DEFINITIONS STRATA_CUDNN=1
+                   NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING CUDNN_FRONTEND_SKIP_JSON_LIB)
+      set_property(SOURCE src/image/qi_sdpa.cpp APPEND PROPERTY COMPILE_OPTIONS -w)   # its headers' own warnings
+      target_link_libraries(strata_image PRIVATE ${CMAKE_DL_LIBS})
+    else()
+      message(STATUS "cuDNN's headers (cudnn.h) not found: the image attention on NVIDIA GPUs takes XeStrata's own "
+                     "kernel (STRATA_CUDNN_ROOT gives cuDNN's folder)")
+    endif()
+  endif()
   # stb_image (third_party/main/stb, MIT or the Unlicense) for an edit's reference image: its implementation in
   # qi_image_io.cpp alone, its own warnings not the build's
   target_include_directories(strata_image SYSTEM PRIVATE third_party/main/stb)
