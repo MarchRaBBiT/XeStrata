@@ -199,6 +199,23 @@ int dit(const std::string& path, const std::string& dir, bool q8, const std::str
     d.set_context(0, txt.data(), lens[0]);
     if (lens.size() > 1) d.set_context(1, txt.data() + lens[0] * D, lens[1]);
     const int n = cfg > 1.f && lens.size() > 1 ? 2 : 1;
+    // an edit's run (golden_edit.py): its references' latent tokens as it sampled them
+    std::vector<float> rz;
+    std::vector<std::pair<int64_t, int64_t>> rsz;
+    for (int j = 0; std::ifstream(dir + "/ref" + std::to_string(j) + "_z.npy"); ++j) {
+        std::vector<int64_t> zs;
+        const auto z = npy<float>(dir + "/ref" + std::to_string(j) + "_z.npy", &zs);   // [1][128][h][w]
+        const int64_t rh = zs[2], rw = zs[3];
+        for (int64_t p = 0; p < rh * rw; ++p)
+            for (int64_t c = 0; c < zs[1]; ++c) rz.push_back(z[(size_t) (c * rh * rw + p)]);
+        rsz.emplace_back(rh, rw);
+    }
+    if (!rsz.empty()) {
+        float* dz = put(rz);
+        d.set_refs(dz, rsz);
+        std::printf("edit: %zu reference%s, %lld rows\n", rsz.size(), rsz.size() > 1 ? "s" : "",
+                    (long long) d.ref_rows());
+    }
     std::vector<float> xt((size_t) (HW * Cl));   // the noise as tokens [h w][128]
     for (int64_t c = 0; c < Cl; ++c)
         for (int64_t p = 0; p < HW; ++p) xt[(size_t) (p * Cl + c)] = noise[(size_t) (c * HW + p)];
@@ -212,9 +229,11 @@ int dit(const std::string& path, const std::string& dir, bool q8, const std::str
     d.forward(x, sig[0], h, w, n, out);
     strata::gpu::stream_sync(s);
     std::printf("forward (%d context%s): %.1f ms\n", n, n > 1 ? "s" : "", 1e3 * seconds_since(t0));
-    const auto bi = npy<float>(dir + "/blk0_img.npy"), bt = npy<float>(dir + "/blk0_txt.npy");
-    compare("blk0 img", fetch(d.block0_img(), (size_t) (HW * C)).data(), bi.data(), (size_t) (HW * C));
-    compare("blk0 txt", fetch(d.block0_txt(), (size_t) (lens[0] * C)).data(), bt.data(), (size_t) (lens[0] * C));
+    if (std::ifstream(dir + "/blk0_img.npy")) {
+        const auto bi = npy<float>(dir + "/blk0_img.npy"), bt = npy<float>(dir + "/blk0_txt.npy");
+        compare("blk0 img", fetch(d.block0_img(), (size_t) (HW * C)).data(), bi.data(), (size_t) (HW * C));
+        compare("blk0 txt", fetch(d.block0_txt(), (size_t) (lens[0] * C)).data(), bt.data(), (size_t) (lens[0] * C));
+    }
     auto o = fetch(out, (size_t) (n * HW * Cl));
     if (n == 2)
         for (size_t i = 0; i < (size_t) (HW * Cl); ++i) o[i] = o[HW * Cl + i] + cfg * (o[i] - o[HW * Cl + i]);
