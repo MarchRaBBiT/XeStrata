@@ -658,11 +658,20 @@ if(STRATA_ENABLE_XE)
   # Intel GPUs: oneDNN's SDPA (Apache-2.0, https://github.com/uxlfoundation/oneDNN at the tag pinned here; Ubuntu's
   # libdnnl-sycl is built for another SYCL runtime than intel/llvm's), built with the engine's compiler for Intel GPUs
   # only (its SYCL GPU runtime, no CPU runtime) beside the build, and linked to the image engine alone (the text engine
-  # does not load it).  Windows: not yet.
+  # does not load it).  Windows: cross-built as the engine is, without its VTune hooks (their assembly is MASM's).
   option(STRATA_ONEDNN "the image attention through oneDNN's SDPA on Intel GPUs" ON)
   set(STRATA_ONEDNN_SOURCE "" CACHE STRING
       "oneDNN's source archive (a local file or URL) to build from (empty: fetch the pinned one)")
-  if(STRATA_ONEDNN AND NOT WIN32)
+  # the projects built beside the engine for Windows (oneDNN, aotriton): cross-built as the engine is
+  if(WIN32)
+    set(_strata_win_ep -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE} -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+        -DSTRATA_XWIN=${STRATA_XWIN} -DSTRATA_SYCL_WINDOWS=${STRATA_SYCL_WINDOWS} -DCMAKE_BUILD_TYPE=Release)
+    if(CMAKE_CXX_COMPILER_LAUNCHER)
+      list(APPEND _strata_win_ep -DCMAKE_CXX_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER}
+                                 -DCMAKE_C_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER})
+    endif()
+  endif()
+  if(STRATA_ONEDNN)
     include(ExternalProject)
     if(STRATA_ONEDNN_SOURCE)
       set(_strata_onednn_url URL ${STRATA_ONEDNN_SOURCE})
@@ -672,21 +681,33 @@ if(STRATA_ENABLE_XE)
         URL_HASH SHA256=efa94db6e8395daaef8e307a48e9527bbaab58a64b44e5d59a3662b4b155099d)
     endif()
     set(_strata_onednn_dir ${CMAKE_BINARY_DIR}/onednn)
-    set(_strata_onednn_args -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
-        -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER} -DCMAKE_INSTALL_PREFIX=${_strata_onednn_dir}
-        -DCMAKE_INSTALL_LIBDIR=lib -DDNNL_CPU_RUNTIME=NONE -DDNNL_GPU_RUNTIME=SYCL -DDNNL_GPU_VENDOR=INTEL
-        -DDNNL_LIBRARY_TYPE=SHARED -DDNNL_BUILD_TESTS=OFF -DDNNL_BUILD_EXAMPLES=OFF -DDNNL_BUILD_DOC=OFF)
-    if(CMAKE_CXX_COMPILER_LAUNCHER)
-      list(APPEND _strata_onednn_args -DCMAKE_CXX_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER}
-                                      -DCMAKE_C_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER})
+    set(_strata_onednn_args -DCMAKE_INSTALL_PREFIX=${_strata_onednn_dir} -DCMAKE_INSTALL_LIBDIR=lib
+        -DDNNL_CPU_RUNTIME=NONE -DDNNL_GPU_RUNTIME=SYCL -DDNNL_GPU_VENDOR=INTEL -DDNNL_LIBRARY_TYPE=SHARED
+        -DDNNL_BUILD_TESTS=OFF -DDNNL_BUILD_EXAMPLES=OFF -DDNNL_BUILD_DOC=OFF)
+    if(WIN32)
+      list(APPEND _strata_onednn_args ${_strata_win_ep} -DDNNL_ENABLE_JIT_PROFILING=OFF -DDNNL_ENABLE_ITT_TASKS=OFF)
+      set(_strata_dnnl_lib ${_strata_onednn_dir}/lib/dnnl.lib)
+    else()
+      list(APPEND _strata_onednn_args -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+                                      -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER})
+      if(CMAKE_CXX_COMPILER_LAUNCHER)
+        list(APPEND _strata_onednn_args -DCMAKE_CXX_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER}
+                                        -DCMAKE_C_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER})
+      endif()
+      set(_strata_dnnl_lib ${_strata_onednn_dir}/lib/libdnnl.so)
     endif()
     ExternalProject_Add(strata_onednn ${_strata_onednn_url} DOWNLOAD_EXTRACT_TIMESTAMP FALSE
       PREFIX ${CMAKE_BINARY_DIR}/_deps/onednn CMAKE_ARGS ${_strata_onednn_args}
-      BUILD_BYPRODUCTS ${_strata_onednn_dir}/lib/libdnnl.so)
+      BUILD_BYPRODUCTS ${_strata_dnnl_lib})
     file(MAKE_DIRECTORY ${_strata_onednn_dir}/include)
     add_library(strata_dnnl SHARED IMPORTED)
-    set_target_properties(strata_dnnl PROPERTIES IMPORTED_LOCATION ${_strata_onednn_dir}/lib/libdnnl.so
-                          INTERFACE_INCLUDE_DIRECTORIES ${_strata_onednn_dir}/include)
+    set_target_properties(strata_dnnl PROPERTIES INTERFACE_INCLUDE_DIRECTORIES ${_strata_onednn_dir}/include)
+    if(WIN32)
+      set_target_properties(strata_dnnl PROPERTIES IMPORTED_IMPLIB ${_strata_dnnl_lib}
+                            IMPORTED_LOCATION ${_strata_onednn_dir}/bin/dnnl.dll)
+    else()
+      set_target_properties(strata_dnnl PROPERTIES IMPORTED_LOCATION ${_strata_dnnl_lib})
+    endif()
     add_dependencies(strata_image strata_onednn)
     target_sources(strata_image PRIVATE src/image/qi_sdpa_onednn.cpp)
     target_link_libraries(strata_image PRIVATE strata_dnnl)
@@ -761,18 +782,12 @@ if(STRATA_ENABLE_XE)
         endforeach()
         if(WIN32)
           include(ExternalProject)
-          set(_strata_aot_win -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE} -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
-              -DSTRATA_XWIN=${STRATA_XWIN} -DSTRATA_SYCL_WINDOWS=${STRATA_SYCL_WINDOWS} -DCMAKE_BUILD_TYPE=Release)
-          if(CMAKE_CXX_COMPILER_LAUNCHER)
-            list(APPEND _strata_aot_win -DCMAKE_CXX_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER}
-                                        -DCMAKE_C_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER})
-          endif()
           set(_strata_xz_dir ${CMAKE_BINARY_DIR}/_deps/aotriton/xz)
           ExternalProject_Add(strata_xz
             URL https://github.com/tukaani-project/xz/releases/download/v5.8.1/xz-5.8.1.tar.gz
             URL_HASH SHA256=507825b599356c10dca1cd720c9d0d0c9d5400b9de300af00e4d1ea150795543
             DOWNLOAD_EXTRACT_TIMESTAMP FALSE PREFIX ${CMAKE_BINARY_DIR}/_deps/aotriton/xz-build
-            CMAKE_ARGS ${_strata_aot_win} -DCMAKE_INSTALL_PREFIX=${_strata_xz_dir} -DBUILD_SHARED_LIBS=OFF
+            CMAKE_ARGS ${_strata_win_ep} -DCMAKE_INSTALL_PREFIX=${_strata_xz_dir} -DBUILD_SHARED_LIBS=OFF
               -DBUILD_TESTING=OFF -DXZ_TOOL_XZ=OFF -DXZ_TOOL_XZDEC=OFF -DXZ_TOOL_LZMADEC=OFF -DXZ_TOOL_LZMAINFO=OFF
               -DXZ_TOOL_SCRIPTS=OFF -DXZ_DOC=OFF -DXZ_NLS=OFF -DXZ_THREADS=vista)
           # the release's commit and tree, which its images' signatures carry (the source is its archive, no clone)
@@ -784,7 +799,7 @@ if(STRATA_ENABLE_XE)
               ${CMAKE_SOURCE_DIR}/third_party/main/aotriton/patches/0001-windows-cross-build.patch
             CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env AOTRITON_CI_SUPPLIED_SHA1=c11b5b886a10a00f925f74133d38b3505e67ccd9
               AOTRITON_GIT_TREESHA1=25d66e23104aab7a2492d40d1d326499d224dc88
-              ${CMAKE_COMMAND} -G Ninja -S <SOURCE_DIR> -B <BINARY_DIR> ${_strata_aot_win}
+              ${CMAKE_COMMAND} -G Ninja -S <SOURCE_DIR> -B <BINARY_DIR> ${_strata_win_ep}
               -DCMAKE_INSTALL_PREFIX=${_strata_aot_dir} -DAOTRITON_NOIMAGE_MODE=ON -DAOTRITON_NO_PYTHON=ON
               -DAOTRITON_HIP_WINDOWS=${_strata_aot_hip_win} -Dliblzma_DIR=${_strata_xz_dir}/lib/cmake/liblzma
               -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH
