@@ -2581,12 +2581,19 @@ def verify_sha256(s: Path, size: int, sha: str, own: bool = False) -> None:
         fail(f"{s.name} is {have:,} bytes, not {size:,}", "delete it and run setup again (the download restarts)")
     say(f"  checking {s.name} (SHA-256, {size / 1e9:.1f} GB) ...")
     h = hashlib.sha256()
+    seen, last = 0, 0.0
     with open(s, "rb") as f:
         while True:
             b = f.read(16 << 20)
             if not b:
                 break
             h.update(b)
+            seen += len(b)
+            if time.time() - last > 2 and size >= (1 << 30):    # hashing 60 GB takes minutes (upstream d298999c3)
+                last = time.time()
+                progress(f"checking {s.name}", seen, size)
+    if seen >= (1 << 30):
+        progress_end()
     if h.hexdigest() != sha:
         if own:
             fail(f"{s.name} does not match the published file (SHA-256 {h.hexdigest()}, expected {sha})",
