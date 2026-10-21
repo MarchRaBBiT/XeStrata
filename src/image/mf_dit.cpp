@@ -224,24 +224,10 @@ struct LnMod {
 
 // GELU (tanh form) of x
 struct Gelu {
-    const float* x;
-    int64_t C;
+    MfOut x;
     template<class R> Stats stats(int64_t, int64_t, int64_t, R) const { return {}; }
     float value(int64_t t, int64_t c, const Stats&) const {
-        const float v = x[t * C + c];
-        return 0.5f * v * (1.f + sycl::tanh(0.7978845608028654f * (v + 0.044715f * v * v * v)));
-    }
-};
-
-// GELU's tanh form of a W8A8 product's int32 sums (its output, unscaled: MfDit::product's defer), scaled as
-// qi_i8_scale scales them
-struct GeluI8 {
-    const int32_t* x;
-    const float *sx, *sw, *b;
-    int64_t C;
-    template<class R> Stats stats(int64_t, int64_t, int64_t, R) const { return {}; }
-    float value(int64_t t, int64_t c, const Stats&) const {
-        const float v = (float) x[t * C + c] * sx[t] * sw[c] + (b != nullptr ? b[c] : 0.f);
+        const float v = x.at(t, c);
         return 0.5f * v * (1.f + sycl::tanh(0.7978845608028654f * (v + 0.044715f * v * v * v)));
     }
 };
@@ -260,24 +246,25 @@ struct Heads {
 
 // part[r][h] = the largest |v| of row r's head h, rows of a ([na][C]) then b ([nb][C])
 struct HeadMax {
-    const float *a, *b;
+    MfOut a, b;
     int64_t na, nb, heads, hd;
     float* part;
     void operator()(sycl::nd_item<1> it) const {
         const auto sg = it.get_sub_group();
         const int64_t i = static_cast<int64_t>(it.get_group_linear_id()) * kRows + sg.get_group_linear_id();
         if (i >= (na + nb) * heads) return;
-        const int64_t r = i / heads, h = i - r * heads, C = heads * hd;
-        const float* row = (r < na ? a + r * C : b + (r - na) * C) + h * hd;
+        const int64_t r = i / heads, h = i - r * heads;
         float m = 0.f;
-        for (int64_t d = sg.get_local_linear_id(); d < hd; d += kSG) m = sycl::fmax(m, sycl::fabs(row[d]));
+        for (int64_t d = sg.get_local_linear_id(); d < hd; d += kSG)
+            m = sycl::fmax(m, sycl::fabs(r < na ? a.at(r, h * hd + d) : b.at(r - na, h * hd + d)));
         m = sycl::reduce_over_group(sg, m, sycl::maximum<float>());
         if (sg.get_local_linear_id() == 0) part[i] = m;
     }
     auto get(syclex::properties_tag) const { return syclex::properties{syclex::sub_group_size<kSG>}; }
 };
 
-void head_max(const float* a, int64_t na, const float* b, int64_t nb, int64_t heads, int64_t hd, float* part, void* s) {
+void head_max(const MfOut& a, int64_t na, const MfOut& b, int64_t nb, int64_t heads, int64_t hd, float* part,
+              void* s) {
     const int64_t n = (na + nb) * heads;
     if (n <= 0) return;
     sycl::queue& q = q_of(s);
@@ -287,13 +274,12 @@ void head_max(const float* a, int64_t na, const float* b, int64_t nb, int64_t he
                        HeadMax{a, b, na, nb, heads, hd, part});
         return;
     }
-    const int64_t C = heads * hd;
     q.parallel_for(sycl::range<1>((size_t) n), [=](sycl::id<1> id) {
         const auto i = static_cast<int64_t>(id[0]);
         const int64_t r = i / heads, h = i - r * heads;
-        const float* row = (r < na ? a + r * C : b + (r - na) * C) + h * hd;
         float m = 0.f;
-        for (int64_t d = 0; d < hd; ++d) m = sycl::fmax(m, sycl::fabs(row[d]));
+        for (int64_t d = 0; d < hd; ++d)
+            m = sycl::fmax(m, sycl::fabs(r < na ? a.at(r, h * hd + d) : b.at(r - na, h * hd + d)));
         part[i] = m;
     });
 }
@@ -315,7 +301,8 @@ void head_scale(const float* part, int64_t rows, int64_t heads, float* hs, void*
 // For each row and head: q and k RMS-normed over the head (weights wq, wk; eps 1e-6) and rotated pairwise (2j, 2j + 1)
 // by cos[t][j], sin[t][j] (rope false: not rotated), v divided by its head's scale; FP16 out
 struct QkRope {
-    const float *q, *k, *v, *wq, *wk, *cos, *sin;
+    MfOut q, k, v;
+    const float *wq, *wk, *cos, *sin;
     bool rope;
     const float* hs;
     int64_t T, heads, hd;
@@ -324,29 +311,32 @@ struct QkRope {
         const auto sg = it.get_sub_group();
         const int64_t i = static_cast<int64_t>(it.get_group_linear_id()) * kRows + sg.get_group_linear_id();
         if (i >= T * heads) return;
-        const int64_t t = i / heads, h = i - t * heads, o = t * heads * hd + h * hd, half = hd / 2;
+        const int64_t t = i / heads, h = i - t * heads, c0 = h * hd, o = t * heads * hd + c0, half = hd / 2;
         const auto lane = static_cast<int64_t>(sg.get_local_linear_id());
         for (int which = 0; which < 2; ++which) {
-            const float* src = (which == 0 ? q : k) + o;
+            const MfOut& src = which == 0 ? q : k;
             const float* w = which == 0 ? wq : wk;
             uint16_t* dst = (which == 0 ? q16 : k16) + o;
             float ss = 0.f;
-            for (int64_t j = lane; j < half; j += kSG) ss += src[2 * j] * src[2 * j] + src[2 * j + 1] * src[2 * j + 1];
+            for (int64_t j = lane; j < half; j += kSG) {
+                const float a = src.at(t, c0 + 2 * j), b = src.at(t, c0 + 2 * j + 1);
+                ss += a * a + b * b;
+            }
             const float r = 1.f / sycl::sqrt(sycl::reduce_over_group(sg, ss, sycl::plus<float>()) / (float) hd + kEps);
             for (int64_t j = lane; j < half; j += kSG) {
-                const float a = src[2 * j] * r * w[2 * j], b = src[2 * j + 1] * r * w[2 * j + 1];
+                const float a = src.at(t, c0 + 2 * j) * r * w[2 * j], b = src.at(t, c0 + 2 * j + 1) * r * w[2 * j + 1];
                 const float c = rope ? cos[t * half + j] : 1.f, sn = rope ? sin[t * half + j] : 0.f;
                 dst[2 * j] = f16_from_f32(a * c - b * sn);
                 dst[2 * j + 1] = f16_from_f32(a * sn + b * c);
             }
         }
         const float inv = 1.f / hs[h];
-        for (int64_t d = lane; d < hd; d += kSG) v16[o + d] = f16_from_f32(v[o + d] * inv);
+        for (int64_t d = lane; d < hd; d += kSG) v16[o + d] = f16_from_f32(v.at(t, c0 + d) * inv);
     }
     auto get(syclex::properties_tag) const { return syclex::properties{syclex::sub_group_size<kSG>}; }
 };
 
-void qk_rope_v16(const float* q, const float* k, const float* v, const float* wq, const float* wk, const float* cos,
+void qk_rope_v16(const MfOut& q, const MfOut& k, const MfOut& v, const float* wq, const float* wk, const float* cos,
                  const float* sin, bool rope, const float* hs, int64_t T, int64_t heads, int64_t hd, uint16_t* q16,
                  uint16_t* k16, uint16_t* v16, void* s) {
     if (T <= 0) return;
@@ -360,27 +350,26 @@ void qk_rope_v16(const float* q, const float* k, const float* v, const float* wq
     const int64_t C = heads * hd, half = hd / 2;
     qu.parallel_for(sycl::range<1>((size_t) (T * heads)), [=](sycl::id<1> id) {
         const auto i = static_cast<int64_t>(id[0]);
-        const int64_t t = i / heads, h = i - t * heads, o = t * C + h * hd;
+        const int64_t t = i / heads, h = i - t * heads, c0 = h * hd, o = t * C + c0;
         for (int which = 0; which < 2; ++which) {
-            const float* src = (which == 0 ? q : k) + o;
+            const MfOut& src = which == 0 ? q : k;
             const float* w = which == 0 ? wq : wk;
             uint16_t* dst = (which == 0 ? q16 : k16) + o;
             float ss = 0.f;
-            for (int64_t d = 0; d < hd; ++d) ss += src[d] * src[d];
+            for (int64_t d = 0; d < hd; ++d) ss += src.at(t, c0 + d) * src.at(t, c0 + d);
             const float r = 1.f / sycl::sqrt(ss / (float) hd + kEps);
             for (int64_t j = 0; j < half; ++j) {
-                const float a = src[2 * j] * r * w[2 * j], b = src[2 * j + 1] * r * w[2 * j + 1];
+                const float a = src.at(t, c0 + 2 * j) * r * w[2 * j], b = src.at(t, c0 + 2 * j + 1) * r * w[2 * j + 1];
                 const float c = rope ? cos[t * half + j] : 1.f, sn = rope ? sin[t * half + j] : 0.f;
                 dst[2 * j] = f16_from_f32(a * c - b * sn);
                 dst[2 * j + 1] = f16_from_f32(a * sn + b * c);
             }
         }
         const float inv = 1.f / hs[h];
-        for (int64_t d = 0; d < hd; ++d) v16[o + d] = f16_from_f32(v[o + d] * inv);
+        for (int64_t d = 0; d < hd; ++d) v16[o + d] = f16_from_f32(v.at(t, c0 + d) * inv);
     });
 }
 
-// y[t] = y[t] * rs[t] + b (rs null: 1; b null: none)
 // y[n] = x . w[n] + b[n]: w N rows of Q8_0 blocks (K / 32 of them, 34 bytes: an FP16 scale and 32 int8 values),
 // x FP32; a work-group of 32 a row, reading it as 16-bit words, neighbouring items neighbouring words (a row of 3072
 // values: 1632 words, 96 of them the scales, which the items of the block's other words read again from the cache)
@@ -406,6 +395,7 @@ void q8_0_vec(const uint8_t* w, const float* x, const float* b, float* y, int64_
     });
 }
 
+// y[t] = y[t] * rs[t] + b (rs null: 1; b null: none)
 void rows_back(float* y, const float* rs, const float* b, int64_t T, int64_t N, void* s) {
     q_of(s).parallel_for(sycl::range<1>((size_t) (T * N)), [=](sycl::id<1> id) {
         const auto i = static_cast<int64_t>(id[0]);
@@ -418,11 +408,11 @@ void rows_back(float* y, const float* rs, const float* b, int64_t T, int64_t N, 
 }
 
 // x[t] += gate * h[t] (per channel)
-void gate_add(float* x, const float* h, const float* gate, int64_t T, int64_t C, void* s) {
+void gate_add(float* x, const MfOut& h, const float* gate, int64_t T, int64_t C, void* s) {
     if (T <= 0) return;
-    q_of(s).parallel_for(sycl::range<1>((size_t) (T * C)), [=](sycl::id<1> id) {
-        const auto i = static_cast<int64_t>(id[0]);
-        x[i] += gate[i % C] * h[i];
+    q_of(s).parallel_for(sycl::range<2>((size_t) T, (size_t) C), [=](sycl::id<2> id) {
+        const auto t = static_cast<int64_t>(id[0]), c = static_cast<int64_t>(id[1]);
+        x[t * C + c] += gate[c] * h.at(t, c);
     });
 }
 
@@ -635,36 +625,38 @@ bool MfDit::open(const std::string& path, void* stream, std::string& err, bool d
     }
 }
 
-bool MfDit::product(const uint16_t* x16, const float* rs, const W& w, const uint8_t* base, float* y, int64_t T,
-                    const float* bias, bool same_input, bool defer) {
-    if (T <= 0) return false;
+MfOut MfDit::product(const uint16_t* x16, const float* rs, const W& w, const uint8_t* base, float* y, int64_t T,
+                     const float* bias, bool same_input, bool defer) {
+    MfOut out;
+    out.f = y;
+    out.C = w.n;
+    if (T <= 0) return out;
     const auto* d = base != nullptr ? base + reinterpret_cast<uintptr_t>(w.d) : static_cast<const uint8_t*>(w.d);
     if (w.type == kTypeW8) {
         // the activations rotated and quantized as the weights (once for the products of one input), their scales
         // times the rows' (rs), the int32 sums into y and scaled there, or by the reader (defer)
-        auto* sx = reinterpret_cast<float*>(xq8_ + xq8_rows_ * xq8_cols_);
+        float* scales = reinterpret_cast<float*>(xq8_ + xq8_rows_ * xq8_cols_);
+        if (!same_input) xs_next_ ^= 1;
+        float* sx = scales + xs_next_ * xq8_rows_;
         if (!same_input) qi_rows_i8(x16, false, T, w.k, xq8_, sx, rs, s_);
         prefill::Gemm::i8(xq8_, reinterpret_cast<const int8_t*>(d), reinterpret_cast<int32_t*>(y), T, w.n, w.k, w.n,
                           s_);
+        const auto* sw = reinterpret_cast<const float*>(d + w.n * w.k);
         if (defer) {
-            deferred_ = {sx, reinterpret_cast<const float*>(d + w.n * w.k), bias};
-            return true;
+            out.f = nullptr;
+            out.i = reinterpret_cast<const int32_t*>(y);
+            out.sx = sx;
+            out.sw = sw;
+            out.b = bias;
+            return out;
         }
-        qi_i8_scale(y, T, w.n, w.n, sx, reinterpret_cast<const float*>(d + w.n * w.k), bias, s_);
-        return false;
+        qi_i8_scale(y, T, w.n, w.n, sx, sw, bias, s_);
+        return out;
     }
     if (w.type == kTypeF16) gemm_.f16(x16, reinterpret_cast<const uint16_t*>(d), y, T, w.n, w.k);
     else gemm_.native(x16, w.type, d, y, T, w.n, w.k);
     if (rs != nullptr || bias != nullptr) rows_back(y, rs, bias, T, w.n, s_);
-    return false;
-}
-
-void MfDit::gelu(bool deferred, int64_t T) {
-    if (deferred)
-        rows16(GeluI8{reinterpret_cast<const int32_t*>(gu_), deferred_.sx, deferred_.sw, deferred_.bias, F_}, T, F_,
-               h16_, rs_, s_);
-    else
-        rows16(Gelu{gu_, F_}, T, F_, h16_, rs_, s_);
+    return out;
 }
 
 void MfDit::modulation(const uint16_t* tsil, const W& w, const uint8_t* base, float* y, const float* bias) {
@@ -690,7 +682,7 @@ uint64_t MfDit::activation_bytes(int64_t hw, int n, int64_t max_text, int64_t ml
            (uint64_t) (R + L) * C_ * 2 +                 // the attention's outputs by stream
            (uint64_t) (hw + max_text) * hd_ * 4 +        // the rotary tables
            (uint64_t) TP * C_ * 4 +                      // the plain attention's scratch
-           (w8_ ? (uint64_t) std::max(X * C_, band * F_) + (uint64_t) std::max(X, band) * 4 : 0);   // W8A8's input
+           (w8_ ? (uint64_t) std::max(X * C_, band * F_) + (uint64_t) std::max(X, band) * 8 : 0);   // W8A8's input
 }
 
 void MfDit::ensure(int64_t hw, int n, int64_t max_text) {
@@ -717,7 +709,7 @@ void MfDit::ensure(int64_t hw, int n, int64_t max_text) {
     if (w8_) {   // W8A8's int8 input: the most rows of the widest input, then a scale a row
         xq8_rows_ = std::max(X, mlp_rows_);
         xq8_cols_ = std::max(C_, F_);
-        xq8_ = alloc<int8_t>(allocs_, xq8_rows_ * xq8_cols_ + xq8_rows_ * 4);
+        xq8_ = alloc<int8_t>(allocs_, xq8_rows_ * xq8_cols_ + 2 * xq8_rows_ * 4);
     }
     jq16_ = alloc<uint16_t>(allocs_, n * TP * C_, true);
     jk16_ = alloc<uint16_t>(allocs_, n * TP * C_, true);
@@ -910,45 +902,44 @@ void MfDit::forward(const float* x, float sigma, int64_t h, int64_t w, int n, fl
         modulation(tsil, b.tmod, base, mod_t_, f(b.b_tmod));
         // q, k, v of the image rows and of the text rows
         rows16(LnMod{img_, mod_i_, mod_i_ + C, C}, R, C, h16_, rs_, s_);
-        product(h16_, rs_, b.q, base, q_, R, f(b.b_q));
-        product(h16_, rs_, b.k, base, k_, R, f(b.b_k), b.q.type == kTypeW8);
-        product(h16_, rs_, b.v, base, v_, R, f(b.b_v), b.k.type == kTypeW8);
+        // (a W8A8 product's sums are scaled by their readers, head_max and qk_rope_v16)
+        const MfOut q = product(h16_, rs_, b.q, base, q_, R, f(b.b_q), false, true);
+        const MfOut k = product(h16_, rs_, b.k, base, k_, R, f(b.b_k), b.q.type == kTypeW8, true);
+        const MfOut v = product(h16_, rs_, b.v, base, v_, R, f(b.b_v), b.k.type == kTypeW8, true);
         rows16(LnMod{txt_, mod_t_, mod_t_ + C, C}, L, C, h16_, rs_, s_);
-        product(h16_, rs_, b.tq, base, tq_, L, f(b.b_tq));
-        product(h16_, rs_, b.tk, base, tk_, L, f(b.b_tk), b.tq.type == kTypeW8);
-        product(h16_, rs_, b.tv, base, tv_, L, f(b.b_tv), b.tk.type == kTypeW8);
+        const MfOut tq = product(h16_, rs_, b.tq, base, tq_, L, f(b.b_tq), false, true);
+        const MfOut tk = product(h16_, rs_, b.tk, base, tk_, L, f(b.b_tk), b.tq.type == kTypeW8, true);
+        const MfOut tv = product(h16_, rs_, b.tv, base, tv_, L, f(b.b_tv), b.tk.type == kTypeW8, true);
         // each context: its v heads' scales, its rows normed (the image's rotated) into [text, image], the attention,
         // its output back to each stream's rows (FP16, scaled by row)
         for (int i = 0; i < n; ++i) {
-            const int64_t o = i * TP * C, Lt = ctx_[i].rows, t0 = toff[(size_t) i] * C;
-            const float* vi = v_ + i * HW * C;
-            head_max(tv_ + t0, Lt, vi, HW, heads_, hd_, vpart_, s_);
+            const int64_t o = i * TP * C, Lt = ctx_[i].rows, r0 = toff[(size_t) i], t0 = r0 * C;
+            const MfOut vi = v.from(i * HW);
+            head_max(tv.from(r0), Lt, vi, HW, heads_, hd_, vpart_, s_);
             head_scale(vpart_, Lt + HW, heads_, hs_ + i * heads_, s_);
-            qk_rope_v16(tq_ + t0, tk_ + t0, tv_ + t0, f(b.ntq), f(b.ntk), nullptr, nullptr, false, hs_ + i * heads_, Lt,
-                        heads_, hd_, jq16_ + o, jk16_ + o, jv16_ + o, s_);
-            qk_rope_v16(q_ + i * HW * C, k_ + i * HW * C, vi, f(b.nq), f(b.nk), cos_, sin_, true, hs_ + i * heads_, HW,
+            qk_rope_v16(tq.from(r0), tk.from(r0), tv.from(r0), f(b.ntq), f(b.ntk), nullptr, nullptr, false,
+                        hs_ + i * heads_, Lt, heads_, hd_, jq16_ + o, jk16_ + o, jv16_ + o, s_);
+            qk_rope_v16(q.from(i * HW), k.from(i * HW), vi, f(b.nq), f(b.nk), cos_, sin_, true, hs_ + i * heads_, HW,
                         heads_, hd_, jq16_ + o + Lt * C, jk16_ + o + Lt * C, jv16_ + o + Lt * C, s_);
             qi_attention(jq16_ + o, jk16_ + o, jv16_ + o, Lt + HW, heads_, hd_, Lt, jo16_, attn_scratch_, s_,
                          key_lim_ + i * cap_text_);
             rows16(Heads{jo16_, hs_ + i * heads_, C, hd_}, Lt, C, to16_ + t0, rs_to_ + toff[(size_t) i], s_);
             rows16(Heads{jo16_ + Lt * C, hs_ + i * heads_, C, hd_}, HW, C, io16_ + i * HW * C, rs_io_ + i * HW, s_);
         }
-        product(io16_, rs_io_, b.o, base, a_, R, f(b.b_o));
-        gate_add(img_, a_, mod_i_ + 2 * C, R, C, s_);
-        product(to16_, rs_to_, b.to, base, a_, L, f(b.b_to));
-        gate_add(txt_, a_, mod_t_ + 2 * C, L, C, s_);
+        gate_add(img_, product(io16_, rs_io_, b.o, base, a_, R, f(b.b_o), false, true), mod_i_ + 2 * C, R, C, s_);
+        gate_add(txt_, product(to16_, rs_to_, b.to, base, a_, L, f(b.b_to), false, true), mod_t_ + 2 * C, L, C, s_);
         // the MLPs, the image's a band of rows at a time
         for (int64_t m0 = 0; m0 < R; m0 += mlp_rows_) {
             const int64_t mr = std::min(mlp_rows_, R - m0);
             rows16(LnMod{img_ + m0 * C, mod_i_ + 3 * C, mod_i_ + 4 * C, C}, mr, C, h16_, rs_, s_);
-            gelu(product(h16_, rs_, b.imlp1, base, gu_, mr, f(b.b_imlp1), false, true), mr);
-            product(h16_, rs_, b.imlp2, base, a_, mr, f(b.b_imlp2));
-            gate_add(img_ + m0 * C, a_, mod_i_ + 5 * C, mr, C, s_);
+            rows16(Gelu{product(h16_, rs_, b.imlp1, base, gu_, mr, f(b.b_imlp1), false, true)}, mr, F_, h16_, rs_, s_);
+            gate_add(img_ + m0 * C, product(h16_, rs_, b.imlp2, base, a_, mr, f(b.b_imlp2), false, true),
+                     mod_i_ + 5 * C, mr, C, s_);
         }
         rows16(LnMod{txt_, mod_t_ + 3 * C, mod_t_ + 4 * C, C}, L, C, h16_, rs_, s_);
-        gelu(product(h16_, rs_, b.tmlp1, base, gu_, L, f(b.b_tmlp1), false, true), L);
-        product(h16_, rs_, b.tmlp2, base, a_, L, f(b.b_tmlp2));
-        gate_add(txt_, a_, mod_t_ + 5 * C, L, C, s_);
+        rows16(Gelu{product(h16_, rs_, b.tmlp1, base, gu_, L, f(b.b_tmlp1), false, true)}, L, F_, h16_, rs_, s_);
+        gate_add(txt_, product(h16_, rs_, b.tmlp2, base, a_, L, f(b.b_tmlp2), false, true), mod_t_ + 5 * C, L, C,
+                 s_);
         blocks_stream_.end(bi);
         if (bi == 0 && keep0_) {
             gpu::copy_async(b0_img_, img_, (size_t) (HW * C) * 4, s_);

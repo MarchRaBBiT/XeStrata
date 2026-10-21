@@ -43,6 +43,29 @@
 
 namespace strata::image {
 
+/// A product's output [T][C] as its readers take it: FP32 (f), or a W8A8 product's int32 sums (i) with the
+/// activations' scales (sx, a row), the weights' (sw, a column) and the bias (b, null: none).
+struct MfOut {
+    const float* f = nullptr;
+    const int32_t* i = nullptr;
+    const float *sx = nullptr, *sw = nullptr, *b = nullptr;
+    int64_t C = 0;
+    float at(int64_t t, int64_t c) const {
+        if (i == nullptr) return f[t * C + c];
+        return (float) i[t * C + c] * sx[t] * sw[c] + (b != nullptr ? b[c] : 0.f);
+    }
+    /// the rows from r on
+    MfOut from(int64_t r) const {
+        MfOut o = *this;
+        if (f != nullptr) o.f += r * C;
+        if (i != nullptr) {
+            o.i += r * C;
+            o.sx += r;
+        }
+        return o;
+    }
+};
+
 class MappedFile;
 
 class MfDit {
@@ -122,11 +145,9 @@ private:
     };
     // y [T][w.n] = (x16 [T][w.k], rows scaled down by rs) . w^T, the rows times rs again, plus bias (rs, bias null:
     // none).  same_input: x16 is the previous product's, which was W8A8 too (its int8 input is taken again).  defer:
-    // a W8A8 product leaves y its int32 sums, their scales and bias in deferred_ for the reader; true when it did.
-    bool product(const uint16_t* x16, const float* rs, const W& w, const uint8_t* base, float* y, int64_t T,
-                 const float* bias, bool same_input = false, bool defer = false);
-    // h16_ and rs_ = the MLP's GELU of gu_'s T rows: product's output (deferred: its int32 sums)
-    void gelu(bool deferred, int64_t T);
+    // a W8A8 product leaves y its int32 sums for the reader to scale (the view says how to read y either way).
+    MfOut product(const uint16_t* x16, const float* rs, const W& w, const uint8_t* base, float* y, int64_t T,
+                  const float* bias, bool same_input = false, bool defer = false);
     // a block's modulation y [w.n] = SiLU(temb) . w^T + bias (tsil: its FP16 copy, for a 16-bit w)
     void modulation(const uint16_t* tsil, const W& w, const uint8_t* base, float* y, const float* bias);
     void ensure(int64_t hw, int n, int64_t max_text);
@@ -162,11 +183,11 @@ private:
              *io16_ = nullptr, *to16_ = nullptr, *t16_ = nullptr;
     float *cos_ = nullptr, *sin_ = nullptr, *cos_id_ = nullptr, *sin_id_ = nullptr, *attn_scratch_ = nullptr;
     int32_t* key_lim_ = nullptr;
-    struct Deferred {
-        const float *sx = nullptr, *sw = nullptr, *bias = nullptr;
-    } deferred_;   // the scales of the last deferred W8A8 product's sums
-    int8_t* xq8_ = nullptr;   // W8A8's input (w8_): xq8_rows_ rows of up to xq8_cols_ int8 values, then their scales
+    // W8A8's input (w8_): xq8_rows_ rows of up to xq8_cols_ int8 values, then two arrays of their scales, taken in
+    // turn (xs_next_), so that the deferred sums of one input keep theirs while the next input is quantized
+    int8_t* xq8_ = nullptr;
     int64_t xq8_rows_ = 0, xq8_cols_ = 0;
+    int xs_next_ = 0;
     float *b0_img_ = nullptr, *b0_txt_ = nullptr;
     int64_t rope_h_ = -1, rope_w_ = -1, rope_refs_ = -1;
     // an edit's references
