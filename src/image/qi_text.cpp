@@ -11,6 +11,7 @@
 #include "strata/kernels/dequant_bf16.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
 
@@ -126,16 +127,16 @@ void QiText::ensure(int64_t T) {
     for (void* p : {(void*) x_, (void*) q_, (void*) k_, (void*) v_, (void*) a_, (void*) h_, (void*) gu_, (void*) h16_,
                     (void*) q16_, (void*) k16_, (void*) v16_, (void*) rows_})
         release(allocs_, p);
-    const int64_t kv = kv_heads_ * head_dim_;
+    const int64_t kv = kv_heads_ * head_dim_, qd = heads_ * head_dim_;
     x_ = alloc<float>(allocs_, T * C_);
-    q_ = alloc<float>(allocs_, T * C_);
+    q_ = alloc<float>(allocs_, T * qd);
     k_ = alloc<float>(allocs_, T * kv);
     v_ = alloc<float>(allocs_, T * kv);
-    a_ = alloc<float>(allocs_, T * C_);
+    a_ = alloc<float>(allocs_, T * qd);
     h_ = alloc<float>(allocs_, T * C_);
     gu_ = alloc<float>(allocs_, T * 2 * inter_);
-    h16_ = alloc<uint16_t>(allocs_, T * std::max(C_, inter_));
-    q16_ = alloc<uint16_t>(allocs_, T * C_);
+    h16_ = alloc<uint16_t>(allocs_, T * std::max({C_, inter_, qd}));
+    q16_ = alloc<uint16_t>(allocs_, T * qd);
     k16_ = alloc<uint16_t>(allocs_, T * kv);
     v16_ = alloc<uint16_t>(allocs_, T * kv);
     rows_ = alloc<uint8_t>(allocs_, (int64_t) (T * (int64_t) embd_row_bytes_));
@@ -143,9 +144,9 @@ void QiText::ensure(int64_t T) {
 }
 
 uint64_t QiText::activation_bytes(int64_t T) const {
-    const int64_t kv = kv_heads_ * head_dim_;
-    return (uint64_t) T * ((uint64_t) (4 * C_ + 2 * kv + 2 * inter_) * 4 + (uint64_t) std::max(C_, inter_) * 2 +
-                           (uint64_t) (C_ + 2 * kv) * 2 + embd_row_bytes_);
+    const int64_t kv = kv_heads_ * head_dim_, qd = heads_ * head_dim_;
+    return (uint64_t) T * ((uint64_t) (2 * C_ + 2 * qd + 2 * kv + 2 * inter_) * 4 +
+                           (uint64_t) std::max({C_, inter_, qd}) * 2 + (uint64_t) (qd + 2 * kv) * 2 + embd_row_bytes_);
 }
 
 void QiText::drop_activations() {
@@ -157,6 +158,17 @@ void QiText::drop_activations() {
     h16_ = q16_ = k16_ = v16_ = nullptr;
     rows_ = nullptr;
     cap_T_ = 0;
+}
+
+void QiText::set_final_norm(bool on) {
+    if (on && out_norm_.empty()) {
+        const TensorInfo* t = find_checked(*g_, "output_norm.weight");
+        if (t == nullptr || t->type != 0 || (int64_t) t->elements() != C_)
+            throw std::runtime_error("image engine (text): the encoder has no FP32 output_norm.weight");
+        out_norm_.resize((size_t) C_);
+        std::memcpy(out_norm_.data(), g_->tensor_data(*t), (size_t) C_ * 4);
+    }
+    final_norm_ = on;
 }
 
 std::vector<float> QiText::encode(const std::vector<int32_t>& ids, const std::vector<Image>& images) {
@@ -215,7 +227,7 @@ std::vector<float> QiText::encode(const std::vector<int32_t>& ids, const std::ve
         qi_text_qk_rope16(q_, k_, v_, f(l.qn), f(l.kn), T, heads_, kv_heads_, head_dim_, theta_, q16_, k16_, v16_, s_,
                           dpos, sec_h_, sec_w_);
         qi_attention_causal(q16_, k16_, v16_, T, heads_, kv_heads_, head_dim_, a_, s_);
-        qi_to_f16(a_, T * C_, h16_, s_);
+        qi_to_f16(a_, T * heads_ * head_dim_, h16_, s_);
         gemm_.native(h16_, l.o.type, w(l.o), h_, T, l.o.n, l.o.k);
         qi_axpy(x_, h_, 1.0f, T * C_, s_);
         qi_rms_norm16(x_, f(l.ffn_norm), T, C_, h16_, s_);
@@ -235,6 +247,14 @@ std::vector<float> QiText::encode(const std::vector<int32_t>& ids, const std::ve
     gpu::copy(out.data(), x_, out.size() * 4);
     for (float* g : ds) release(allocs_, g);
     release(allocs_, dpos);
+    if (final_norm_)   // the final RMS norm, on the host: a prompt's few rows
+        for (int64_t t = 0; t < T; ++t) {
+            float* r = out.data() + t * C_;
+            double ss = 0;
+            for (int64_t c = 0; c < C_; ++c) ss += (double) r[c] * r[c];
+            const auto inv = (float) (1.0 / std::sqrt(ss / (double) C_ + (double) eps_));
+            for (int64_t c = 0; c < C_; ++c) r[c] = r[c] * inv * out_norm_[(size_t) c];
+        }
     return out;
 }
 
