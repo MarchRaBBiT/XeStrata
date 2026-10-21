@@ -3,7 +3,8 @@
 // src/image/mf_probe.cpp - strata-image-mf-probe: Mage-Flow's parts on the GPU against the reference implementation's
 // outputs of one run (the .npy files of records' mage-flow-golden/golden.py).
 //
-//   strata-image-mf-probe text TEXT_ENCODER.gguf GOLDEN_DIR
+//   strata-image-mf-probe text TEXT_ENCODER.gguf GOLDEN_DIR [MMPROJ.gguf]   (an edit's run: its images vl0.png ..
+//       through the vision encoder, the system turn 64 ids)
 //   strata-image-mf-probe vae VAE.safetensors GOLDEN_DIR   (golden_vae.py's vae_cond, vae_s, vae_img)
 //   strata-image-mf-probe vae-enc VAE.safetensors GOLDEN_DIR   (golden_edit.py's ref0_pix: its posterior's mean,
 //       log-variance and, with the run's own noise, the sample)
@@ -16,6 +17,8 @@
 #include "strata/core/gpu.hpp"
 #include "strata/image/mf_dit.hpp"
 #include "strata/image/mf_vae.hpp"
+#include "strata/image/qi_image_io.hpp"
+#include "strata/image/qi_vision.hpp"
 #include "strata/image/qi_text.hpp"
 
 #include <algorithm>
@@ -88,13 +91,50 @@ double seconds_since(std::chrono::steady_clock::time_point t0) {
 
 // the text encoder: each prompt of the run (ids.npy, ids_lens.npy) encoded alone, its rows after the 34 of the
 // system turn against txt.npy
-int text(const std::string& gguf, const std::string& dir) {
-    constexpr int64_t kDrop = 34;
+int text(const std::string& gguf, const std::string& dir, const std::string& mmproj = "") {
+    constexpr int32_t kImagePad = 151655;
+    const int64_t kDrop = mmproj.empty() ? 34 : 64;   // the system turn: generation's, an edit's
     void* s = strata::core::Runtime::get().create_stream();
     strata::image::QiText te;
     std::string err;
     if (!te.open(gguf, s, err)) throw std::runtime_error(err);
     te.set_final_norm(true);
+    te.set_flat_positions(true);
+    // an edit's images (as the processor took them: their sides the grid's 16-pixel patches) through the vision encoder
+    std::vector<strata::image::QiVisionOut> vouts;
+    if (!mmproj.empty()) {
+        strata::image::QiVision vis;
+        if (!vis.open(mmproj, s, err)) throw std::runtime_error(err);
+        for (int j = 0;; ++j) {
+            const std::string f = dir + "/vl" + std::to_string(j) + ".png";
+            if (!std::ifstream(f)) break;
+            int64_t w = 0, h = 0;
+            const auto px = strata::image::load_rgba8(f, w, h, err);
+            if (px.empty()) throw std::runtime_error(err);
+            std::vector<float> rgb((size_t) (3 * w * h));
+            for (int64_t i = 0; i < w * h; ++i)
+                for (int c = 0; c < 3; ++c) rgb[(size_t) (c * w * h + i)] = (float) px[(size_t) (i * 4 + c)] / 127.5f - 1.f;
+            const auto t0 = std::chrono::steady_clock::now();
+            vouts.push_back(vis.encode(rgb.data(), w, h));
+            std::printf("vision %lld x %lld: %lld tokens, %.1f ms\n", (long long) w, (long long) h,
+                        (long long) vouts.back().rows, 1e3 * seconds_since(t0));
+            const std::string vj = dir + "/vit" + std::to_string(j);
+            if (std::ifstream(vj + "_main.npy")) {   // vit_dump.py's outputs (bf16, and FP32)
+                const auto& v = vouts.back();
+                const auto m = npy<float>(vj + "_main.npy");
+                compare("vit main", v.main.data(), m.data(), std::min(m.size(), v.main.size()));
+                if (std::ifstream(vj + "_main32.npy")) {
+                    const auto m32 = npy<float>(vj + "_main32.npy");
+                    compare("vit fp32", v.main.data(), m32.data(), std::min(m32.size(), v.main.size()));
+                }
+                for (size_t k = 0; k < v.deepstack.size() && std::ifstream(vj + "_ds" + std::to_string(k) + ".npy"); ++k) {
+                    const auto d = npy<float>(vj + "_ds" + std::to_string(k) + ".npy");
+                    compare(("vit ds" + std::to_string(k)).c_str(), v.deepstack[k].data(), d.data(),
+                            std::min(d.size(), v.deepstack[k].size()));
+                }
+            }
+        }
+    }
     const auto ids = npy<int64_t>(dir + "/ids.npy");
     const auto lens = npy<int64_t>(dir + "/ids_lens.npy");
     std::vector<int64_t> shape;
@@ -106,14 +146,32 @@ int text(const std::string& gguf, const std::string& dir) {
     for (int64_t len : lens) {
         std::vector<int32_t> p(ids.begin() + (long) off, ids.begin() + (long) (off + len));
         off += (size_t) len;
-        te.encode(p);   // warm
+        std::vector<strata::image::QiText::Image> ims;   // the prompt's runs of image pads, image by image
+        for (size_t i = 0, k = 0; i < p.size(); ++i) {
+            if (p[i] != kImagePad || (i > 0 && p[i - 1] == kImagePad)) continue;
+            if (k >= vouts.size()) throw std::runtime_error("image pads beyond the images (pass the mmproj)");
+            const auto& v = vouts[k++];
+            strata::image::QiText::Image im;
+            im.index = (int64_t) i;
+            im.rows = v.rows;
+            im.grid_h = v.grid_h;
+            im.grid_w = v.grid_w;
+            im.main = v.main.data();
+            for (const auto& d : v.deepstack) im.deepstack.push_back(d.data());
+            ims.push_back(im);
+        }
+        te.encode(p, ims);   // warm
         const auto t0 = std::chrono::steady_clock::now();
-        const auto h = te.encode(p);
+        const auto h = te.encode(p, ims);
         std::printf("encode %lld tokens: %.1f ms\n", (long long) len, 1e3 * seconds_since(t0));
         got.insert(got.end(), h.begin() + kDrop * C, h.end());
     }
     if ((int64_t) got.size() != shape[0] * C) throw std::runtime_error("the rows differ from txt.npy's");
     compare("text", got.data(), want.data(), got.size());
+    if (std::ifstream(dir + "/txt32.npy")) {   // text_fp32.py's states in FP32
+        const auto t32 = npy<float>(dir + "/txt32.npy");
+        compare("text fp32", got.data(), t32.data(), std::min(t32.size(), got.size()));
+    }
     return 0;
 }
 
@@ -333,7 +391,7 @@ int vae_enc(const std::string& path, const std::string& dir) {
 int main(int argc, char** argv) {
     try {
         const std::string what = argc > 1 ? argv[1] : "";
-        if (what == "text" && argc == 4) return text(argv[2], argv[3]);
+        if (what == "text" && (argc == 4 || argc == 5)) return text(argv[2], argv[3], argc == 5 ? argv[4] : "");
         if (what == "vae" && argc == 4) return vae(argv[2], argv[3]);
         if (what == "vae-enc" && argc == 4) return vae_enc(argv[2], argv[3]);
         if (what == "dit" && (argc == 4 || argc == 5 || argc == 7))
