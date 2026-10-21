@@ -19,8 +19,10 @@ not multiples of 16 (1920x1080) is made at the sides rounded up (1920x1088) and 
 Mage-Flow ("family": "mage-flow", "schedule": "mage"): its own prompt form (MF_PROMPT_HEAD, the 34 ids of its system
 turn dropped), the steps asked for (default the config's: Turbo 4, the RL model 20, the base model 30) on its static
 shift (mage_sigmas), and guidance by guidance_scale or true_cfg_scale (the one scale it has; default the config's
-"cfg_scale": Turbo 1, none; the others 5.0) with negative_prompt (default " ", its pipeline's).  Its edits, masks and
-transparent images are not here.
+"cfg_scale": Turbo 1, none; the others 5.0) with negative_prompt (default " ", its pipeline's).  Its edits take up to
+MF_MAX_REFS reference images, in its edit form (MF_EDIT_HEAD, "Image j: <pad>" before the instruction, the 64 ids of
+the system turn dropped) and the config's "edit_steps" (its edit models': Turbo 4, the others 30), on its edit DiT
+("edit_model"); masks and transparent images it has none of.
 
 The GPU is shared with the text engine one job at a time: an image job takes the service's turn (the FIFO every chat
 request takes), so no chat turn runs on the GPU meanwhile.  The image engine works in the VRAM it is given: what it
@@ -98,6 +100,14 @@ DROP = 14
 MF_PROMPT_HEAD = ("<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, "
                   "text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n")
 MF_DROP = 34
+# its edits' (the "mage-flow-edit" template): the system turn's 64 ids dropped, each reference "Image j: <pad>"
+MF_EDIT_HEAD = ("<|im_start|>system\nDescribe the key features of the input image (color, shape, size, texture, "
+                "objects, background), then explain how the user's text instruction should alter or modify the image. "
+                "Generate a new image that meets the user's requirements while maintaining consistency with the "
+                "original input where appropriate.<|im_end|>\n<|im_start|>user\n")
+MF_EDIT_DROP = 64
+MF_EDIT_REF = "Image {i}: <|vision_start|><|image_pad|><|vision_end|>"
+MF_MAX_REFS = 3                    # the edit models' training takes up to three references
 MF_SHIFT = 6.0                     # Mage-Flow's static time shift
 MF_NEG = " "                       # its pipeline's negative prompt when none is given
 # an edit's reference image in the prompt: one pad, which the engine widens to the image's tokens
@@ -295,13 +305,13 @@ def parse_edit_request(req: dict, images: list[bytes], cfg: dict, mask: bytes | 
     multiples of SIZE_STEP.  `mask` (OpenAI's): a PNG of the first image's size whose transparent pixels are where it
     changes, the rest kept as it is (the engine's inpainting), as job["mask"]; refused by a model whose config says
     "mask": false."""
-    if cfg.get("family") == "mage-flow":
-        raise ImageRequestError("edits: Mage-Flow's are not in this version yet")
-    if not cfg.get("vision"):
-        raise ImageRequestError("edits need the vision encoder: run setup with --images qwen-image-turbo again")
+    mage = cfg.get("family") == "mage-flow"
+    if not cfg.get("vision") or (mage and not cfg.get("edit_model")):
+        raise ImageRequestError("edits need the vision encoder" + (" and the edit model" if mage else "") +
+                                f": run setup with --images {cfg.get('model_name') or 'qwen-image-turbo'} again")
     if not images:
         raise ImageRequestError("image: one reference image or more")
-    max_refs = int(cfg.get("max_refs") or MAX_REFS)
+    max_refs = int(cfg.get("max_refs") or (MF_MAX_REFS if mage else MAX_REFS))
     if len(images) > max_refs:
         raise ImageRequestError(f"image: at most {max_refs} reference images")
     dims = []
@@ -321,7 +331,8 @@ def parse_edit_request(req: dict, images: list[bytes], cfg: dict, mask: bytes | 
         th = tw * h0 / w0
         tw, th = (min(side, max(MIN_SIDE, round(v / SIZE_STEP) * SIZE_STEP)) for v in (tw, th))
         req = {**req, "size": f"{tw}x{th}"}
-    job = parse_request(req, cfg)
+    # Mage-Flow's edit model has its own steps
+    job = parse_request(req, {**cfg, "steps": cfg.get("edit_steps") or cfg.get("steps")} if mage else cfg)
     job["refs"] = list(images)
     if mask is not None:
         job["mask"] = mask
@@ -397,10 +408,12 @@ def png_rgba(rgba: bytes, width: int, height: int, made_w: int, made_h: int) -> 
 def prompt_ids(tok, prompt: str, refs: int = 0, family: str = "qwen-image") -> list[int]:
     """The prompt in the model's chat form, tokenized (Qwen3-VL's tokenizer): the user's text plain, so a special
     token spelled in it stays text; an edit's `refs` reference images before it, one pad each (stable-diffusion.cpp's
-    prompt for Qwen-Image-2.1's edits, the pads widened by the engine).  Mage-Flow's in its own form
-    (MF_PROMPT_HEAD)."""
-    head = ((MF_PROMPT_HEAD if family == "mage-flow" else PROMPT_HEAD) +
-            "".join(REF_PROMPT.format(sep=" " if i else "", i=i + 1) for i in range(refs)))
+    prompt for Qwen-Image-2.1's edits, the pads widened by the engine).  Mage-Flow's in its own forms (MF_PROMPT_HEAD;
+    an edit's MF_EDIT_HEAD, each reference "Image j: <pad>" before the instruction)."""
+    if family == "mage-flow":
+        head = MF_EDIT_HEAD + "".join(MF_EDIT_REF.format(i=i + 1) for i in range(refs)) if refs else MF_PROMPT_HEAD
+    else:
+        head = PROMPT_HEAD + "".join(REF_PROMPT.format(sep=" " if i else "", i=i + 1) for i in range(refs))
     text = head + prompt + PROMPT_TAIL
     return tok.encode(text, parse_special=True, plain=[(len(head), len(head) + len(prompt))])
 
@@ -469,6 +482,10 @@ class ImageEngine:
             cmd += ["--vision", str(self.cfg["vision"])]
         if self.cfg.get("dit_q8") is False:
             cmd += ["--dit-q8", "0"]
+        if self.cfg.get("edit_model"):
+            cmd += ["--edit-dit", str(self.cfg["edit_model"])]
+        if self.cfg.get("dit_keep") is False:
+            cmd += ["--dit-keep", "0"]
         return cmd + ["--serve"]
 
     def alive(self) -> bool:
@@ -728,6 +745,10 @@ class ImageGen:
                 job["neg_ids"] = prompt_ids(self.tok, job["negative_prompt"], len(job.get("refs") or ()), fam)
         return job["ids"]
 
+    def drop_of(self, job: dict) -> int:
+        """The system turn's ids the DiT does not take: Mage-Flow's edit form has its own."""
+        return MF_EDIT_DROP if self.cfg.get("family") == "mage-flow" and job.get("refs") else self.drop
+
     @staticmethod
     def _cfg_words(job: dict) -> str:
         """IMG's guidance words: the negative prompt's ids and the scale (none without guidance)."""
@@ -773,8 +794,8 @@ class ImageGen:
             self._ready()
             w, h = made_size(job)
             self.stage(job)
-            n = len(self.ids(job)) - self.drop
-            neg = f" NEG:{len(job['neg_ids']) - self.drop}" if job.get("cfg") else ""
+            n = len(self.ids(job)) - self.drop_of(job)
+            neg = f" NEG:{len(job['neg_ids']) - self.drop_of(job)}" if job.get("cfg") else ""
             return self.engine.ask(f"NEED {w} {h} {n}{self._refs_words(job)}{neg}", "NEED", 600)
 
     def free_mib(self) -> int:
@@ -836,7 +857,7 @@ class ImageGen:
                     def stage(name):
                         self._live(stage=name, **({"sampling_at": time.monotonic()} if name == "sampling" else {}))
                     try:
-                        r = self.engine.ask(f"IMG {mw} {mh} {job['seed'] + i} {self.drop} {out} {ids}{sigmas}"
+                        r = self.engine.ask(f"IMG {mw} {mh} {job['seed'] + i} {self.drop_of(job)} {out} {ids}{sigmas}"
                                             f"{self._refs_words(job)}{self._cfg_words(job)}", "IMAGE", timeout,
                                             cancel, step, stage)
                     except ImageJobFailed as e:
