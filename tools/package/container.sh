@@ -37,22 +37,26 @@ python3-requests, python3-pil, python3-psutil"
     level_zero="libze1, libze-intel-gpu1, libigc2, libigdfcl2"
     vulkan_icd="mesa-vulkan-drivers"
     if [ "$license" = contrib ]; then
+      # cuDNN's headers, for the image engine's attention, which opens cuDNN where the user installed it (Ubuntu's
+      # nvidia-cudnn): from NVIDIA's redistributable archive for the CUDA version (no Ubuntu package has them), its
+      # SHA-256 checked, kept in the downloads' cache
       case "$cuda_ver" in
         12.4) apt-get install -y -q --no-install-recommends nvidia-cuda-toolkit
-              cuda_path=/usr/lib/cuda cublas=libcublas12 ;;
+              cuda_path=/usr/lib/cuda cublas=libcublas12
+              cudnn_tar="cudnn-linux-x86_64-9.27.0.42_cuda12-archive.tar.xz"
+              cudnn_sha=dc45f8c5fd44955c6e950c690ea92c28ea848ffb1fefbaabf3a9d175d961263a ;;
         *) v=$(echo "$cuda_ver" | tr . -)
            apt-get install -y -q --no-install-recommends "cuda-toolkit-$v"
-           # cuDNN's headers, for the image engine's attention, which opens cuDNN where the user installed it
-           # (Ubuntu's nvidia-cudnn): from NVIDIA's redistributable archive (no Ubuntu package has them), its SHA-256
-           # checked, kept in the downloads' cache
+           cuda_path=/usr/local/cuda-$cuda_ver cublas=libcublas-$v
            cudnn_tar="cudnn-linux-x86_64-9.27.0.42_cuda13-archive.tar.xz"
-           [ -f "/cache/$cudnn_tar" ] || curl -fsSL -o "/cache/$cudnn_tar" \
-             "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/$cudnn_tar"
-           echo "dd3245ba3aca8593934fc946d08649ad3a5ee8500e8da3870bc23bf7ddccd7f9  /cache/$cudnn_tar" | sha256sum -c -
-           mkdir -p /opt/cudnn
-           tar -xJf "/cache/$cudnn_tar" -C /opt/cudnn --strip-components=1 --wildcards '*/include/*'
-           cuda_path=/usr/local/cuda-$cuda_ver cublas=libcublas-$v cudnn=nvidia-cudnn cudnn_root=/opt/cudnn ;;
+           cudnn_sha=dd3245ba3aca8593934fc946d08649ad3a5ee8500e8da3870bc23bf7ddccd7f9 ;;
       esac
+      [ -f "/cache/$cudnn_tar" ] || curl -fsSL -o "/cache/$cudnn_tar" \
+        "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/$cudnn_tar"
+      echo "$cudnn_sha  /cache/$cudnn_tar" | sha256sum -c -
+      mkdir -p /opt/cudnn
+      tar -xJf "/cache/$cudnn_tar" -C /opt/cudnn --strip-components=1 --wildcards '*/include/*'
+      cudnn=nvidia-cudnn cudnn_root=/opt/cudnn
       curl -fsSL "$intel_key" | gpg --dearmor > /usr/share/keyrings/oneapi-archive-keyring.gpg
       echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" \
         > /etc/apt/sources.list.d/oneAPI.list
