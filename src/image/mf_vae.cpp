@@ -75,36 +75,39 @@ void im2col3(const uint16_t* in16, int64_t H, int64_t W, int64_t C, int64_t p0, 
     });
 }
 
-// the group norm's partial sums: part[p][g] = (sum, sum of squares) of pixel p's channels of group g
-void gn_partial(const float* x, int64_t HW, int64_t C, float* part, void* s) {
+// the group norm's partial sums: part[p][g] = the sum over pixel p's channels of group g of x - m, or of (x - m)^2
+// with `sq`, m the group's mean in stats[2 g] (0 without `sq`)
+void gn_partial(const float* x, const float* stats, int64_t HW, int64_t C, bool sq, float* part, void* s) {
     const int64_t cg = C / kGroups;
     q_of(s).parallel_for(sycl::range<1>((size_t) (HW * kGroups)), [=](sycl::id<1> id) {
         const auto i = static_cast<int64_t>(id[0]);
         const int64_t p = i / kGroups, g = i - p * kGroups;
         const float* r = x + p * C + g * cg;
-        float a = 0.f, b = 0.f;
+        const float m = sq ? stats[2 * g] : 0.f;
+        float a = 0.f;
         for (int64_t c = 0; c < cg; ++c) {
-            a += r[c];
-            b += r[c] * r[c];
+            const float d = r[c] - m;
+            a += sq ? d * d : d;
         }
-        part[2 * i] = a;
-        part[2 * i + 1] = b;
+        part[i] = a;
     });
 }
 
-// stats[g] = (mean, 1 / std) of group g over every pixel, from gn_partial's sums
-void gn_stats(float* part, int64_t HW, int64_t C, float* stats, void* s) {
-    const auto n = (double) (HW * (C / kGroups));
+// stats[g] = the mean of group g over every pixel from gn_partial's sums, or with `sq` 1 / std in stats[2 g + 1]: two
+// passes in FP32 (the mean, then the squares about it) where one pass would need FP64, which not every GPU has
+void gn_stats(const float* part, int64_t HW, int64_t C, bool sq, float* stats, void* s) {
+    const int64_t cg = C / kGroups;
+    const float inv_n = 1.f / (float) (HW * cg);
     q_of(s).parallel_for(sycl::range<1>((size_t) kGroups), [=](sycl::id<1> id) {
         const auto g = static_cast<int64_t>(id[0]);
-        double a = 0, b = 0;
+        float a = 0.f, comp = 0.f;   // Kahan's sum over up to 16384 pixels
         for (int64_t p = 0; p < HW; ++p) {
-            a += part[2 * (p * kGroups + g)];
-            b += part[2 * (p * kGroups + g) + 1];
+            const float y = part[p * kGroups + g] - comp, t = a + y;
+            comp = (t - a) - y;
+            a = t;
         }
-        const double mean = a / n, var = std::max(0.0, b / n - mean * mean);
-        stats[2 * g] = (float) mean;
-        stats[2 * g + 1] = (float) (1.0 / std::sqrt(var + (double) kEps));
+        if (sq) stats[2 * g + 1] = 1.f / sycl::sqrt(a * inv_n + kEps);
+        else stats[2 * g] = a * inv_n;
     });
 }
 
@@ -559,8 +562,10 @@ void MfVae::conv(const Conv& c, const uint16_t* in16, int64_t H, int64_t W, floa
 
 void MfVae::gn_silu16(const float* x, const float* w, const float* b, int64_t HW, int64_t C, bool silu_on,
                       uint16_t* y16) {
-    gn_partial(x, HW, C, gn_part_, s_);
-    gn_stats(gn_part_, HW, C, vec_, s_);
+    gn_partial(x, vec_, HW, C, false, gn_part_, s_);
+    gn_stats(gn_part_, HW, C, false, vec_, s_);
+    gn_partial(x, vec_, HW, C, true, gn_part_, s_);
+    gn_stats(gn_part_, HW, C, true, vec_, s_);
     gn_apply16(x, vec_, w, b, HW, C, silu_on, y16, s_);
 }
 
