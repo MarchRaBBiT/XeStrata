@@ -209,7 +209,7 @@ BETA の 4 つの RAM の目安は、ダウンロードの大きさに約 8 GB �
 RAM の目安は、文章のモデルとは別に要る量です。足りなければ setup は文の読み手を Q4_K まで下げ、それでも足りなければ画像のモデルを下げます（`--image-ssd-offload on` なら下げずに、入らない分を SSD から読みます）。
 VRAM が大きいほど速くなります。
 
-画像は `POST /v1/images/generations` と `/v1/images/edits`（OpenAI の形）、Web のページの Images のタブ、チャットから作れます（[詳細](docs/DETAILS.ja.md#画像の生成任意)）。
+画像は `POST /v1/images/generations` と `/v1/images/edits`（vLLM-Omni 互換（OpenAI 互換））、Web のページの Images のタブ、チャットから作れます（[詳細](docs/DETAILS.ja.md#画像の生成任意)）。
 Qwen-Image-2.1 の重みは Qwen Research License で、自由なソフトウェアのライセンスではありません。
 
 ## インストール

@@ -136,7 +136,9 @@ QiNeed QiPipeline::need(int64_t n_text, int64_t width, int64_t height,
     if (mask) edit = std::max(edit, vae.encode_scratch_bytes(height, width) + (uint64_t) (4 * height * width) * 4);
     const uint64_t inpaint = mask ? (uint64_t) ((2 * dit.channels() + 1) * h * w) * 4 : 0;
     // guidance: the negative prompt's prefix beside the first (the same references), and its sequence
-    const int64_t neg_pre = n_neg > 0 ? n_neg + (T - h * w - n_text) : 0, T_act = std::max(T, neg_pre + h * w);
+    // its activations: both sequences side by side after the first step (forward_pair)
+    const int64_t neg_pre = n_neg > 0 ? n_neg + (T - h * w - n_text) : 0,
+                  T_act = n_neg > 0 ? qi_attn_rows(T) + qi_attn_rows(neg_pre + h * w) : T;
     const uint64_t fixed = dit.weight_bytes() + vae.weight_bytes() + kScratch + dit.prefix_row_bytes(T - h * w) +
                            dit.prefix_row_bytes(neg_pre) + inpaint;
     // the prefix cache: in VRAM in the plan's room, the rest in pinned RAM (least: all of it there)
@@ -191,7 +193,8 @@ QiPlan QiPipeline::plan(int64_t T, int64_t h, int64_t w, int64_t n_ids, int64_t 
     const int64_t n_pre = T > 0 ? T - h * w : 0;
     p.fixed = dit_->weight_bytes() + vae_->weight_bytes() + kScratch + dit_->prefix_row_bytes(n_pre) +
               dit_->prefix_row_bytes(n_neg_pre);
-    if (T > 0) T = std::max(T, n_neg_pre + h * w);   // the activations: the longer of the two contexts' sequences
+    // the activations: guidance's both sequences side by side after the first step (forward_pair)
+    if (T > 0 && n_neg_pre > 0) T = qi_attn_rows(T) + qi_attn_rows(n_neg_pre + h * w);
     if (p.budget <= p.fixed) throw std::runtime_error("image engine: the VRAM budget (" + std::to_string(p.budget >> 20) +
                                                       " MiB) is below the weights that always stay");
     const uint64_t avail = p.budget - p.fixed, dit_min = dit_->block_min(), te_min = te_->layer_min();

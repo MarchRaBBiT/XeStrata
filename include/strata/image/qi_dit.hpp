@@ -128,6 +128,13 @@ private:
     void product(const uint16_t* x16, const W& w, float* y, int64_t T, int64_t ldy = 0, int64_t row0 = 0,
                  int64_t rows = -1);
     void step_modulation(float t);
+    /// The rotary tables [n_text + H W][64] of a context's positions into cos and sin (device).
+    void rope_tables(const std::vector<float>& pre_pos, int64_t n_text, int64_t target_pos, int64_t H, int64_t W,
+                     float* cos, float* sin);
+    /// forward for both contexts at once, their prefixes cached (guidance after its first step): the image's rows of
+    /// the two side by side through each product, the attention one context at a time; out the first's velocity,
+    /// out2 the other's.
+    void forward_pair(const float* x, float t, int64_t H, int64_t W, float* out, float* out2);
     void ensure(int64_t T, int64_t HW);
     void swap_context();   // the first context's state <-> other_'s
 
@@ -161,6 +168,8 @@ private:
         std::vector<float> pre_pos;
         int32_t* key_lim = nullptr;
         std::vector<uint16_t*> pk, pv;
+        float *cos = nullptr, *sin = nullptr;   // its rotary tables (forward_pair), for this size and prefix
+        int64_t rope_H = -1, rope_W = -1, rope_text = -1, rope_cap = 0;
     } other_;
     float *mods_ = nullptr;           // [4][2][C]: the step's modulation, row 0 the image's, row 1 the text's
     float *scale_ = nullptr;          // [2][C]: the final norm's scale (row 0)

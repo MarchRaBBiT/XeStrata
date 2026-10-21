@@ -132,6 +132,8 @@ struct AttnKernel {
     int64_t T, heads, n_text;
     const int32_t* key_lim;   // the prefix rows' key limits (null: a text row its own prefix)
     float scale;
+    int64_t row0;             // the first query row (a multiple of TM): out16's row 0 is query row `first`
+    int64_t first;
     sycl::local_accessor<sycl::half, 1> ps;      // per sub-group P [TM][PLD]
     sycl::local_accessor<float, 1> st;           // per sub-group S [TM][SLD], or the output [TM][D]
     sycl::local_accessor<float, 1> rows;         // per sub-group m and l [2][TM]
@@ -166,7 +168,7 @@ struct AttnKernel {
         sycl::sub_group sg = it.get_sub_group();
         const int g = (int) sg.get_group_linear_id(), lane = (int) sg.get_local_linear_id();
         const int nsg = (int) (it.get_local_range(1) / SG);
-        const int64_t h = (int64_t) it.get_group(0), my0 = ((int64_t) it.get_group(1) * nsg + g) * TM;
+        const int64_t h = (int64_t) it.get_group(0), my0 = row0 + ((int64_t) it.get_group(1) * nsg + g) * TM;
         if (my0 >= T) return;
         const int64_t row = heads * D;
         const size_t soff = (size_t) g * SREG, poff = (size_t) g * TM * PLD, roff = (size_t) g * 2 * TM;
@@ -275,7 +277,8 @@ struct AttnKernel {
         for (int e = lane; e < TM * D; e += SG) {
             const int rr = e / D;
             const int64_t tt = my0 + rr;
-            if (tt < T) out16[tt * row + h * D + e % D] = f16_from_f32(st[soff + e] / rows[roff + TM + rr]);
+            if (tt < T && tt >= first)
+                out16[(tt - first) * row + h * D + e % D] = f16_from_f32(st[soff + e] / rows[roff + TM + rr]);
         }
         }
 #else
@@ -324,12 +327,12 @@ int nsg_most(const sycl::device& d) {
 
 template<int P>
 sycl::event launch(sycl::queue& q, const uint16_t* q16, const uint16_t* k16, const uint16_t* v16, int64_t T,
-                   int64_t heads, int64_t n_text, const int32_t* key_lim, uint16_t* out16, int nsg) {
+                   int64_t heads, int64_t n_text, const int32_t* key_lim, uint16_t* out16, int nsg, int64_t first) {
     using K = AttnKernel<P>;
-    const int64_t bq = (int64_t) nsg * K::TM;
-    const size_t groups = (size_t) ((T + bq - 1) / bq);
+    const int64_t bq = (int64_t) nsg * K::TM, row0 = first / K::TM * K::TM;   // its tiles stay inside the rows
+    const size_t groups = (size_t) ((T - row0 + bq - 1) / bq);
     return q.submit([&](sycl::handler& h) {
-        K k{q16, k16, v16, out16, T, heads, n_text, key_lim, 1.0f / std::sqrt((float) D),
+        K k{q16, k16, v16, out16, T, heads, n_text, key_lim, 1.0f / std::sqrt((float) D), row0, first,
             sycl::local_accessor<sycl::half, 1>(sycl::range<1>((size_t) nsg * K::TM * K::PLD), h),
             sycl::local_accessor<float, 1>(sycl::range<1>((size_t) nsg * K::SREG), h),
             sycl::local_accessor<float, 1>(sycl::range<1>((size_t) nsg * 2 * K::TM), h)};
@@ -348,8 +351,8 @@ const char* qi_attention_path() {
 
 void qi_attention(const uint16_t* q16, const uint16_t* k16, const uint16_t* v16, int64_t T, int64_t heads,
                   int64_t head_dim, int64_t n_text, uint16_t* out16, float* scratch, void* stream,
-                  const int32_t* key_lim) {
-    if (T <= 0) return;
+                  const int32_t* key_lim, int64_t first) {
+    if (T <= first) return;
     if (head_dim != D) throw std::invalid_argument("qi_attention: head_dim 128");
     sycl::queue& q = core::Runtime::get().stream(stream);
     static core::PerDevice<int> per_device;
@@ -362,10 +365,10 @@ void qi_attention(const uint16_t* q16, const uint16_t* k16, const uint16_t* v16,
     std::atomic<int>& tuned = *tuned_of.get(q.get_device(), [] { return std::make_shared<std::atomic<int>>(0); });
     auto run = [&](int nsg) -> sycl::event {
         switch (p) {
-        case 0: return launch<0>(q, q16, k16, v16, T, heads, n_text, key_lim, out16, nsg);
-        case 1: return launch<1>(q, q16, k16, v16, T, heads, n_text, key_lim, out16, nsg);
-        case 2: return launch<2>(q, q16, k16, v16, T, heads, n_text, key_lim, out16, nsg);
-        default: return launch<3>(q, q16, k16, v16, T, heads, n_text, key_lim, out16, nsg);
+        case 0: return launch<0>(q, q16, k16, v16, T, heads, n_text, key_lim, out16, nsg, first);
+        case 1: return launch<1>(q, q16, k16, v16, T, heads, n_text, key_lim, out16, nsg, first);
+        case 2: return launch<2>(q, q16, k16, v16, T, heads, n_text, key_lim, out16, nsg, first);
+        default: return launch<3>(q, q16, k16, v16, T, heads, n_text, key_lim, out16, nsg, first);
         }
     };
     const int most = p == 0 ? nsg_most<0>(q.get_device()) : p == 1 ? nsg_most<1>(q.get_device())
@@ -393,7 +396,7 @@ void qi_attention(const uint16_t* q16, const uint16_t* k16, const uint16_t* v16,
     case 0: case 1: case 2: case 3: e = run(nsg); break;
     default:
         qi_attention_plain(q16, k16, v16, T, heads, head_dim, n_text, scratch, stream, key_lim);
-        qi_to_f16(scratch, T * heads * head_dim, out16, stream);
+        qi_to_f16(scratch + first * heads * head_dim, (T - first) * heads * head_dim, out16, stream);
         return;
     }
     if (!stream) core::Runtime::get().wait(e, "qi_attention");

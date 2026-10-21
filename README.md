@@ -223,7 +223,7 @@ The download is the image model, the text encoder (Qwen3-VL-8B Q8_0), the VAE an
 The RAM is what it takes besides the text model: when it is short, setup lowers the text encoder down to Q4_K, then the image model (with `--image-ssd-offload on` it keeps them and reads what does not fit from the SSD).
 More VRAM makes it faster.
 
-Images are made through `POST /v1/images/generations` and `/v1/images/edits` (OpenAI's shapes), the Images tab of the web page, and the chat ([details](docs/DETAILS.md#image-generation-optional)).
+Images are made through `POST /v1/images/generations` and `/v1/images/edits` (vLLM-Omni compatible, so OpenAI compatible), the Images tab of the web page, and the chat ([details](docs/DETAILS.md#image-generation-optional)).
 Qwen-Image-2.1's weights are under the Qwen Research License, not a free software license.
 
 ## Install

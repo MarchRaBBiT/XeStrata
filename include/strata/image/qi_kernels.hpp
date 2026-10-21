@@ -35,10 +35,11 @@ void qi_attention_plain(const uint16_t* q16, const uint16_t* k16, const uint16_t
 constexpr int64_t qi_attn_rows(int64_t T) { return (T + 127) / 128 * 128; }
 
 /// The same attention on the GPU's matrix engines where it has them (src/image/qi_attn.cpp), FP16 out16
-/// [T][heads * head_dim]; else qi_attention_plain through `scratch` (FP32 [T][heads * head_dim]).
+/// [T - first][heads * head_dim]: the query rows from `first` on (the rows before it, a cached prefix's, are not
+/// asked); else qi_attention_plain through `scratch` (FP32 [T][heads * head_dim]).
 void qi_attention(const uint16_t* q16, const uint16_t* k16, const uint16_t* v16, int64_t T, int64_t heads,
                   int64_t head_dim, int64_t n_text, uint16_t* out16, float* scratch, void* stream,
-                  const int32_t* key_lim = nullptr);
+                  const int32_t* key_lim = nullptr, int64_t first = 0);
 
 /// The path qi_attention takes on the current GPU, for the report.
 const char* qi_attention_path();
