@@ -6774,7 +6774,8 @@ def host_names_for(bind_host: str, allowed_hosts=(), trusted_origins=()) -> set[
             names.update((pc, pc + ".local"))
         except OSError:
             pass
-        names.update(("host.docker.internal", *lan_addresses()))
+        # the names a container reaches this PC by: Docker's and Podman's
+        names.update(("host.docker.internal", "host.containers.internal", *lan_addresses()))
     names.update(x for x in allowed_hosts if x != "*")
     names.update(filter(None, (host_name(o.split("://", 1)[-1]) for o in trusted_origins)))
     return names
