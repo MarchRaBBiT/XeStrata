@@ -433,10 +433,6 @@ void bf16_to_f16_inplace(uint16_t* p, int64_t n, sycl::queue& q) {
     });
 }
 
-void fill_i32(int32_t* p, int64_t n, int32_t v, void* s) {
-    q_of(s).parallel_for(sycl::range<1>((size_t) n), [=](sycl::id<1> id) { p[id[0]] = v; });
-}
-
 // x += ds * v, v the guided velocity: out[0] (the prompt's) alone, or out[1] + cfg (out[0] - out[1])
 void euler(float* x, const float* out, int64_t n, int ctxs, float cfg, float ds, void* s) {
     q_of(s).parallel_for(sycl::range<1>((size_t) n), [=](sycl::id<1> id) {
@@ -735,7 +731,6 @@ void MfDit::ensure(int64_t hw, int n, int64_t max_text) {
         gpu::copy(cos_id_, one.data(), one.size() * 4);
         gpu::copy(sin_id_, zero.data(), zero.size() * 4);
     }
-    key_lim_ = alloc<int32_t>(allocs_, 2 * max_text);
     if (std::strcmp(qi_attention_path(), "plain (FP32)") == 0) attn_scratch_ = alloc<float>(allocs_, TP * C_);
     b0_img_ = alloc<float>(allocs_, hw * C_);
     xin_ = alloc<float>(allocs_, hw * in_ch_);
@@ -755,14 +750,13 @@ void MfDit::drop_activations() {
     tq_ = tk_ = tv_ = rs_ = rs_io_ = rs_to_ = hs_ = vpart_ = nullptr;
     for (void* p : {(void*) img_, (void*) txt_, (void*) q_, (void*) k_, (void*) v_, (void*) a_, (void*) gu_,
                     (void*) h16_, (void*) jq16_, (void*) jk16_, (void*) jv16_, (void*) jo16_, (void*) io16_,
-                    (void*) to16_, (void*) cos_, (void*) sin_, (void*) cos_id_, (void*) sin_id_, (void*) key_lim_,
-                    (void*) attn_scratch_, (void*) b0_img_, (void*) b0_txt_, (void*) xin_, (void*) xq8_})
+                    (void*) to16_, (void*) cos_, (void*) sin_, (void*) cos_id_, (void*) sin_id_, (void*) attn_scratch_,
+                    (void*) b0_img_, (void*) b0_txt_, (void*) xin_, (void*) xq8_})
         release(allocs_, p);
     xq8_ = nullptr;
     img_ = txt_ = q_ = k_ = v_ = a_ = gu_ = cos_ = sin_ = cos_id_ = sin_id_ = nullptr;
     attn_scratch_ = b0_img_ = b0_txt_ = xin_ = nullptr;
     h16_ = jq16_ = jk16_ = jv16_ = jo16_ = io16_ = to16_ = nullptr;
-    key_lim_ = nullptr;
     cap_hw_ = cap_n_ = cap_text_ = 0;
 }
 
@@ -891,7 +885,6 @@ void MfDit::forward(const float* x, float sigma, int64_t h, int64_t w, int n, fl
     for (int i = 0; i < n; ++i) {
         toff[(size_t) i] = i == 0 ? 0 : toff[(size_t) i - 1] + ctx_[i - 1].rows;
         gpu::copy_async(txt_ + toff[(size_t) i] * C, ctx_[i].txt0, (size_t) (ctx_[i].rows * C) * 4, s_);
-        fill_i32(key_lim_ + i * cap_text_, std::max<int64_t>(ctx_[i].rows, 1), (int32_t) (ctx_[i].rows + HW), s_);
     }
     // the joint rows past a context's end zero (the attention reads them up to T rounded up)
     for (int i = 0; i < n; ++i) {
@@ -930,8 +923,9 @@ void MfDit::forward(const float* x, float sigma, int64_t h, int64_t w, int n, fl
                         hs_ + i * heads_, Lt, heads_, hd_, jq16_ + o, jk16_ + o, jv16_ + o, s_);
             qk_rope_v16(q.from(i * HW), k.from(i * HW), vi, f(b.nq), f(b.nk), cos_, sin_, true, hs_ + i * heads_, HW,
                         heads_, hd_, jq16_ + o + Lt * C, jk16_ + o + Lt * C, jv16_ + o + Lt * C, s_);
-            qi_attention(jq16_ + o, jk16_ + o, jv16_ + o, Lt + HW, heads_, hd_, Lt, jo16_, attn_scratch_, s_,
-                         key_lim_ + i * cap_text_);
+            // every row sees every key (the text rows too: Mage-Flow's joint attention has no mask), so all of
+            // them go to the GPU maker's attention where there is one
+            qi_attention(jq16_ + o, jk16_ + o, jv16_ + o, Lt + HW, heads_, hd_, 0, jo16_, attn_scratch_, s_);
             rows16(Heads{jo16_, hs_ + i * heads_, C, hd_}, Lt, C, to16_ + t0, rs_to_ + toff[(size_t) i], s_);
             rows16(Heads{jo16_ + Lt * C, hs_ + i * heads_, C, hd_}, HW, C, io16_ + i * HW * C, rs_io_ + i * HW, s_);
         }
