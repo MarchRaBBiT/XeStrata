@@ -10,8 +10,11 @@
 // changes with the time, so nothing of it is kept between steps beyond its input projection.
 //
 // The weights come from the bf16 safetensors (Comfy-Org/Mage-Flow's files as they are).  With q8 each block is
-// quantized to Q8_0 on the host as it is read, once, and the file's pages are dropped from the page cache: half the
-// VRAM and the bytes a streamed block moves, the products dequantizing it to FP16 each time.  Without it the bf16 bytes
+// quantized to 8 bits on the host as it is read, once, and the file's pages are dropped from the page cache: half the
+// VRAM and the bytes a streamed block moves.  Where the GPU's library takes int8 products (prefill::Gemm::i8_usable) the
+// weights are rotated in groups and quantized with a scale a row, and so are the activations a token at each product
+// (W8A8, qi_rows_i8: ComfyUI's int8 form, the rotation spreading the outlier channels below); elsewhere as Q8_0, the
+// products dequantizing it to FP16 each time.  Without q8 the bf16 bytes
 // go from the mapped file to the GPU as they are and are rewritten there to FP16 in place (the same two bytes, the few
 // values past FP16's range saturated), which the products take as they are: no dequantization, the matrix units fed
 // straight (MfPipeline takes this when the blocks fit in VRAM).  The products take FP16 activations (rows scaled into
@@ -118,9 +121,14 @@ private:
         float* txt0 = nullptr;   // [rows][C]: txt_in(txt_norm(states))
     };
     // y [T][w.n] = (x16 [T][w.k], rows scaled down by rs) . w^T, the rows times rs again, plus bias (rs, bias null:
-    // none)
-    void product(const uint16_t* x16, const float* rs, const W& w, const uint8_t* base, float* y, int64_t T,
-                 const float* bias);
+    // none).  same_input: x16 is the previous product's, which was W8A8 too (its int8 input is taken again).  defer:
+    // a W8A8 product leaves y its int32 sums, their scales and bias in deferred_ for the reader; true when it did.
+    bool product(const uint16_t* x16, const float* rs, const W& w, const uint8_t* base, float* y, int64_t T,
+                 const float* bias, bool same_input = false, bool defer = false);
+    // h16_ and rs_ = the MLP's GELU of gu_'s T rows: product's output (deferred: its int32 sums)
+    void gelu(bool deferred, int64_t T);
+    // a block's modulation y [w.n] = SiLU(temb) . w^T + bias (tsil: its FP16 copy, for a 16-bit w)
+    void modulation(const uint16_t* tsil, const W& w, const uint8_t* base, float* y, const float* bias);
     void ensure(int64_t hw, int n, int64_t max_text);
     void rope_tables(int64_t h, int64_t w);
     void drop_refs();
@@ -132,7 +140,7 @@ private:
     prefill::Gemm gemm_;
     std::vector<void*> allocs_;
     uint64_t weight_bytes_ = 0;
-    bool dry_ = false, q8_ = true, keep0_ = false;
+    bool dry_ = false, q8_ = true, w8_ = false, keep0_ = false;
     int64_t C_ = 3072, F_ = 12288, heads_ = 24, hd_ = 128, in_ch_ = 128, txt_dim_ = 2560;
     std::vector<int64_t> axes_{16, 56, 56};
     // the parts outside the blocks, FP16 on the GPU
@@ -154,6 +162,11 @@ private:
              *io16_ = nullptr, *to16_ = nullptr, *t16_ = nullptr;
     float *cos_ = nullptr, *sin_ = nullptr, *cos_id_ = nullptr, *sin_id_ = nullptr, *attn_scratch_ = nullptr;
     int32_t* key_lim_ = nullptr;
+    struct Deferred {
+        const float *sx = nullptr, *sw = nullptr, *bias = nullptr;
+    } deferred_;   // the scales of the last deferred W8A8 product's sums
+    int8_t* xq8_ = nullptr;   // W8A8's input (w8_): xq8_rows_ rows of up to xq8_cols_ int8 values, then their scales
+    int64_t xq8_rows_ = 0, xq8_cols_ = 0;
     float *b0_img_ = nullptr, *b0_txt_ = nullptr;
     int64_t rope_h_ = -1, rope_w_ = -1, rope_refs_ = -1;
     // an edit's references

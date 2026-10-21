@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <thread>
@@ -34,7 +35,8 @@ namespace mf_dit_detail {
 namespace syclex = sycl::ext::oneapi::experimental;
 using strata::kernels::f16_from_f32;
 
-constexpr int kTypeF16 = 1, kTypeQ8_0 = 8;
+// kTypeW8: int8 rows rotated as qi_rows_i8 rotates them, then a scale a row (FP32), for prefill::Gemm::i8
+constexpr int kTypeF16 = 1, kTypeQ8_0 = 8, kTypeW8 = -8;
 constexpr float kEps = 1e-6f;
 
 sycl::queue& q_of(void* s) { return core::Runtime::get().stream(s); }
@@ -89,15 +91,45 @@ void quantize_row(const uint16_t* src, int64_t K, uint8_t* dst) {
     }
 }
 
-// the rows of a [n][k] bf16 matrix quantized on the host's threads
-void quantize_matrix(const uint16_t* src, int64_t n, int64_t k, uint8_t* dst) {
-    const uint64_t row = (uint64_t) (k / 32 * 34);
+// row of K bf16 values -> int8 values and their scale as qi_rows_i8 makes them: each group of kQiRotate times the
+// normalized Hadamard matrix (Sylvester's, the same butterflies), then one scale for the row
+void quantize_row_w8(const uint16_t* src, int64_t K, int8_t* dst, float* scale) {
+    std::vector<float> v((size_t) K);
+    float amax = 0.f;
+    for (int64_t g = 0; g < K; g += kQiRotate) {
+        float* x = v.data() + g;
+        for (int64_t j = 0; j < kQiRotate; ++j) x[j] = bf16_value(src[g + j]);
+        for (int64_t m = 1; m < kQiRotate; m <<= 1)
+            for (int64_t i = 0; i < kQiRotate; i += 2 * m)
+                for (int64_t j = i; j < i + m; ++j) {
+                    const float a = x[j], b = x[j + m];
+                    x[j] = a + b;
+                    x[j + m] = a - b;
+                }
+        for (int64_t j = 0; j < kQiRotate; ++j) {
+            x[j] *= 1.f / 16.f;
+            amax = std::max(amax, std::fabs(x[j]));
+        }
+    }
+    const float d = amax / 127.f, id = amax > 0.f ? 1.f / d : 0.f;
+    for (int64_t j = 0; j < K; ++j) dst[j] = (int8_t) std::lround(v[(size_t) j] * id);
+    *scale = d;
+}
+
+// the rows of a [n][k] bf16 matrix quantized on the host's threads: Q8_0, or with w8 as quantize_row_w8 (the n rows'
+// int8 values, then their n scales)
+void quantize_matrix(const uint16_t* src, int64_t n, int64_t k, uint8_t* dst, bool w8) {
+    const uint64_t row = w8 ? (uint64_t) k : (uint64_t) (k / 32 * 34);
+    auto* scales = reinterpret_cast<float*>(dst + (uint64_t) n * row);
     const int nt = (int) std::max(1u, std::min(16u, std::thread::hardware_concurrency()));
     std::vector<std::thread> th;
     th.reserve((size_t) nt);
     for (int t = 0; t < nt; ++t)
         th.emplace_back([=] {
-            for (int64_t r = t; r < n; r += nt) quantize_row(src + r * k, k, dst + r * row);
+            for (int64_t r = t; r < n; r += nt) {
+                if (w8) quantize_row_w8(src + r * k, k, reinterpret_cast<int8_t*>(dst + r * row), scales + r);
+                else quantize_row(src + r * k, k, dst + r * row);
+            }
         });
     for (auto& x : th) x.join();
 }
@@ -197,6 +229,19 @@ struct Gelu {
     template<class R> Stats stats(int64_t, int64_t, int64_t, R) const { return {}; }
     float value(int64_t t, int64_t c, const Stats&) const {
         const float v = x[t * C + c];
+        return 0.5f * v * (1.f + sycl::tanh(0.7978845608028654f * (v + 0.044715f * v * v * v)));
+    }
+};
+
+// GELU's tanh form of a W8A8 product's int32 sums (its output, unscaled: MfDit::product's defer), scaled as
+// qi_i8_scale scales them
+struct GeluI8 {
+    const int32_t* x;
+    const float *sx, *sw, *b;
+    int64_t C;
+    template<class R> Stats stats(int64_t, int64_t, int64_t, R) const { return {}; }
+    float value(int64_t t, int64_t c, const Stats&) const {
+        const float v = (float) x[t * C + c] * sx[t] * sw[c] + (b != nullptr ? b[c] : 0.f);
         return 0.5f * v * (1.f + sycl::tanh(0.7978845608028654f * (v + 0.044715f * v * v * v)));
     }
 };
@@ -336,6 +381,31 @@ void qk_rope_v16(const float* q, const float* k, const float* v, const float* wq
 }
 
 // y[t] = y[t] * rs[t] + b (rs null: 1; b null: none)
+// y[n] = x . w[n] + b[n]: w N rows of Q8_0 blocks (K / 32 of them, 34 bytes: an FP16 scale and 32 int8 values),
+// x FP32; a work-group of 32 a row, reading it as 16-bit words, neighbouring items neighbouring words (a row of 3072
+// values: 1632 words, 96 of them the scales, which the items of the block's other words read again from the cache)
+void q8_0_vec(const uint8_t* w, const float* x, const float* b, float* y, int64_t N, int64_t K, void* s) {
+    constexpr int64_t local = 32;
+    const int64_t nw = K / 32 * 17;
+    q_of(s).parallel_for(sycl::nd_range<1>(sycl::range<1>((size_t) (N * local)), sycl::range<1>((size_t) local)),
+                         [=](sycl::nd_item<1> it) {
+        const auto n = static_cast<int64_t>(it.get_group_linear_id());
+        const auto lane = static_cast<int64_t>(it.get_local_linear_id());
+        const auto* row = reinterpret_cast<const uint16_t*>(w + n * nw * 2);
+        float acc = 0.f;
+        for (int64_t k = lane; k < nw; k += local) {
+            const int64_t blk = k / 17, o = k - blk * 17;   // the word's block, and its place there (0 the scale)
+            if (o == 0) continue;
+            const uint16_t v = row[k];
+            const float* xb = x + blk * 32 + 2 * (o - 1);
+            const float d = kernels::f32_from_f16(row[blk * 17]);
+            acc += d * ((float) (int8_t) (v & 0xFF) * xb[0] + (float) (int8_t) (v >> 8) * xb[1]);
+        }
+        acc = sycl::reduce_over_group(it.get_group(), acc, sycl::plus<float>());
+        if (lane == 0) y[n] = acc + (b != nullptr ? b[n] : 0.f);
+    });
+}
+
 void rows_back(float* y, const float* rs, const float* b, int64_t T, int64_t N, void* s) {
     q_of(s).parallel_for(sycl::range<1>((size_t) (T * N)), [=](sycl::id<1> id) {
         const auto i = static_cast<int64_t>(id[0]);
@@ -394,6 +464,9 @@ bool MfDit::open(const std::string& path, void* stream, std::string& err, bool d
         s_ = stream;
         dry_ = dry;
         q8_ = q8;
+        // the int8 form: W8A8 (int8 activations a token, kTypeW8) where the GPU's library takes int8 products, else
+        // Q8_0 (dequantized to FP16 for each product)
+        w8_ = q8 && std::getenv("STRATA_NO_W8A8") == nullptr && prefill::Gemm::i8_usable(stream);
         SafeTensors st(path);
         file_ = std::make_unique<MappedFile>(path);
         const uint8_t* data = file_->data() + st.data_base();
@@ -475,9 +548,16 @@ bool MfDit::open(const std::string& path, void* stream, std::string& err, bool d
                 it.w->n = t.shape[0];
                 it.w->k = t.shape[1];
                 if (it.w->k % 32 != 0) throw std::runtime_error("image engine (Mage-Flow DiT): columns not 32s");
-                it.w->type = q8_ ? kTypeQ8_0 : kTypeF16;   // FP16: the file's bf16, rewritten on the GPU
-                it.w->row_bytes = q8_ ? (uint64_t) (it.w->k / 32 * 34) : (uint64_t) it.w->k * 2;
-                if (q8_) qbytes += it.w->row_bytes * (uint64_t) it.w->n;
+                // the modulations stay Q8_0: their one row (the time's embedding) scales, shifts and gates every
+                // row of the block, and a scale for all of it costs the most (RTX 4070, Turbo's 4 steps, the final
+                // latent's cosine to the reference: 0.991 all Q8_0, 0.961 with W8A8 modulations alone, 0.981 with all
+                // the other products in W8A8)
+                const bool w8 = w8_ && it.w->k % kQiRotate == 0 && it.w != &b.imod && it.w != &b.tmod;
+                it.w->type = w8 ? kTypeW8 : q8_ ? kTypeQ8_0 : kTypeF16;   // FP16: the file's bf16, rewritten on the GPU
+                it.w->row_bytes = w8    ? (uint64_t) it.w->k
+                                  : q8_ ? (uint64_t) (it.w->k / 32 * 34)
+                                        : (uint64_t) it.w->k * 2;
+                if (q8_) qbytes += it.w->row_bytes * (uint64_t) it.w->n + (w8 ? (uint64_t) it.w->n * 4 : 0);
                 vbytes += (uint64_t) it.w->n * 4;
                 scratch = std::max(scratch, it.w->n * it.w->k);
             }
@@ -490,10 +570,11 @@ bool MfDit::open(const std::string& path, void* stream, std::string& err, bool d
             for (size_t j = 0; j < items.size(); ++j) {
                 const SafeTensor& t = tensor(p + items[j].name + ".weight");
                 const W& w = *items[j].w;
-                const uint64_t bytes = w.row_bytes * (uint64_t) w.n;
+                const uint64_t bytes = w.row_bytes * (uint64_t) w.n + (w.type == kTypeW8 ? (uint64_t) w.n * 4 : 0);
                 if (q8_) {
                     if (!dry_)
-                        quantize_matrix(reinterpret_cast<const uint16_t*>(data + t.begin), w.n, w.k, host.data() + at);
+                        quantize_matrix(reinterpret_cast<const uint16_t*>(data + t.begin), w.n, w.k, host.data() + at,
+                                        w.type == kTypeW8);
                     spans.push_back({host.data() + at, bytes, 0});
                     at += bytes;
                 } else {
@@ -554,16 +635,48 @@ bool MfDit::open(const std::string& path, void* stream, std::string& err, bool d
     }
 }
 
-void MfDit::product(const uint16_t* x16, const float* rs, const W& w, const uint8_t* base, float* y, int64_t T,
-                    const float* bias) {
-    if (T <= 0) return;
+bool MfDit::product(const uint16_t* x16, const float* rs, const W& w, const uint8_t* base, float* y, int64_t T,
+                    const float* bias, bool same_input, bool defer) {
+    if (T <= 0) return false;
     const auto* d = base != nullptr ? base + reinterpret_cast<uintptr_t>(w.d) : static_cast<const uint8_t*>(w.d);
-    if (w.type == kTypeF16) {
-        gemm_.f16(x16, reinterpret_cast<const uint16_t*>(d), y, T, w.n, w.k);
-    } else {
-        gemm_.native(x16, w.type, d, y, T, w.n, w.k);
+    if (w.type == kTypeW8) {
+        // the activations rotated and quantized as the weights (once for the products of one input), their scales
+        // times the rows' (rs), the int32 sums into y and scaled there, or by the reader (defer)
+        auto* sx = reinterpret_cast<float*>(xq8_ + xq8_rows_ * xq8_cols_);
+        if (!same_input) qi_rows_i8(x16, false, T, w.k, xq8_, sx, rs, s_);
+        prefill::Gemm::i8(xq8_, reinterpret_cast<const int8_t*>(d), reinterpret_cast<int32_t*>(y), T, w.n, w.k, w.n,
+                          s_);
+        if (defer) {
+            deferred_ = {sx, reinterpret_cast<const float*>(d + w.n * w.k), bias};
+            return true;
+        }
+        qi_i8_scale(y, T, w.n, w.n, sx, reinterpret_cast<const float*>(d + w.n * w.k), bias, s_);
+        return false;
     }
+    if (w.type == kTypeF16) gemm_.f16(x16, reinterpret_cast<const uint16_t*>(d), y, T, w.n, w.k);
+    else gemm_.native(x16, w.type, d, y, T, w.n, w.k);
     if (rs != nullptr || bias != nullptr) rows_back(y, rs, bias, T, w.n, s_);
+    return false;
+}
+
+void MfDit::gelu(bool deferred, int64_t T) {
+    if (deferred)
+        rows16(GeluI8{reinterpret_cast<const int32_t*>(gu_), deferred_.sx, deferred_.sw, deferred_.bias, F_}, T, F_,
+               h16_, rs_, s_);
+    else
+        rows16(Gelu{gu_, F_}, T, F_, h16_, rs_, s_);
+}
+
+void MfDit::modulation(const uint16_t* tsil, const W& w, const uint8_t* base, float* y, const float* bias) {
+    if (w.type != kTypeQ8_0) {
+        product(tsil, nullptr, w, base, y, 1, bias);
+        return;
+    }
+    // one row (the time's SiLU, FP32 in nmod_ until the final norm's product): a matrix-vector product reads the
+    // blocks as they are, where the dense product would dequantize the whole matrix (6 x 3072 x 3072 values) for it.
+    // The input stays FP32: as int8 blocks (the text engine's matrix-vector products) the final latent's cosine to
+    // the reference fell from 0.97 to 0.95 (RTX 4070, Turbo's 4 steps), the modulations scaling every row.
+    q8_0_vec(base + reinterpret_cast<uintptr_t>(w.d), nmod_, bias, y, w.n, w.k, s_);
 }
 
 uint64_t MfDit::activation_bytes(int64_t hw, int n, int64_t max_text, int64_t mlp_rows) const {
@@ -576,7 +689,8 @@ uint64_t MfDit::activation_bytes(int64_t hw, int n, int64_t max_text, int64_t ml
            (uint64_t) n * TP * C_ * 2 * 3 + (uint64_t) TP * C_ * 2 +   // the joint q, k, v (a context each), output
            (uint64_t) (R + L) * C_ * 2 +                 // the attention's outputs by stream
            (uint64_t) (hw + max_text) * hd_ * 4 +        // the rotary tables
-           (uint64_t) TP * C_ * 4;                       // the plain attention's scratch
+           (uint64_t) TP * C_ * 4 +                      // the plain attention's scratch
+           (w8_ ? (uint64_t) std::max(X * C_, band * F_) + (uint64_t) std::max(X, band) * 4 : 0);   // W8A8's input
 }
 
 void MfDit::ensure(int64_t hw, int n, int64_t max_text) {
@@ -600,6 +714,11 @@ void MfDit::ensure(int64_t hw, int n, int64_t max_text) {
     vpart_ = alloc<float>(allocs_, (hw + max_text) * heads_);
     gu_ = alloc<float>(allocs_, mlp_rows_ * F_);
     h16_ = alloc<uint16_t>(allocs_, std::max(X * C_, mlp_rows_ * F_));
+    if (w8_) {   // W8A8's int8 input: the most rows of the widest input, then a scale a row
+        xq8_rows_ = std::max(X, mlp_rows_);
+        xq8_cols_ = std::max(C_, F_);
+        xq8_ = alloc<int8_t>(allocs_, xq8_rows_ * xq8_cols_ + xq8_rows_ * 4);
+    }
     jq16_ = alloc<uint16_t>(allocs_, n * TP * C_, true);
     jk16_ = alloc<uint16_t>(allocs_, n * TP * C_, true);
     jv16_ = alloc<uint16_t>(allocs_, n * TP * C_, true);
@@ -636,8 +755,9 @@ void MfDit::drop_activations() {
     for (void* p : {(void*) img_, (void*) txt_, (void*) q_, (void*) k_, (void*) v_, (void*) a_, (void*) gu_,
                     (void*) h16_, (void*) jq16_, (void*) jk16_, (void*) jv16_, (void*) jo16_, (void*) io16_,
                     (void*) to16_, (void*) cos_, (void*) sin_, (void*) cos_id_, (void*) sin_id_, (void*) key_lim_,
-                    (void*) attn_scratch_, (void*) b0_img_, (void*) b0_txt_, (void*) xin_})
+                    (void*) attn_scratch_, (void*) b0_img_, (void*) b0_txt_, (void*) xin_, (void*) xq8_})
         release(allocs_, p);
+    xq8_ = nullptr;
     img_ = txt_ = q_ = k_ = v_ = a_ = gu_ = cos_ = sin_ = cos_id_ = sin_id_ = nullptr;
     attn_scratch_ = b0_img_ = b0_txt_ = xin_ = nullptr;
     h16_ = jq16_ = jk16_ = jv16_ = jo16_ = io16_ = to16_ = nullptr;
@@ -786,17 +906,17 @@ void MfDit::forward(const float* x, float sigma, int64_t h, int64_t w, int n, fl
         const Block& b = blocks_[(size_t) bi];
         const uint8_t* base = blocks_stream_.begin(bi);
         auto f = [base](uint64_t off) { return reinterpret_cast<const float*>(base + off); };
-        product(tsil, nullptr, b.imod, base, mod_i_, 1, f(b.b_imod));
-        product(tsil, nullptr, b.tmod, base, mod_t_, 1, f(b.b_tmod));
+        modulation(tsil, b.imod, base, mod_i_, f(b.b_imod));
+        modulation(tsil, b.tmod, base, mod_t_, f(b.b_tmod));
         // q, k, v of the image rows and of the text rows
         rows16(LnMod{img_, mod_i_, mod_i_ + C, C}, R, C, h16_, rs_, s_);
         product(h16_, rs_, b.q, base, q_, R, f(b.b_q));
-        product(h16_, rs_, b.k, base, k_, R, f(b.b_k));
-        product(h16_, rs_, b.v, base, v_, R, f(b.b_v));
+        product(h16_, rs_, b.k, base, k_, R, f(b.b_k), b.q.type == kTypeW8);
+        product(h16_, rs_, b.v, base, v_, R, f(b.b_v), b.k.type == kTypeW8);
         rows16(LnMod{txt_, mod_t_, mod_t_ + C, C}, L, C, h16_, rs_, s_);
         product(h16_, rs_, b.tq, base, tq_, L, f(b.b_tq));
-        product(h16_, rs_, b.tk, base, tk_, L, f(b.b_tk));
-        product(h16_, rs_, b.tv, base, tv_, L, f(b.b_tv));
+        product(h16_, rs_, b.tk, base, tk_, L, f(b.b_tk), b.tq.type == kTypeW8);
+        product(h16_, rs_, b.tv, base, tv_, L, f(b.b_tv), b.tk.type == kTypeW8);
         // each context: its v heads' scales, its rows normed (the image's rotated) into [text, image], the attention,
         // its output back to each stream's rows (FP16, scaled by row)
         for (int i = 0; i < n; ++i) {
@@ -821,14 +941,12 @@ void MfDit::forward(const float* x, float sigma, int64_t h, int64_t w, int n, fl
         for (int64_t m0 = 0; m0 < R; m0 += mlp_rows_) {
             const int64_t mr = std::min(mlp_rows_, R - m0);
             rows16(LnMod{img_ + m0 * C, mod_i_ + 3 * C, mod_i_ + 4 * C, C}, mr, C, h16_, rs_, s_);
-            product(h16_, rs_, b.imlp1, base, gu_, mr, f(b.b_imlp1));
-            rows16(Gelu{gu_, F_}, mr, F_, h16_, rs_, s_);
+            gelu(product(h16_, rs_, b.imlp1, base, gu_, mr, f(b.b_imlp1), false, true), mr);
             product(h16_, rs_, b.imlp2, base, a_, mr, f(b.b_imlp2));
             gate_add(img_ + m0 * C, a_, mod_i_ + 5 * C, mr, C, s_);
         }
         rows16(LnMod{txt_, mod_t_ + 3 * C, mod_t_ + 4 * C, C}, L, C, h16_, rs_, s_);
-        product(h16_, rs_, b.tmlp1, base, gu_, L, f(b.b_tmlp1));
-        rows16(Gelu{gu_, F_}, L, F_, h16_, rs_, s_);
+        gelu(product(h16_, rs_, b.tmlp1, base, gu_, L, f(b.b_tmlp1), false, true), L);
         product(h16_, rs_, b.tmlp2, base, a_, L, f(b.b_tmlp2));
         gate_add(txt_, a_, mod_t_ + 5 * C, L, C, s_);
         blocks_stream_.end(bi);
