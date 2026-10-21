@@ -98,11 +98,32 @@ void open_cudnn(cudnnHandle_t& handle) {
     std::sort(found.begin(), found.end(), std::greater<>());
     for (const auto& f : found) libs.push_back(f.string());
     char exe[MAX_PATH] = {};
+    fs::path nvidia;   // <7z>\python\Lib\site-packages\nvidia, beside <7z>\app\engine\strata-image.exe
     if (GetModuleFileNameA(nullptr, exe, MAX_PATH) > 0) {
-        // <7z>\app\engine\strata-image.exe beside <7z>\python
-        const fs::path pip = fs::path(exe).parent_path().parent_path().parent_path() / "python" / "Lib" /
-                             "site-packages" / "nvidia" / "cudnn" / "bin" / "cudnn64_9.dll";
+        nvidia = fs::path(exe).parent_path().parent_path().parent_path() / "python" / "Lib" / "site-packages" /
+                 "nvidia";
+        const fs::path pip = nvidia / "cudnn" / "bin" / "cudnn64_9.dll";
         if (fs::exists(pip, ec)) libs.push_back(pip.string());
+    }
+    // cudnn-frontend opens the CUDA runtime by its Linux names: on Windows cudart64_12.dll, as the user installed it
+    // (the PATH, the CUDA toolkit's, the 7z's Python's nvidia-cuda-runtime-cu12), unless CUDNN_FRONTEND_CUDART_LIB_NAME
+    // names one
+    if (std::getenv("CUDNN_FRONTEND_CUDART_LIB_NAME") == nullptr) {
+        std::vector<fs::path> dirs;
+        if (const char* path = std::getenv("PATH")) {
+            for (std::string rest = path; !rest.empty();) {
+                const size_t k = rest.find(';');
+                if (k != 0) dirs.emplace_back(rest.substr(0, k));
+                rest = k == std::string::npos ? "" : rest.substr(k + 1);
+            }
+        }
+        if (const char* c = std::getenv("CUDA_PATH")) dirs.push_back(fs::path(c) / "bin");
+        if (!nvidia.empty()) dirs.push_back(nvidia / "cuda_runtime" / "bin");
+        for (const fs::path& d : dirs)
+            if (fs::exists(d / "cudart64_12.dll", ec)) {
+                _putenv_s("CUDNN_FRONTEND_CUDART_LIB_NAME", (d / "cudart64_12.dll").string().c_str());
+                break;
+            }
     }
 #else
     libs.emplace_back("libcudnn.so.9");
@@ -110,7 +131,13 @@ void open_cudnn(cudnnHandle_t& handle) {
     std::string why = "cuDNN is not installed";
     for (const std::string& lib : libs) {
 #if defined(_WIN32)
-        // its other DLLs beside it
+        // its other DLLs beside it: those it links, and those cudnn64_9.dll loads itself later (cudnn_graph64_9.dll and
+        // the engines), which Windows looks for on the PATH
+        if (lib.find('\\') != std::string::npos) {
+            const char* old = std::getenv("PATH");
+            const std::string path = fs::path(lib).parent_path().string() + ";" + (old != nullptr ? old : "");
+            _putenv_s("PATH", path.c_str());
+        }
         HMODULE h = LoadLibraryExA(lib.c_str(), nullptr, lib.find('\\') != std::string::npos ?
                                                              LOAD_WITH_ALTERED_SEARCH_PATH : 0);
 #else
