@@ -8,6 +8,7 @@
 #include "strata/core/per_device.hpp"
 #include "strata/core/runtime.hpp"
 #include "strata/image/mapped_file.hpp"
+#include "strata/image/pipeline.hpp"
 #include "strata/image/qi_kernels.hpp"
 #include "strata/image/safetensors.hpp"
 #include "strata/kernels/f16_bits.hpp"
@@ -720,7 +721,11 @@ void MfDit::sample(float* x, int64_t h, int64_t w, const std::vector<float>& sig
     for (int i = 0; i < steps; ++i) {
         forward(x, sigmas[(size_t) i], h, w, n, out);
         euler(x, out, HW * in_ch_, n, cfg, sigmas[(size_t) i + 1] - sigmas[(size_t) i], s_);
-        if (step && !step(i + 1, steps)) break;
+        if (step && !step(i + 1, steps)) {
+            gpu::stream_sync(s_);
+            release(allocs_, out);
+            throw QiStopped();
+        }
     }
     gpu::stream_sync(s_);
     release(allocs_, out);

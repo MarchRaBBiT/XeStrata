@@ -1,10 +1,14 @@
 // SPDX-FileCopyrightText: 2026 MistVVK and the XeStrata contributors
 // SPDX-License-Identifier: LGPL-3.0-or-later
-// src/image/strata_image.cpp - strata-image: Qwen-Image-2.1 text to image on the GPU.
+// src/image/strata_image.cpp - strata-image: Qwen-Image-2.1 or Mage-Flow text to image on the GPU.
 //
 //   strata-image --dit DIT.gguf --vae VAE.safetensors --text TEXT_ENCODER.gguf [--vision MMPROJ.gguf]
 //                [--budget-mib M] (--ids 1,2,3 [--drop N] [--width W] [--height H] [--seed S] [--sigmas 1,...,0]
 //                [--ref IMAGE]... [--mask IMAGE] [--repeat N] --out IMAGE.rgba | --serve)
+//   strata-image --dit DIT.safetensors ... [--dit-q8 0|1]
+//
+// The DiT's file says the model: a GGUF is Qwen-Image-2.1's, a safetensors file Mage-Flow's (its bf16 weights as
+// Comfy-Org has them; --dit-q8 1, the default, quantizes its blocks to Q8_0 as they are read).
 //
 // One image: --ids, the prompt in the model's chat form, tokenized (the server's tokenizer); --drop, the leading ids of
 // the system turn; --budget-mib, the VRAM the engine may take (default: the free VRAM); --repeat, the image again N
@@ -39,6 +43,7 @@
 
 #include "strata/core/gpu.hpp"
 #include "strata/image/qi_image_io.hpp"
+#include "strata/image/mf_pipeline.hpp"
 #include "strata/image/qi_pipeline.hpp"
 
 #include <atomic>
@@ -48,6 +53,7 @@
 #include <deque>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
@@ -172,7 +178,7 @@ struct Lines {
     }
 };
 
-int serve(si::QiPipeline& p) {
+int serve(si::ImagePipeline& p) {
     {   // the warm-up: a 256 x 256 image of one step from token ids the vocabulary has; where the GPU has no room
         // for it now (another program holds it), the first request builds the kernels instead
         si::QiRequest r;
@@ -282,7 +288,7 @@ int main(int argc, char** argv) {
         si::QiRequest r;
         uint64_t budget = 0;
         int repeat = 1;
-        bool serving = false;
+        bool serving = false, dit_q8 = true;
         for (int i = 1; i < argc; ++i) {
             const std::string a = argv[i];
             auto val = [&]() -> std::string {
@@ -307,17 +313,28 @@ int main(int argc, char** argv) {
             else if (a == "--budget-mib") budget = std::stoull(val()) << 20;
             else if (a == "--repeat") repeat = std::stoi(val());
             else if (a == "--serve") serving = true;
+            else if (a == "--dit-q8") dit_q8 = val() != "0";
             else throw std::invalid_argument("unknown option " + a);
         }
         if (dit.empty() || vae.empty() || text.empty() || (!serving && (out.empty() || ids.empty()))) {
             std::fprintf(stderr, "usage: %s --dit F --vae F --text F [--vision F] [--budget-mib M] (--ids 1,2,3 "
                          "[--drop N] [--width W] [--height H] [--seed S] [--sigmas 1,...,0] [--ref IMAGE]... "
-                         "[--mask IMAGE] [--repeat N] --out IMAGE.rgba | --serve)\n", argv[0]);
+                         "[--mask IMAGE] [--repeat N] --out IMAGE.rgba | --serve) [--dit-q8 0|1]\n", argv[0]);
             return 2;
         }
-        si::QiPipeline p;
+        std::unique_ptr<si::ImagePipeline> pipe;
         std::string err;
-        if (!p.open(dit, vae, text, err, vision)) throw std::runtime_error(err);
+        const bool mage = dit.size() > 12 && dit.compare(dit.size() - 12, 12, ".safetensors") == 0;
+        if (mage) {
+            auto m = std::make_unique<si::MfPipeline>();
+            if (!m->open(dit, vae, text, err, dit_q8)) throw std::runtime_error(err);
+            pipe = std::move(m);
+        } else {
+            auto q = std::make_unique<si::QiPipeline>();
+            if (!q->open(dit, vae, text, err, vision)) throw std::runtime_error(err);
+            pipe = std::move(q);
+        }
+        si::ImagePipeline& p = *pipe;
         if (budget > 0) p.set_budget(budget);
         if (serving) return serve(p);
         r.ids = parse_ids(ids);

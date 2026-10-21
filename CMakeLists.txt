@@ -637,6 +637,7 @@ if(STRATA_ENABLE_XE)
   add_library(strata_image STATIC src/image/qi_kernels.cpp src/image/qi_attn.cpp src/image/qi_dit.cpp
                            src/image/qi_vae.cpp src/image/qi_text.cpp src/image/qi_pipeline.cpp
                            src/image/mf_vae.cpp src/image/mf_dit.cpp
+                           src/image/mf_pipeline.cpp
                            src/image/qi_stream.cpp src/image/qi_vision.cpp src/image/qi_image_io.cpp)
   target_include_directories(strata_image PUBLIC include)
   # stb_image (third_party/main/stb, MIT or the Unlicense) for an edit's reference image: its implementation in

@@ -38,6 +38,7 @@ public:
     /// The GPU memory a decode of an h x w latent works in (its buffers, besides the weights).
     uint64_t scratch_bytes(int64_t h, int64_t w) const;
     void drop_scratch();
+    uint64_t scratch_held() const { return cap_hw_ > 0 ? scratch_bytes(cap_hw_, 1) : 0; }
     uint64_t weight_bytes() const { return weight_bytes_; }
 
     /// The CoD decoder's output [h w][384] and the 21 blocks' output [h w][384] of the last decode (device FP32), for

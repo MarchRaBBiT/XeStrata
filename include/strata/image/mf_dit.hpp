@@ -55,7 +55,7 @@ public:
 
     /// Sampling: x [h w][128] (device FP32, the initial noise) stepped through sigmas (descending, the last 0) by
     /// Euler; with cfg > 1 and a negative context, the velocity neg + cfg (pos - neg).  step(i, n) after each step:
-    /// false stops.
+    /// false stops (QiStopped).
     void sample(float* x, int64_t h, int64_t w, const std::vector<float>& sigmas, float cfg,
                 const std::function<bool(int, int)>& step = {});
 
@@ -73,6 +73,9 @@ public:
     /// of mlp_rows image rows at a time (0: all).
     uint64_t activation_bytes(int64_t hw, int n, int64_t max_text, int64_t mlp_rows = 0) const;
     void set_mlp_rows(int64_t rows) { mlp_cap_ = rows; }
+    uint64_t activations_held() const {
+        return cap_hw_ > 0 ? activation_bytes(cap_hw_, (int) cap_n_, cap_text_, mlp_rows_) : 0;
+    }
     void drop_activations();
 
     /// The image and text streams after block 0 of the last forward's context 0 (device FP32 [h w][C], [rows][C]), for
