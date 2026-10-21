@@ -296,6 +296,29 @@ void pixel_mlp(const float* yx, const float* ce, const float* pw, const float* d
     });
 }
 
+// y16[p][(c * 16 + ky) * 16 + kx] = rgb[c][py * 16 + ky][px * 16 + kx]: the encoder's 16 x 16 patches as rows, in its
+// patch convolution's (channel, row, column) order
+void patchify16(const float* rgb, int64_t h, int64_t w, uint16_t* y16, void* s) {
+    const int64_t H = h * kPatch, W = w * kPatch;
+    q_of(s).parallel_for(sycl::range<1>((size_t) (h * w * 3 * kPix)), [=](sycl::id<1> id) {
+        const auto i = static_cast<int64_t>(id[0]);
+        const int64_t p = i / (3 * kPix), r = i - p * 3 * kPix, c = r / kPix, k = r - c * kPix;
+        const int64_t y = (p / w) * kPatch + k / kPatch, x = (p % w) * kPatch + k % kPatch;
+        y16[i] = f16_from_f32(rgb[(c * H + y) * W + x]);
+    });
+}
+
+// z[p][c] = mean + exp(logvar / 2) eps (eps null: the mean), from the moments [p][2 Z] (logvar clamped to -20 .. 10)
+void posterior(const float* mom, const float* eps, int64_t n, int64_t Z, float* z, void* s) {
+    q_of(s).parallel_for(sycl::range<1>((size_t) (n * Z)), [=](sycl::id<1> id) {
+        const auto i = static_cast<int64_t>(id[0]);
+        const int64_t p = i / Z, c = i - p * Z;
+        float v = mom[p * 2 * Z + c];
+        if (eps != nullptr) v += sycl::exp(0.5f * sycl::clamp(mom[p * 2 * Z + Z + c], -20.f, 10.f)) * eps[i];
+        z[i] = v;
+    });
+}
+
 void to_rgba(const float* rgb, int64_t HW, float* rgba, void* s) {
     q_of(s).parallel_for(sycl::range<1>((size_t) (4 * HW)), [=](sycl::id<1> id) {
         const auto i = static_cast<int64_t>(id[0]);
@@ -365,6 +388,7 @@ bool MfVae::open(const std::string& path, void* stream, std::string& err, bool d
     try {
         s_ = stream;
         dry_ = dry;
+        path_ = path;
         SafeTensors st(path);
         const std::string d = "pipeline.y_embedder.decoder.";
         cin_ = conv_w(st, d + "conv_in");
@@ -433,18 +457,9 @@ bool MfVae::open(const std::string& path, void* stream, std::string& err, bool d
         for (int i = 0;; ++i) {
             const std::string p = "pipeline.blocks." + std::to_string(i) + ".";
             if (st.find(p + "conv1.weight") == nullptr) break;
-            DiCo b;
-            b.c1 = conv_w(st, p + "conv1");
-            b.c3 = conv_w(st, p + "conv3");
-            b.c4 = conv_w(st, p + "conv4");
-            b.c5 = conv_w(st, p + "conv5");
-            F_ = b.c4.out;
-            b.dw = vec(st, p + "conv2.weight");
-            b.db = vec(st, p + "conv2.bias");
-            b.caw = vec(st, p + "ca.1.weight");
-            b.cab = vec(st, p + "ca.1.bias");
-            b.mod = upload(linear(host(p + "adaLN_modulation.1.weight"), host(p + "adaLN_modulation.1.bias"), sc));
-            blocks_.push_back(b);
+            blocks_.push_back(dico_w(st, p, linear(host(p + "adaLN_modulation.1.weight"),
+                                                   host(p + "adaLN_modulation.1.bias"), sc)));
+            F_ = blocks_.back().c4.out;
         }
         if (blocks_.empty()) throw std::runtime_error("image engine (Mage-VAE): no denoiser blocks");
         yx_ = conv_w(st, "pipeline.y_embedder_x");
@@ -603,21 +618,184 @@ void MfVae::attention(const Attn& a, float* x, int64_t H, int64_t W) {
     qi_axpy(x, qkv, 1.0f, HW * C_, s_);
 }
 
-void MfVae::dico(const DiCo& d, float* s, int64_t H, int64_t W) {
-    const int64_t HW = H * W;
+// a DiCo block's weights under prefix p, with its modulation `mod` [6][C] (host)
+MfVae::DiCo MfVae::dico_w(SafeTensors& st, const std::string& p, const std::vector<float>& mod) {
+    DiCo b;
+    b.c1 = conv_w(st, p + "conv1");
+    b.c3 = conv_w(st, p + "conv3");
+    b.c4 = conv_w(st, p + "conv4");
+    b.c5 = conv_w(st, p + "conv5");
+    b.dw = vec(st, p + "conv2.weight");
+    b.db = vec(st, p + "conv2.bias");
+    b.caw = vec(st, p + "ca.1.weight");
+    b.cab = vec(st, p + "ca.1.bias");
+    if ((int64_t) mod.size() != 6 * b.c1.out) throw std::runtime_error("image engine (Mage-VAE): " + p + ": modulation");
+    b.mod = upload(mod);
+    return b;
+}
+
+void MfVae::dico(const DiCo& d, float* s, int64_t H, int64_t W, const DiCoBufs& b) {
+    const int64_t HW = H * W, C = d.c1.out, F = d.c4.out;
     const float* m = d.mod;
-    ln_mod16(s, m, m + C_, HW, C_, a16_, s_);
-    conv(d.c1, a16_, H, W, t0_);
-    dw3x3_gelu(t0_, d.dw, d.db, H, W, C_, t1_, s_);
-    channel_gate(t1_, HW, C_, d.caw, d.cab, vec_, vec_ + C_, s_);
-    scale16(t1_, vec_ + C_, HW, C_, a16_, s_);
-    conv(d.c3, a16_, H, W, t0_);
-    gate_add(s, t0_, m + 2 * C_, HW, C_, s_);
-    ln_mod16(s, m + 3 * C_, m + 4 * C_, HW, C_, a16_, s_);
-    conv(d.c4, a16_, H, W, t0_);
-    qi_gelu_erf16(t0_, HW * F_, a16_, s_);
-    conv(d.c5, a16_, H, W, t1_);
-    gate_add(s, t1_, m + 5 * C_, HW, C_, s_);
+    ln_mod16(s, m, m + C, HW, C, b.a16, s_);
+    conv(d.c1, b.a16, H, W, b.t0);
+    dw3x3_gelu(b.t0, d.dw, d.db, H, W, C, b.t1, s_);
+    channel_gate(b.t1, HW, C, d.caw, d.cab, b.vec, b.vec + C, s_);
+    scale16(b.t1, b.vec + C, HW, C, b.a16, s_);
+    conv(d.c3, b.a16, H, W, b.t0);
+    gate_add(s, b.t0, m + 2 * C, HW, C, s_);
+    ln_mod16(s, m + 3 * C, m + 4 * C, HW, C, b.a16, s_);
+    conv(d.c4, b.a16, H, W, b.t0);
+    qi_gelu_erf16(b.t0, HW * F, b.a16, s_);
+    conv(d.c5, b.a16, H, W, b.t1);
+    gate_add(s, b.t1, m + 5 * C, HW, C, s_);
+}
+
+bool MfVae::open_encoder(std::string& err, bool dry) {
+    if (has_encoder()) return true;
+    try {
+        const bool was_dry = dry_;
+        const uint64_t before = weight_bytes_;
+        dry_ = dry;
+        SafeTensors st(path_);
+        const std::string e = "student.dconv_encoder.";
+        // the patch convolution as a product of the patch rows [h w][3 16 16] (its weight's own order)
+        const SafeTensor* pt = st.find(e + "patch_cond_embed.weight");
+        if (pt == nullptr || pt->shape.size() != 4 || pt->shape[1] != 3 || pt->shape[2] != kPatch ||
+            pt->shape[3] != kPatch)
+            throw std::runtime_error("image engine (Mage-VAE): no 16 x 16 patch convolution in the encoder");
+        e_patch_.out = pt->shape[0];
+        e_patch_.in = 3 * kPix;
+        weight_bytes_ += (uint64_t) (e_patch_.out * e_patch_.in) * 2;
+        if (!dry_) {
+            const auto w = st.f32(e + "patch_cond_embed.weight");
+            std::vector<uint16_t> h(w.size());
+            for (size_t i = 0; i < w.size(); ++i) h[i] = kernels::f16_from_f32(w[i]);
+            uint16_t* d = alloc<uint16_t>(allocs_, (int64_t) h.size());
+            gpu::copy(d, h.data(), h.size() * 2);
+            e_patch_.w = d;
+        }
+        e_patch_.b = vec(st, e + "patch_cond_embed.bias");
+        auto host = [&](const std::string& n) { return st.f32(n); };
+        // the head blocks: their affine layer norms as a modulation (shift = bias, scale = weight - 1), gates 1
+        for (int i = 0;; ++i) {
+            const std::string p = e + "head_blocks." + std::to_string(i) + ".";
+            if (st.find(p + "conv1.weight") == nullptr) break;
+            const auto n1w = host(p + "norm1.weight"), n1b = host(p + "norm1.bias");
+            const auto n2w = host(p + "norm2.weight"), n2b = host(p + "norm2.bias");
+            const size_t C = n1w.size();
+            std::vector<float> mod(6 * C, 1.f);
+            for (size_t c = 0; c < C; ++c) {
+                mod[c] = n1b[c];
+                mod[C + c] = n1w[c] - 1.f;
+                mod[3 * C + c] = n2b[c];
+                mod[4 * C + c] = n2w[c] - 1.f;
+            }
+            enc_head_.push_back(dico_w(st, p, mod));
+        }
+        e_down_ = conv_w(st, e + "proj_down");
+        // the fuse of [the patches' features, the zero latent's projection (its bias)]: the second half's product
+        // is constant, folded into the bias
+        e_fuse_ = conv_w(st, e + "fuse_proj", false, 0, e_down_.out);
+        {
+            const SafeTensor* ft = st.find(e + "fuse_proj.weight");
+            const int64_t n = ft->shape[0], k = ft->shape[1];
+            const auto fw = host(e + "fuse_proj.weight"), fb = host(e + "fuse_proj.bias"), zb = host(e + "z_proj.bias");
+            std::vector<float> b(fb);
+            for (int64_t o = 0; o < n; ++o)
+                for (int64_t i = e_down_.out; i < k; ++i)
+                    b[(size_t) o] += fw[(size_t) (o * k + i)] * zb[(size_t) (i - e_down_.out)];
+            e_fuse_.b = upload(b);
+        }
+        // the blocks at t = 0: the encoder's own timestep embedding, then each block's constant modulation
+        std::vector<float> emb(256, 0.f);
+        for (int i = 0; i < 128; ++i) emb[(size_t) i] = 1.f;
+        auto linear = [](const std::vector<float>& w, const std::vector<float>& b, const std::vector<float>& x) {
+            const size_t n = b.size(), k = x.size();
+            std::vector<float> y(n);
+            for (size_t o = 0; o < n; ++o) {
+                double a = b[o];
+                for (size_t i = 0; i < k; ++i) a += (double) w[o * k + i] * x[i];
+                y[o] = (float) a;
+            }
+            return y;
+        };
+        auto c = linear(host(e + "t_embedder.mlp.0.weight"), host(e + "t_embedder.mlp.0.bias"), emb);
+        for (float& v : c) v = silu(v);
+        c = linear(host(e + "t_embedder.mlp.2.weight"), host(e + "t_embedder.mlp.2.bias"), c);
+        for (float& v : c) v = silu(v);
+        for (int i = 0;; ++i) {
+            const std::string p = e + "blocks." + std::to_string(i) + ".";
+            if (st.find(p + "conv1.weight") == nullptr) break;
+            enc_blocks_.push_back(dico_w(st, p, linear(host(p + "adaLN_modulation.1.weight"),
+                                                       host(p + "adaLN_modulation.1.bias"), c)));
+        }
+        if (enc_head_.empty() || enc_blocks_.empty()) throw std::runtime_error("image engine (Mage-VAE): no encoder");
+        {
+            const auto nw = host(e + "norm_out.weight"), nb = host(e + "norm_out.bias");
+            std::vector<float> m(2 * nw.size());
+            for (size_t i = 0; i < nw.size(); ++i) {
+                m[i] = nb[i];
+                m[nw.size() + i] = nw[i] - 1.f;
+            }
+            e_norm_ = upload(m);
+        }
+        e_out_ = conv_w(st, e + "proj_out");
+        enc_bytes_ = weight_bytes_ - before;
+        if (dry) {   // sizes only: what was counted stays out of the weights held
+            weight_bytes_ = before;
+            enc_head_.clear();
+            enc_blocks_.clear();
+        }
+        dry_ = was_dry;
+        return true;
+    } catch (const std::exception& ex) {
+        err = ex.what();
+        return false;
+    }
+}
+
+uint64_t MfVae::encode_scratch_bytes(int64_t h, int64_t w) const {
+    const int64_t n = h * w, Ch = enc_head_.empty() ? 768 : enc_head_[0].c1.out,
+                  Fh = enc_head_.empty() ? 3072 : enc_head_[0].c4.out;
+    return (uint64_t) n * (uint64_t) (Ch + C_ + 2 * Fh) * 4 + (uint64_t) n * (uint64_t) std::max(Fh, 3 * kPix) * 2 +
+           (uint64_t) 2 * Ch * 4;
+}
+
+void MfVae::encode_moments(const float* rgb, int64_t h, int64_t w, float* moments) {
+    if (!has_encoder()) throw std::runtime_error("image engine (Mage-VAE): the encoder is not loaded");
+    const int64_t n = h * w, Ch = enc_head_[0].c1.out, Fh = enc_head_[0].c4.out;
+    std::vector<void*> tmp;
+    float* hs = alloc<float>(tmp, n * Ch);
+    float* ls = alloc<float>(tmp, n * C_);
+    DiCoBufs b;
+    b.t0 = alloc<float>(tmp, n * Fh);
+    b.t1 = alloc<float>(tmp, n * Fh);
+    b.a16 = alloc<uint16_t>(tmp, n * std::max(Fh, 3 * kPix));
+    b.vec = alloc<float>(tmp, 2 * Ch);
+    patchify16(rgb, h, w, b.a16, s_);
+    conv(e_patch_, b.a16, h, w, hs);
+    for (const DiCo& d : enc_head_) dico(d, hs, h, w, b);
+    qi_to_f16(hs, n * Ch, b.a16, s_);
+    conv(e_down_, b.a16, h, w, ls);
+    qi_to_f16(ls, n * C_, b.a16, s_);
+    conv(e_fuse_, b.a16, h, w, hs);   // the state [n][C] (in hs's room)
+    for (const DiCo& d : enc_blocks_) dico(d, hs, h, w, b);
+    ln_mod16(hs, e_norm_, e_norm_ + C_, n, C_, b.a16, s_);
+    conv(e_out_, b.a16, h, w, moments);
+    gpu::stream_sync(s_);
+    for (void* p : tmp) gpu::free(p);
+}
+
+void MfVae::encode(const float* rgb, int64_t h, int64_t w, const float* eps, float* z) {
+    const int64_t n = h * w, Z = e_out_.out / 2;
+    float* mom = nullptr;
+    if (!gpu::alloc_device(&mom, (size_t) (n * 2 * Z) * 4))
+        throw std::runtime_error(std::string("image engine (Mage-VAE): GPU memory: ") + gpu::last_error());
+    encode_moments(rgb, h, w, mom);
+    posterior(mom, eps, n, Z, z, s_);
+    gpu::stream_sync(s_);
+    gpu::free(mom);
 }
 
 void MfVae::decode_raw(const float* z, int64_t h, int64_t w, float* rgb) {
@@ -637,7 +815,12 @@ void MfVae::decode_raw(const float* z, int64_t h, int64_t w, float* rgb) {
     // the denoiser's blocks on the per-patch state
     qi_to_f16(cond_, HW * C_, a16_, s_);
     conv(s_in_, a16_, h, w, s_state_);
-    for (const DiCo& d : blocks_) dico(d, s_state_, h, w);
+    DiCoBufs b;
+    b.t0 = t0_;
+    b.t1 = t1_;
+    b.a16 = a16_;
+    b.vec = vec_;
+    for (const DiCo& d : blocks_) dico(d, s_state_, h, w, b);
     // the per-pixel MLP, a band of patches at a time
     for (int64_t p0 = 0; p0 < HW; p0 += cap_band_) {
         const int64_t np = std::min(cap_band_, HW - p0);

@@ -9,6 +9,10 @@
 // each pixel of a 16 x 16 patch to RGB.  The activations are channels-last ([pixel][channel], FP32) at the latent's
 // size; the group norms and the blocks' channel attention take statistics over the whole latent, so it is not tiled
 // (2048 x 2048 is 128 x 128 there); the per-pixel MLP runs a band of patches at a time.
+//
+// The encoder (an edit's reference images, loaded by open_encoder) is the reference's DConvEncoder at t = 0 from a zero
+// latent: 16 x 16 patches to 768 channels, two DiCo blocks without modulation, 384 channels fused with the zero
+// latent's projection, 21 DiCo blocks (constant modulation), and the posterior's mean and log-variance [h w][256].
 #pragma once
 
 #include "strata/prefill/gemm.hpp"
@@ -34,6 +38,18 @@ public:
     void decode(const float* z, int64_t h, int64_t w, float* rgba);
     /// The image before the clamp, [3][16 h][16 w] (device FP32, about -1 .. 1): the reference's decode output.
     void decode_raw(const float* z, int64_t h, int64_t w, float* rgb);
+
+    /// Puts the encoder's weights (the file open read) on the GPU.  `dry`: their sizes only.
+    bool open_encoder(std::string& err, bool dry = false);
+    bool has_encoder() const { return !enc_blocks_.empty(); }
+    uint64_t encoder_bytes() const { return enc_bytes_; }
+    /// The posterior's mean and log-variance [h w][256] (device FP32) of rgb [3][16 h][16 w] (device FP32, -1 .. 1).
+    void encode_moments(const float* rgb, int64_t h, int64_t w, float* moments);
+    /// The latent tokens z [h w][128] (device FP32) of rgb: the posterior's mean, plus exp(logvar / 2) eps when `eps`
+    /// (device [h w][128] standard normal) is given (the reference samples the posterior).
+    void encode(const float* rgb, int64_t h, int64_t w, const float* eps, float* z);
+    /// The GPU memory an encode of an h x w latent works in.
+    uint64_t encode_scratch_bytes(int64_t h, int64_t w) const;
 
     /// The GPU memory a decode of an h x w latent works in (its buffers, besides the weights).
     uint64_t scratch_bytes(int64_t h, int64_t w) const;
@@ -66,6 +82,11 @@ private:
         const float *caw = nullptr, *cab = nullptr; // the channel attention's 1 x 1 convolution [C][C] (FP32)
         const float* mod = nullptr;                  // [6][C]: shift, scale, gate (attention), shift, scale, gate (MLP)
     };
+    /// A DiCo block's buffers: t0, t1 [HW][F], a16 [HW][F] FP16, vec [2 C].
+    struct DiCoBufs {
+        float *t0 = nullptr, *t1 = nullptr, *vec = nullptr;
+        uint16_t* a16 = nullptr;
+    };
     Conv conv_w(class SafeTensors& st, const std::string& name, bool bias = true, int64_t col0 = 0,
                 int64_t cols = -1);
     const float* vec(class SafeTensors& st, const std::string& name);
@@ -74,7 +95,8 @@ private:
     void gn_silu16(const float* x, const float* w, const float* b, int64_t HW, int64_t C, bool silu, uint16_t* y16);
     void resblock(const Res& r, float*& x, int64_t H, int64_t W);
     void attention(const Attn& a, float* x, int64_t H, int64_t W);
-    void dico(const DiCo& d, float* s, int64_t H, int64_t W);
+    void dico(const DiCo& d, float* s, int64_t H, int64_t W, const DiCoBufs& b);
+    DiCo dico_w(class SafeTensors& st, const std::string& p, const std::vector<float>& mod);
     void grow(int64_t h, int64_t w);
 
     void* s_ = nullptr;
@@ -100,6 +122,12 @@ private:
     float *gn_part_ = nullptr, *vec_ = nullptr, *yxb_ = nullptr, *ceb_ = nullptr, *scores_ = nullptr;
     uint16_t *a16_ = nullptr, *col16_ = nullptr, *w16_ = nullptr;
     int64_t col_cap_ = 0;
+    // the encoder
+    std::string path_;
+    uint64_t enc_bytes_ = 0;
+    Conv e_patch_, e_down_, e_fuse_, e_out_;   // e_patch_: [768][3 * 16 * 16] in (channel, row, column) order
+    std::vector<DiCo> enc_head_, enc_blocks_;
+    const float* e_norm_ = nullptr;           // norm_out as a modulation: shift (its bias), scale (its weight - 1)
 };
 
 }  // namespace strata::image
