@@ -255,12 +255,52 @@ void QiDit::ensure(int64_t T, int64_t HW) {
         // the plain attention's FP32 output: only where the matrix engines' path is not taken
         if (std::strcmp(qi_attention_path(), "plain (FP32)") == 0) attn_scratch_ = alloc<float>(allocs_, T * C_);
         cap_T_ = T;
+        dirty_T_ = 0;
         rope_H_ = rope_W_ = rope_text_ = -1;
     }
     (void) HW;
 }
 
-void QiDit::set_context(const float* ctx, int64_t n_ctx, const std::vector<Ref>& refs) {
+void QiDit::swap_context() {
+    std::swap(text_, other_.text);
+    std::swap(n_text_, other_.n_text);
+    std::swap(target_pos_, other_.target_pos);
+    std::swap(pre_pos_, other_.pre_pos);
+    std::swap(key_lim_, other_.key_lim);
+    other_.pk.resize(blocks_.size(), nullptr);
+    other_.pv.resize(blocks_.size(), nullptr);
+    for (size_t i = 0; i < blocks_.size(); ++i) {
+        std::swap(blocks_[i].pk, other_.pk[i]);
+        std::swap(blocks_[i].pv, other_.pv[i]);
+    }
+    rope_H_ = rope_W_ = rope_text_ = -1;   // the rotary tables are the context's positions
+}
+
+void QiDit::drop_second_context() {
+    gpu::stream_sync(s_);
+    std::vector<void*> ps = {other_.text, other_.key_lim};
+    for (uint16_t* p : other_.pk) ps.push_back(p);
+    for (uint16_t* p : other_.pv) ps.push_back(p);
+    for (void* p : ps)
+        if (p != nullptr) {
+            allocs_.erase(std::remove(allocs_.begin(), allocs_.end(), p), allocs_.end());
+            gpu::free(p);
+        }
+    other_ = Context{};
+}
+
+void QiDit::set_context(const float* ctx, int64_t n_ctx, const std::vector<Ref>& refs, bool second) {
+    if (second) {   // the same work on the other context's state
+        swap_context();
+        try {
+            set_context(ctx, n_ctx, refs, false);
+        } catch (...) {
+            swap_context();
+            throw;
+        }
+        swap_context();
+        return;
+    }
     int64_t n_pre = n_ctx;
     for (const Ref& r : refs) {
         if (r.slot < 0 || r.slot + r.slots > n_ctx || r.slots * 4 != r.h * r.w || r.latent == nullptr)
@@ -346,13 +386,16 @@ void QiDit::set_context(const float* ctx, int64_t n_ctx, const std::vector<Ref>&
 
 void QiDit::drop_host_prefix() {
     gpu::stream_sync(s_);
-    for (Block& b : blocks_)
-        for (uint16_t** p : {&b.pk, &b.pv})
-            if (*p != nullptr && gpu::is_host_usm(*p)) {
-                allocs_.erase(std::remove(allocs_.begin(), allocs_.end(), (void*) *p), allocs_.end());
-                gpu::free(*p);
-                *p = nullptr;
-            }
+    std::vector<uint16_t**> ps;
+    for (Block& b : blocks_) ps.insert(ps.end(), {&b.pk, &b.pv});
+    for (uint16_t*& p : other_.pk) ps.push_back(&p);
+    for (uint16_t*& p : other_.pv) ps.push_back(&p);
+    for (uint16_t** p : ps)
+        if (*p != nullptr && gpu::is_host_usm(*p)) {
+            allocs_.erase(std::remove(allocs_.begin(), allocs_.end(), (void*) *p), allocs_.end());
+            gpu::free(*p);
+            *p = nullptr;
+        }
 }
 
 void QiDit::step_modulation(float t) {
@@ -396,6 +439,9 @@ void QiDit::forward(const float* x, float t, int64_t H, int64_t W, bool prefix, 
                     s[(size_t) (i * kHead / 2 + j)] = std::sin(ang);
                 }
         }
+        // put is a copy of its own, not ordered after the stream: the work queued with the tables before (the other
+        // context's forward, under guidance) is done first
+        gpu::stream_sync(s_);
         put(cos_, c.data(), c.size() * 4);
         put(sin_, s.data(), s.size() * 4);
         rope_H_ = H;
@@ -407,6 +453,13 @@ void QiDit::forward(const float* x, float t, int64_t H, int64_t W, bool prefix, 
     if (!prefix) gpu::copy_async(x_, text_, (size_t) (n_text_ * C) * 4, s_);
     qi_latent_tokens16(x, in_ch_, HW, h16_, s_);
     product(h16_, iin_, x_ + n_text_ * C, HW);
+    // qi_attention reads q16, k16 and v16 up to T rounded up, the rows past T zero: a longer context run before (the
+    // other one of guidance) left its rows there
+    if (dirty_T_ > T) {
+        const int64_t pad = std::min(qi_attn_rows(T), dirty_T_) - T;
+        for (uint16_t* b : {q16_, k16_, v16_}) gpu::memset_async(b + T * C, 0, (size_t) (pad * C) * 2, s_);
+    }
+    dirty_T_ = std::max(dirty_T_, T);
     auto mod = [&](int i) { return mods_ + (int64_t) i * 2 * C; };
     float* xr = x_ + r0 * C;
     const size_t text_bytes = (size_t) (n_text_ * C) * 2;
@@ -484,12 +537,32 @@ void QiDit::drop_activations() {
 }
 
 void QiDit::sample(float* x, int64_t H, int64_t W, const std::vector<float>& sigmas,
-                   const std::function<bool(int, int)>& step, const std::function<void(float*, float)>& after) {
+                   const std::function<bool(int, int)>& step, const std::function<void(float*, float)>& after,
+                   float cfg) {
     const int64_t n = in_ch_ * H * W;
+    const bool guided = cfg > 1.0f && other_.n_text > 0;
     float* v = alloc<float>(allocs_, n);
+    float* vn = guided ? alloc<float>(allocs_, n) : nullptr;   // the negative prompt's velocity
+    struct Free {
+        QiDit& d;
+        float* p;
+        ~Free() {
+            if (p == nullptr) return;
+            d.allocs_.erase(std::remove(d.allocs_.begin(), d.allocs_.end(), (void*) p), d.allocs_.end());
+            gpu::free(p);
+        }
+    } free_vn{*this, vn};
     const int steps = (int) sigmas.size() - 1;
     for (int i = 0; i < steps; ++i) {
         forward(x, sigmas[(size_t) i] * 1000.0f, H, W, i > 0, v);
+        if (guided) {   // v = vn + cfg (v - vn), as v -= vn, then vn += cfg v
+            swap_context();
+            forward(x, sigmas[(size_t) i] * 1000.0f, H, W, i > 0, vn);
+            swap_context();
+            qi_axpy(v, vn, -1.0f, n, s_);
+            qi_axpy(vn, v, cfg, n, s_);
+            gpu::copy_async(v, vn, (size_t) n * 4, s_);
+        }
         qi_axpy(x, v, sigmas[(size_t) i + 1] - sigmas[(size_t) i], n, s_);
         if (after) after(x, sigmas[(size_t) i + 1]);
         if (step) {

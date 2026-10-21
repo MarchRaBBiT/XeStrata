@@ -20,8 +20,10 @@
 //   IMG <width> <height> <seed> <drop> <out path> <ids, commas> [SIGMAS:<sigmas, commas>] [REF:<path>]...
 //                            -> STAGE <refs|text|sampling|decode> as each stage starts and STEP <done> <steps> lines,
 //                            then IMAGE key=value ... (times, the budget's split); SIGMAS: as --sigmas; REF: an
-//                            edit's reference images; MASK: as --mask
-//   NEED <width> <height> <n> [REF:<path>]... [MASK:<path>]  the VRAM an image of n prompt ids needs (from the files)
+//                            edit's reference images; MASK: as --mask; NEG:<ids, commas> and CFG:<scale> (above 1):
+//                            classifier-free guidance with that negative prompt (its pads as the prompt's)
+//   NEED <width> <height> <n> [REF:<path>]... [MASK:<path>] [NEG:<n>]  the VRAM an image of n prompt ids needs (from
+//                            the files); NEG: guidance's negative prompt of n ids
 //                                                                                          -> NEED least_mib=...
 //                            full_mib=... held_mib=... free_mib=... cap_mib=... host_mib=... (si::QiNeed)
 //   FREE                     the free VRAM and what the engine holds                        -> FREE free_mib=... held_mib=...
@@ -90,18 +92,24 @@ std::vector<si::QiRef> read_refs(std::istringstream& ls, si::QiRequest& r) {
     for (std::string word; ls >> word;) {
         if (word.rfind("SIGMAS:", 0) == 0) r.sigmas = parse_sigmas(word.substr(7));
         else if (word.rfind("MASK:", 0) == 0) r.mask = read_image(word.substr(5));
+        else if (word.rfind("NEG:", 0) == 0) r.neg_ids = parse_ids(word.substr(4));
+        else if (word.rfind("CFG:", 0) == 0) r.cfg = std::stof(word.substr(4));
         else if (word.rfind("REF:", 0) == 0) refs.push_back(read_image(word.substr(4)));
         else throw std::invalid_argument("unknown word " + word);
     }
     return refs;
 }
 
-// a NEED line's: the REF:<path> images' sizes; MASK:<path> sets `mask`
-std::vector<std::pair<int64_t, int64_t>> ref_sizes(std::istringstream& ls, bool& mask) {
+// a NEED line's: the REF:<path> images' sizes; MASK:<path> sets `mask`, NEG:<n> `n_neg`
+std::vector<std::pair<int64_t, int64_t>> ref_sizes(std::istringstream& ls, bool& mask, int64_t& n_neg) {
     std::vector<std::pair<int64_t, int64_t>> sizes;
     for (std::string word; ls >> word;) {
         if (word.rfind("MASK:", 0) == 0) {
             mask = true;
+            continue;
+        }
+        if (word.rfind("NEG:", 0) == 0) {
+            n_neg = std::stoll(word.substr(4));
             continue;
         }
         int64_t w = 0, h = 0;
@@ -215,8 +223,9 @@ int serve(si::QiPipeline& p) {
                 ls >> w >> h >> n;
                 if (!ls) throw std::invalid_argument("NEED <width> <height> <n> [REF:<path>]... [MASK:<path>]");
                 bool mask = false;
-                const auto sizes = ref_sizes(ls, mask);
-                const si::QiNeed nd = p.need(n, w, h, sizes, mask);
+                int64_t n_neg = 0;
+                const auto sizes = ref_sizes(ls, mask, n_neg);
+                const si::QiNeed nd = p.need(n, w, h, sizes, mask, n_neg);
                 std::printf("NEED least_mib=%llu full_mib=%llu held_mib=%llu free_mib=%llu cap_mib=%llu host_mib=%llu\n",
                             (unsigned long long) (nd.least >> 20), (unsigned long long) (nd.full >> 20),
                             (unsigned long long) (nd.held >> 20), (unsigned long long) (nd.free >> 20),
@@ -286,6 +295,8 @@ int main(int argc, char** argv) {
             else if (a == "--vision") vision = val();
             else if (a == "--ref") ref_paths.push_back(val());
             else if (a == "--mask") r.mask = read_image(val());
+            else if (a == "--neg-ids") r.neg_ids = parse_ids(val());
+            else if (a == "--cfg") r.cfg = std::stof(val());
             else if (a == "--out") out = val();
             else if (a == "--ids") ids = val();
             else if (a == "--drop") r.drop = std::stoll(val());

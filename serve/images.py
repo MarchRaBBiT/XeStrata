@@ -70,6 +70,7 @@ from typing import Any
 
 TURBO_STEPS = 8
 MAX_STEPS = 100                    # the base model's
+CFG_MAX = 30.0                     # guidance_scale / true_cfg_scale (vLLM-Omni: "typically 0.0-20.0")
 MODEL_NAME = "qwen-image-2.1-turbo"
 POLICIES = ("auto", "keep", "shrink", "unload")
 SIZE_STEP = 16                     # the VAE's 8x and the DiT's 2x2 patches: sides made at a multiple of 16, then cut
@@ -132,8 +133,9 @@ def parse_request(req: dict, cfg: dict) -> dict:
     """The fields of one /v1/images/generations request, checked.  output_format png, jpeg or webp
     (output_compression 0-100, the quality jpeg and webp are written at); quality low, medium or high (the base model's
     steps, QUALITY_STEPS; an explicit steps wins); background transparent (the prompt in Qwen's form for it, an image
-    with alpha; not with jpeg), opaque (alpha flattened on white) or auto.  Unknown OpenAI fields (style, user,
-    moderation) are accepted and ignored."""
+    with alpha; not with jpeg), opaque (alpha flattened on white) or auto.  vLLM-Omni's fields too: num_inference_steps
+    (steps by its name), negative_prompt, guidance_scale and true_cfg_scale (CFG_FIELDS).  Unknown fields (style,
+    user, moderation) are accepted and ignored."""
     prompt = req.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         raise ImageRequestError("prompt: a non-empty string")
@@ -160,19 +162,45 @@ def parse_request(req: dict, cfg: dict) -> dict:
         raise ImageRequestError("background transparent: this image model does not make transparent images")
     w, h = parse_size(req.get("size"), int(cfg.get("max_side") or 2048))
     n = _int_field(req, "n", 1, int(cfg.get("max_n") or 4), 1)
+    if "num_inference_steps" in req:            # vLLM-Omni's name for steps
+        if req.get("steps") not in (None, req["num_inference_steps"]):
+            raise ImageRequestError("steps and num_inference_steps: give one, or the same number")
+        req = {**req, "steps": req["num_inference_steps"]}
     if cfg.get("schedule") == "base":
         steps = _int_field(req, "steps", 2, MAX_STEPS,
                            QUALITY_STEPS.get(quality or "auto") or int(cfg.get("steps") or 40))
-    elif req.get("steps") not in (None, TURBO_STEPS):
-        raise ImageRequestError(f"steps: Qwen-Image-2.1-Turbo runs its own {TURBO_STEPS}-step schedule only")
-    else:
+    else:   # Turbo's own sigmas: steps asked for are ignored, as its diffusers pipeline (sample_sigmas) does
+        _int_field(req, "steps", 1, MAX_STEPS, None)
         steps = TURBO_STEPS
+    cfg_fields = cfg_request(req)
     seed = _int_field(req, "seed", 0, 2**62, None)
     if seed is None:
         seed = random.SystemRandom().randrange(0, 2**31)
     return {"prompt": prompt, "width": w, "height": h, "n": n, "steps": steps, "seed": seed,
             "quality": quality or "auto", "response_format": fmt, "output_format": out_fmt,
-            "output_compression": compression, "background": background}
+            "output_compression": compression, "background": background, **cfg_fields}
+
+
+def cfg_request(req: dict) -> dict:
+    """vLLM-Omni's guidance fields, checked: negative_prompt, guidance_scale and true_cfg_scale.  Qwen-Image-2.1 takes
+    classifier-free guidance from true_cfg_scale above 1 with a negative_prompt, as diffusers' QwenImage21Pipeline
+    does (without one, or at 1, none: "cfg" stays out of the job); guidance_scale it has no use for, and ignores."""
+    out: dict = {}
+    neg = req.get("negative_prompt")
+    if neg is not None:
+        if not isinstance(neg, str) or len(neg) > 16000 or "\0" in neg:
+            raise ImageRequestError("negative_prompt: a string of at most 16000 characters")
+        out["negative_prompt"] = neg
+    for key in ("guidance_scale", "true_cfg_scale"):
+        v = req.get(key)
+        if v is None:
+            continue
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= CFG_MAX:
+            raise ImageRequestError(f"{key}: a number from 0 to {CFG_MAX:g}")
+        out[key] = float(v)
+    if out.get("true_cfg_scale", 1.0) > 1 and out.get("negative_prompt") is not None:
+        out["cfg"] = out["true_cfg_scale"]
+    return out
 
 
 def model_prompt(job: dict) -> str:
@@ -656,7 +684,16 @@ class ImageGen:
             self.tok = load_tokenizer(self.cfg["llm"])
         if "ids" not in job:
             job["ids"] = prompt_ids(self.tok, model_prompt(job), len(job.get("refs") or ()))
+            if job.get("cfg"):   # guidance's negative prompt, in the same form (its pads as the prompt's)
+                job["neg_ids"] = prompt_ids(self.tok, job["negative_prompt"], len(job.get("refs") or ()))
         return job["ids"]
+
+    @staticmethod
+    def _cfg_words(job: dict) -> str:
+        """IMG's guidance words: the negative prompt's ids and the scale (none without guidance)."""
+        if not job.get("cfg"):
+            return ""
+        return f" NEG:{','.join(str(i) for i in job['neg_ids'])} CFG:{job['cfg']:g}"
 
     def stage(self, job: dict) -> None:
         """An edit's reference images and mask into files the engine reads (job["ref_paths"], job["mask_path"]);
@@ -696,7 +733,9 @@ class ImageGen:
             self._ready()
             w, h = made_size(job)
             self.stage(job)
-            return self.engine.ask(f"NEED {w} {h} {len(self.ids(job)) - DROP}{self._refs_words(job)}", "NEED", 600)
+            n = len(self.ids(job)) - DROP
+            neg = f" NEG:{len(job['neg_ids']) - DROP}" if job.get("cfg") else ""
+            return self.engine.ask(f"NEED {w} {h} {n}{self._refs_words(job)}{neg}", "NEED", 600)
 
     def free_mib(self) -> int:
         """The device's free VRAM, as the engine sees it (its parts left as they are)."""
@@ -756,7 +795,8 @@ class ImageGen:
                         self._live(stage=name, **({"sampling_at": time.monotonic()} if name == "sampling" else {}))
                     try:
                         r = self.engine.ask(f"IMG {mw} {mh} {job['seed'] + i} {DROP} {out} {ids}{sigmas}"
-                                            f"{self._refs_words(job)}", "IMAGE", timeout, cancel, step, stage)
+                                            f"{self._refs_words(job)}{self._cfg_words(job)}", "IMAGE", timeout,
+                                            cancel, step, stage)
                     except ImageJobFailed as e:
                         self.totals["failed"] += 1
                         why = "cancelled (the client left)" if str(e) == "stopped" else str(e)
@@ -773,7 +813,8 @@ class ImageGen:
             with contextlib.suppress(OSError):
                 work.rmdir()
         secs = time.monotonic() - t0
-        figures = {"seconds": round(secs, 2), "steps": job["steps"], "n": job["n"], "refs": len(job.get("refs") or ()),
+        figures = {"seconds": round(secs, 2), "steps": job["steps"], "cfg": job.get("cfg") or 1.0, "n": job["n"],
+                   "refs": len(job.get("refs") or ()),
                    "size": f"{job['width']}x{job['height']}", "seed": job["seed"], "engine": "strata-image",
                    "quant": self.cfg.get("quant"),
                    "text_encode_ms": round(sum(r.get("text_s", 0) for r in parts) * 1000, 1),

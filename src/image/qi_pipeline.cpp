@@ -117,7 +117,7 @@ void QiPipeline::fit(uint64_t reserve) {
 }
 
 QiNeed QiPipeline::need(int64_t n_text, int64_t width, int64_t height,
-                        const std::vector<std::pair<int64_t, int64_t>>& refs, bool mask) {
+                        const std::vector<std::pair<int64_t, int64_t>>& refs, bool mask, int64_t n_neg) {
     const QiDit& dit = *dit_size_;
     const QiText& te = *te_size_;
     const QiVae& vae = *vae_size_;
@@ -135,10 +135,15 @@ QiNeed QiPipeline::need(int64_t n_text, int64_t width, int64_t height,
     // a mask: the first reference encoded again at the image's size; the base latent, the noise and the mask kept
     if (mask) edit = std::max(edit, vae.encode_scratch_bytes(height, width) + (uint64_t) (4 * height * width) * 4);
     const uint64_t inpaint = mask ? (uint64_t) ((2 * dit.channels() + 1) * h * w) * 4 : 0;
-    const uint64_t fixed = dit.weight_bytes() + vae.weight_bytes() + kScratch + dit.prefix_row_bytes(T - h * w) + inpaint;
+    // guidance: the negative prompt's prefix beside the first (the same references), and its sequence
+    const int64_t neg_pre = n_neg > 0 ? n_neg + (T - h * w - n_text) : 0, T_act = std::max(T, neg_pre + h * w);
+    const uint64_t fixed = dit.weight_bytes() + vae.weight_bytes() + kScratch + dit.prefix_row_bytes(T - h * w) +
+                           dit.prefix_row_bytes(neg_pre) + inpaint;
     // the prefix cache: in VRAM in the plan's room, the rest in pinned RAM (least: all of it there)
-    const uint64_t kv = dit.prefix_kv_bytes(T - h * w), kv_all = kv * (uint64_t) dit.blocks();
+    const uint64_t kv = dit.prefix_kv_bytes(T - h * w) + dit.prefix_kv_bytes(neg_pre), kv_all = kv * (uint64_t) dit.blocks();
     QiNeed n;
+    if (n_neg > 0) te_T = std::max(te_T, te_T - n_text + n_neg);
+    T = T_act;
     edit = std::max(edit, te.activation_bytes(te_T));   // the encoder's own buffers, before the DiT's
     n.least = fixed + std::max({dit.activation_bytes(T, 512), vae.scratch_min(), edit}) + dit.block_min() +
               te.layer_min();
@@ -179,12 +184,14 @@ void QiPipeline::release(bool all) {
     mlp_set_ = -1;
 }
 
-QiPlan QiPipeline::plan(int64_t T, int64_t h, int64_t w, int64_t n_ids) {
+QiPlan QiPipeline::plan(int64_t T, int64_t h, int64_t w, int64_t n_ids, int64_t n_neg_pre) {
     QiPlan p;
     p.budget = budget_ > 0 ? budget_ : auto_budget_;
     // the prefix's rows stay through the sampling and the decode (an edit's: its references' tokens too)
     const int64_t n_pre = T > 0 ? T - h * w : 0;
-    p.fixed = dit_->weight_bytes() + vae_->weight_bytes() + kScratch + dit_->prefix_row_bytes(n_pre);
+    p.fixed = dit_->weight_bytes() + vae_->weight_bytes() + kScratch + dit_->prefix_row_bytes(n_pre) +
+              dit_->prefix_row_bytes(n_neg_pre);
+    if (T > 0) T = std::max(T, n_neg_pre + h * w);   // the activations: the longer of the two contexts' sequences
     if (p.budget <= p.fixed) throw std::runtime_error("image engine: the VRAM budget (" + std::to_string(p.budget >> 20) +
                                                       " MiB) is below the weights that always stay");
     const uint64_t avail = p.budget - p.fixed, dit_min = dit_->block_min(), te_min = te_->layer_min();
@@ -204,7 +211,8 @@ QiPlan QiPipeline::plan(int64_t T, int64_t h, int64_t w, int64_t n_ids) {
                                  " MiB) is too small for this image");
     // the prefix cache first: a block's that is not in VRAM is copied in at every step with the compute waiting (the
     // blocks' weights stream beside it); then the DiT's blocks (8 or more uses an image), then the encoder's layers
-    const uint64_t kv = dit_->prefix_kv_bytes(n_pre), spare = avail - work - dit_min - te_min;
+    const uint64_t kv = dit_->prefix_kv_bytes(n_pre) + dit_->prefix_kv_bytes(n_neg_pre),
+                   spare = avail - work - dit_min - te_min;
     p.resident_kv = kv > 0 ? (int) std::min<uint64_t>(spare / kv, (uint64_t) dit_->blocks()) : dit_->blocks();
     p.prefix_kv = (uint64_t) p.resident_kv * kv;
     dit_->set_prefix_vram_blocks(p.resident_kv);
@@ -236,7 +244,8 @@ QiPlan QiPipeline::plan(int64_t T, int64_t h, int64_t w, int64_t n_ids) {
 
 void QiPipeline::edit_refs(const QiRequest& r, std::vector<int32_t>& ids, std::vector<QiVisionOut>& vouts,
                            std::vector<QiText::Image>& te_images, std::vector<QiDit::Ref>& dit_refs,
-                           std::vector<float*>& ref_z, float** base_z) {
+                           std::vector<float*>& ref_z, float** base_z, std::vector<int32_t>& neg_ids,
+                           std::vector<QiText::Image>& neg_te, std::vector<QiDit::Ref>& neg_refs) {
     if (vision_path_.empty()) throw std::invalid_argument("image engine: an edit needs the vision encoder (--vision)");
     if (std::count(r.ids.begin(), r.ids.end(), kImagePad) != (int64_t) r.refs.size())
         throw std::invalid_argument("image engine: the prompt's image pads and the reference images differ in number");
@@ -297,32 +306,39 @@ void QiPipeline::edit_refs(const QiRequest& r, std::vector<int32_t>& ids, std::v
     }
     vision_.reset();   // its weights go: an edit opens it again
     vae_->drop_scratch();
-    // the ids with each pad widened to its reference's tokens
-    size_t k = 0;
-    for (const int32_t id : r.ids) {
-        if (id != kImagePad) {
-            ids.push_back(id);
-            continue;
+    // the ids with each pad widened to its reference's tokens: the prompt's, and guidance's negative prompt's
+    auto widen = [&](const std::vector<int32_t>& src, std::vector<int32_t>& out, std::vector<QiText::Image>& te,
+                     std::vector<QiDit::Ref>& refs) {
+        size_t k = 0;
+        for (const int32_t id : src) {
+            if (id != kImagePad) {
+                out.push_back(id);
+                continue;
+            }
+            if (k >= vouts.size())
+                throw std::invalid_argument("image engine: the negative prompt's image pads and the references differ");
+            const QiVisionOut& v = vouts[k];
+            QiText::Image im;
+            im.index = (int64_t) out.size();
+            im.rows = v.rows;
+            im.grid_h = v.grid_h;
+            im.grid_w = v.grid_w;
+            im.main = v.main.data();
+            for (const auto& d : v.deepstack) im.deepstack.push_back(d.data());
+            te.push_back(im);
+            QiDit::Ref f;
+            f.slot = im.index;
+            f.slots = v.rows;
+            f.w = grids[k].first / 16;
+            f.h = grids[k].second / 16;
+            f.latent = ref_z[k];
+            refs.push_back(f);
+            out.insert(out.end(), (size_t) v.rows, kImagePad);
+            ++k;
         }
-        const QiVisionOut& v = vouts[k];
-        QiText::Image im;
-        im.index = (int64_t) ids.size();
-        im.rows = v.rows;
-        im.grid_h = v.grid_h;
-        im.grid_w = v.grid_w;
-        im.main = v.main.data();
-        for (const auto& d : v.deepstack) im.deepstack.push_back(d.data());
-        te_images.push_back(im);
-        QiDit::Ref f;
-        f.slot = im.index;
-        f.slots = v.rows;
-        f.w = grids[k].first / 16;
-        f.h = grids[k].second / 16;
-        f.latent = ref_z[k];
-        dit_refs.push_back(f);
-        ids.insert(ids.end(), (size_t) v.rows, kImagePad);
-        ++k;
-    }
+    };
+    widen(r.ids, ids, te_images, dit_refs);
+    if (r.cfg > 1.0f && !r.neg_ids.empty()) widen(r.neg_ids, neg_ids, neg_te, neg_refs);
 }
 
 std::vector<uint8_t> QiPipeline::generate(const QiRequest& r, QiTimes* times, QiPlan* plan_out,
@@ -351,9 +367,13 @@ std::vector<uint8_t> QiPipeline::generate(const QiRequest& r, QiTimes* times, Qi
     if (mask && (r.refs.empty() || r.mask.rgba.size() != (size_t) (r.mask.width * r.mask.height * 4)))
         throw std::invalid_argument("image engine: a mask needs its reference image, and it must not be empty");
     float* base_z = nullptr;
+    const bool guided = r.cfg > 1.0f && !r.neg_ids.empty();
+    std::vector<int32_t> neg_ids;   // an edit's negative prompt, its pads widened
+    std::vector<QiText::Image> neg_te;
+    std::vector<QiDit::Ref> neg_refs;
     if (!r.refs.empty()) {
         if (stage) stage("refs");
-        edit_refs(r, ids, vouts, te_images, dit_refs, ref_z, &base_z);
+        edit_refs(r, ids, vouts, te_images, dit_refs, ref_z, &base_z, neg_ids, neg_te, neg_refs);
         if (base_z != nullptr) ref_z.push_back(base_z);
     }
     if (stage) stage("text");
@@ -361,7 +381,11 @@ std::vector<uint8_t> QiPipeline::generate(const QiRequest& r, QiTimes* times, Qi
     const int64_t n_ctx = (int64_t) all_ids.size() - r.drop;
     int64_t n_pre = n_ctx;
     for (const QiDit::Ref& f : dit_refs) n_pre += f.h * f.w - f.slots;
-    QiPlan p = plan(n_pre + h * w, h, w, (int64_t) all_ids.size());
+    const std::vector<int32_t>& neg_all = r.refs.empty() ? r.neg_ids : neg_ids;
+    const int64_t n_neg_ctx = guided ? (int64_t) neg_all.size() - r.drop : 0;
+    if (guided && n_neg_ctx <= 0) throw std::invalid_argument("image engine: no negative prompt after the system turn");
+    const int64_t n_neg_pre = guided ? n_neg_ctx + (n_pre - n_ctx) : 0;
+    QiPlan p = plan(n_pre + h * w, h, w, (int64_t) std::max(all_ids.size(), neg_all.size()), n_neg_pre);
     if (!r.refs.empty()) {   // the references' states are not kept: another edit has other images
         last_states_ = te_->encode(all_ids, te_images);
         te_->drop_activations();
@@ -376,6 +400,20 @@ std::vector<uint8_t> QiPipeline::generate(const QiRequest& r, QiTimes* times, Qi
     const int64_t C = te_->hidden();
     for (QiDit::Ref& f : dit_refs) f.slot -= r.drop;
     dit_->set_context(last_states_.data() + r.drop * C, n_ctx, dit_refs);
+    if (guided) {   // the negative prompt's states (kept for the same ids again when there are no references)
+        if (!r.refs.empty()) {
+            last_neg_states_ = te_->encode(neg_all, neg_te);
+            last_neg_ids_.clear();
+        } else if (r.neg_ids != last_neg_ids_) {
+            last_neg_states_ = te_->encode(r.neg_ids);
+            last_neg_ids_ = r.neg_ids;
+        }
+        te_->drop_activations();
+        for (QiDit::Ref& f : neg_refs) f.slot -= r.drop;
+        dit_->set_context(last_neg_states_.data() + r.drop * C, n_neg_ctx, neg_refs, true);
+    } else {
+        dit_->drop_second_context();
+    }
     const auto t1 = clock::now();
     const int64_t n = dit_->channels() * h * w, HW = r.width * r.height;
     const auto noise = philox_randn(r.seed, (uint64_t) n);
@@ -409,7 +447,7 @@ std::vector<uint8_t> QiPipeline::generate(const QiRequest& r, QiTimes* times, Qi
     try {
         gpu::copy(x, noise.data(), (size_t) n * 4);
         if (stage) stage("sampling");
-        dit_->sample(x, h, w, r.sigmas.empty() ? turbo_sigmas() : r.sigmas, step, keep);
+        dit_->sample(x, h, w, r.sigmas.empty() ? turbo_sigmas() : r.sigmas, step, keep, guided ? r.cfg : 1.0f);
         dit_->drop_host_prefix();
         const auto t2 = clock::now();
         if (stage) stage("decode");

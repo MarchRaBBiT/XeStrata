@@ -40,6 +40,8 @@ struct QiRequest {
     std::vector<float> sigmas;  // empty: Turbo's 8 steps
     std::vector<QiRef> refs;    // an edit's reference images, in the order of their pads
     QiRef mask;                 // an edit's mask over refs[0] (OpenAI's: alpha 0 where the image changes); empty: none
+    std::vector<int32_t> neg_ids;   // classifier-free guidance's negative prompt, as ids (its pads as the prompt's)
+    float cfg = 1.0f;               // its scale (diffusers' true_cfg_scale): above 1 with neg_ids, guidance
 };
 
 /// The size an edit's reference image is worked at: about 1024 x 1024 pixels in the reference's shape, sides rounded to
@@ -91,9 +93,10 @@ public:
 
     /// What an image of n_text prompt ids (after the system turn) at width x height needs (from the parts' sizes:
     /// nothing put on the GPU); refs: an edit's reference images' sizes (width, height as read); mask: the edit has a
-    /// mask (the first reference encoded again at the image's size, and the sampler's base latent, noise and mask).
+    /// mask (the first reference encoded again at the image's size, and the sampler's base latent, noise and mask);
+    /// n_neg: guidance's negative prompt's ids after the system turn (0: no guidance), its own prefix beside the first.
     QiNeed need(int64_t n_text, int64_t width, int64_t height,
-                const std::vector<std::pair<int64_t, int64_t>>& refs = {}, bool mask = false);
+                const std::vector<std::pair<int64_t, int64_t>>& refs = {}, bool mask = false, int64_t n_neg = 0);
 
     /// RGBA8 [height][width][4] of the request.  `step`: the DiT's progress (QiDit::sample), false to stop.
     /// `stage`: each stage as it starts ("refs", the references through the vision encoder and the VAE's encoder;
@@ -103,12 +106,13 @@ public:
                                   const std::function<void(const char*)>& stage = {});
 
 private:
-    QiPlan plan(int64_t T, int64_t h, int64_t w, int64_t n_ids = 0);
+    QiPlan plan(int64_t T, int64_t h, int64_t w, int64_t n_ids = 0, int64_t n_neg_pre = 0);
 
     void ensure_open();
     void edit_refs(const QiRequest& r, std::vector<int32_t>& ids, std::vector<QiVisionOut>& vouts,
                    std::vector<QiText::Image>& te_images, std::vector<QiDit::Ref>& dit_refs, std::vector<float*>& ref_z,
-                   float** base_z);
+                   float** base_z, std::vector<int32_t>& neg_ids, std::vector<QiText::Image>& neg_te,
+                   std::vector<QiDit::Ref>& neg_refs);
 
     void* s_ = nullptr;
     std::string dit_path_, vae_path_, text_path_, vision_path_;
@@ -124,7 +128,9 @@ private:
     uint64_t budget_ = 0, auto_budget_ = 0;
     uint64_t dit_set_ = 0, te_set_ = 0;
     int64_t mlp_set_ = -1;
-    std::vector<int32_t> last_ids_;   // the last prompt, and its text states (host)
+    std::vector<int32_t> last_ids_;
+    std::vector<float> last_neg_states_;   // the last negative prompt's states (guidance), for the same ids again
+    std::vector<int32_t> last_neg_ids_;   // the last prompt, and its text states (host)
     std::vector<float> last_states_;
 };
 

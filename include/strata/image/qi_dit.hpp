@@ -61,8 +61,11 @@ public:
     };
 
     /// The text encoder's states [n_ctx][4096] (host FP32, after the system turn): projected into the sequence's
-    /// prefix, with `refs` (in order) in place of their pads; the prefix cache starts again.
-    void set_context(const float* ctx, int64_t n_ctx, const std::vector<Ref>& refs = {});
+    /// prefix, with `refs` (in order) in place of their pads; the prefix cache starts again.  `second`: the second
+    /// context (classifier-free guidance's negative prompt), which `sample` runs beside the first.
+    void set_context(const float* ctx, int64_t n_ctx, const std::vector<Ref>& refs = {}, bool second = false);
+    /// Frees the second context (a request without guidance).
+    void drop_second_context();
 
     /// out = the velocity [64][H][W] (device FP32) of the latent x (device FP32, the same shape) at time t (sigma x
     /// 1000).  `prefix`: the text rows' K and V from the cache (a step after the first of one context).
@@ -71,10 +74,11 @@ public:
     /// The flow sampler: x (device FP32 [64][H][W], the starting noise) through `sigmas` by Euler's steps.
     /// `step` (if set) is called after each step with (steps done, steps); it returns false to stop (the sampler then
     /// throws QiStopped).  `after` (if set) is given x and the step's new sigma first, on the sampler's stream (an
-    /// edit's mask: qi_inpaint_blend).
+    /// edit's mask: qi_inpaint_blend).  `cfg` above 1 (with a second context set): classifier-free guidance, the
+    /// velocity neg + cfg * (cond - neg) of the two contexts' (diffusers' true_cfg_scale).
     void sample(float* x, int64_t H, int64_t W, const std::vector<float>& sigmas,
                 const std::function<bool(int, int)>& step = {},
-                const std::function<void(float*, float)>& after = {});
+                const std::function<void(float*, float)>& after = {}, float cfg = 1.0f);
 
     int64_t channels() const { return in_ch_; }
     int64_t hidden() const { return C_; }
@@ -125,6 +129,7 @@ private:
                  int64_t rows = -1);
     void step_modulation(float t);
     void ensure(int64_t T, int64_t HW);
+    void swap_context();   // the first context's state <-> other_'s
 
     std::unique_ptr<GgufFile> g_;
     void* s_ = nullptr;
@@ -140,6 +145,7 @@ private:
     LayerStream blocks_stream_;
     // activations, grown on demand
     int64_t cap_T_ = 0, mlp_cap_ = 0, mlp_rows_ = 0;
+    int64_t dirty_T_ = 0;   // the most rows q16_, k16_ and v16_ were written to (the padding past a shorter T is zeroed)
     float *x_ = nullptr, *q_ = nullptr, *k_ = nullptr, *v_ = nullptr, *h_ = nullptr, *gu_ = nullptr;
     uint16_t *h16_ = nullptr, *q16_ = nullptr, *k16_ = nullptr, *v16_ = nullptr, *o16_ = nullptr;
     float *cos_ = nullptr, *sin_ = nullptr, *attn_scratch_ = nullptr;
@@ -148,6 +154,14 @@ private:
     std::vector<float> pre_pos_;      // the prefix rows' positions [n_text][3]
     int64_t target_pos_ = 0;          // the image's first position
     int32_t* key_lim_ = nullptr;      // the prefix rows' key limits, with references (null: each its own prefix)
+    // the other context (guidance's negative prompt): the same state, swapped in while it runs (swap_context)
+    struct Context {
+        float* text = nullptr;
+        int64_t n_text = 0, target_pos = 0;
+        std::vector<float> pre_pos;
+        int32_t* key_lim = nullptr;
+        std::vector<uint16_t*> pk, pv;
+    } other_;
     float *mods_ = nullptr;           // [4][2][C]: the step's modulation, row 0 the image's, row 1 the text's
     float *scale_ = nullptr;          // [2][C]: the final norm's scale (row 0)
     float *temb_ = nullptr;           // [2][C] the time embeddings (t, 0), after their SiLU
