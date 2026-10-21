@@ -29,7 +29,8 @@ case "$distro" in
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -q
     apt-get install -y -q --no-install-recommends git cmake ninja-build g++ libhwloc-dev libzstd-dev python3 \
-      patchelf curl ca-certificates unzip libblosc2-dev libvulkan-dev glslc spirv-headers dpkg-dev file gpg ccache lld opencl-headers
+      patchelf curl ca-certificates unzip libblosc2-dev libvulkan-dev glslc spirv-headers dpkg-dev file gpg ccache lld opencl-headers \
+      xz-utils
     python_deps="python3 (>= 3.10), python3-numpy, python3-jinja2, python3-regex, python3-yaml, python3-tqdm, \
 python3-requests, python3-pil, python3-psutil"
     # Ubuntu's libze-intel-gpu1 does not depend on the graphics compiler it opens (libigc2, libigdfcl2): without them

@@ -32,7 +32,7 @@ apt-get update -q
 # aotriton's build (its configure makes a venv for its code generator, and XeStrata's patch goes onto its source)
 apt-get install -y -q --no-install-recommends git cmake ninja-build g++ libhwloc-dev libzstd-dev python3 python3-pip \
   python3-venv curl ca-certificates unzip ccache lld lld-21 llvm-21 dotnet-sdk-10.0 7zip nvidia-cuda-toolkit \
-  opencl-headers patch libamdhip64-dev rocm-device-libs-21
+  opencl-headers patch xz-utils libamdhip64-dev rocm-device-libs-21
 cuda_path=/usr/lib/cuda
 # cuDNN's headers (the same on Windows), for the image engine's attention, which opens cuDNN where the user installed
 # it (cudnn64_9.dll): from NVIDIA's redistributable archive, its SHA-256 checked, kept in /cache
