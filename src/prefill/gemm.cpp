@@ -62,12 +62,13 @@ struct Backend {
 std::mutex g_mutex;
 std::unordered_map<sycl::device, Backend> g_backends;
 
-// Windows: the GPU makers' libraries the 7z does not carry (not free software), where their installers put them, for
-// oneMath's backends to load: after the PATH the user set (setvars.bat, a Python environment's), oneAPI's mkl and tbb
-// folders (ONEAPI_ROOT, which the installer sets, else its default folder) and MKLROOT's for oneMKL; the CUDA
-// toolkit's (CUDA_PATH) and the folders pip's nvidia-cublas-cu12 and nvidia-cuda-runtime-cu12 make in the Python the
-// 7z carries (<7z>\python beside <7z>\app\engine) for cuBLAS.  Without them the backend does not load and the products
-// take XeStrata's own kernels.
+// Windows: the GPU makers' libraries the 7z does not carry, where their installers put them, for oneMath's backends to
+// load: after the PATH the user set (setvars.bat, a Python environment's), oneAPI's mkl and tbb folders (ONEAPI_ROOT,
+// which the installer sets, else its default folder) and MKLROOT's for oneMKL; the CUDA toolkit's (CUDA_PATH) and the
+// folders pip's nvidia-cublas-cu12 and nvidia-cuda-runtime-cu12 make in the Python the 7z carries (<7z>\python beside
+// <7z>\app\engine) for cuBLAS; the folder AMD's rocm-sdk-libraries-<family> makes in that Python for rocBLAS and
+// hipBLASLt (free software, but built for each GPU family; the import libraries name its DLLs,
+// tools/package/win_rocm.sh).  Without them the backend does not load and the products take XeStrata's own kernels.
 void add_library_dirs() {
 #if defined(_WIN32)
     static std::once_flag once;
@@ -82,9 +83,14 @@ void add_library_dirs() {
         if (const char* c = std::getenv("CUDA_PATH")) dirs.push_back(std::string(c) + "\\bin");
         char exe[MAX_PATH] = {};
         if (GetModuleFileNameA(nullptr, exe, MAX_PATH) > 0) {
-            const std::filesystem::path pip = std::filesystem::path(exe).parent_path().parent_path().parent_path() /
-                                              "python" / "Lib" / "site-packages" / "nvidia";
-            for (const char* sub : {"cublas", "cuda_runtime"}) dirs.push_back((pip / sub / "bin").string());
+            const std::filesystem::path site =
+                std::filesystem::path(exe).parent_path().parent_path().parent_path() / "python" / "Lib" / "site-packages";
+            for (const char* sub : {"cublas", "cuda_runtime"}) dirs.push_back((site / "nvidia" / sub / "bin").string());
+            // AMD's rocm-sdk-libraries-<family> (rocBLAS and hipBLASLt): one folder for the GPU family it was made for
+            std::error_code ec;
+            for (const auto& e : std::filesystem::directory_iterator(site, ec))
+                if (e.path().filename().string().rfind("_rocm_sdk_libraries_", 0) == 0)
+                    dirs.push_back((e.path() / "bin").string());
         }
         const char* old = std::getenv("PATH");
         std::string path = old != nullptr ? old : "";

@@ -1420,18 +1420,57 @@ def windows_nvidia_libs() -> list:
     return missing
 
 
-def check_runtime(makers: set) -> None:
+# AMD's Python packages for Windows with rocBLAS and hipBLASLt (rocm-sdk-libraries-<family>, free software), one per
+# GPU family: the release whose DLLs export what the engine's rocBLAS backend imports (tools/package/win_rocm.sh)
+ROCM_WIN_INDEX = "https://repo.amd.com/rocm/whl/"
+ROCM_WIN_VERSION = "7.13.0"
+
+
+def rocm_win_family(gfx: str):
+    """The family of AMD's Windows packages (their index's folder) that has rocBLAS's and hipBLASLt's code for `gfx`,
+    or None."""
+    if gfx in ("gfx1150", "gfx1151", "gfx1152"):
+        return gfx
+    for prefix, family in (("gfx103", "gfx103X-all"), ("gfx110", "gfx110X-all"), ("gfx120", "gfx120X-all")):
+        if gfx.startswith(prefix):
+            return family
+    return None
+
+
+def windows_amd_libs(gfx: set) -> list:
+    """pip's commands for AMD's rocBLAS and hipBLASLt the engine would not find on Windows for the AMD GPUs of `gfx`,
+    where it looks (add_library_dirs in src/prefill/gemm.cpp): the PATH, the Python beside the engine."""
+    path = [Path(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+    site = Path(sys.executable).parent / "Lib" / "site-packages"
+    commands = []
+    for family in sorted({f for g in gfx if g and (f := rocm_win_family(g))}):
+        dirs = path + [site / f"_rocm_sdk_libraries_{family.replace('-', '_')}" / "bin"]
+        if not any((d / "rocblas.dll").is_file() and (d / "libhipblaslt.dll").is_file() for d in dirs):
+            # --no-deps: the HIP runtime is the AMD driver's (amdhip64_7.dll), not the SDK's core package
+            commands.append(f'"{sys.executable}" -m pip install --no-deps --index-url {ROCM_WIN_INDEX}{family}/ '
+                            f"rocm-sdk-libraries-{family.lower()}=={ROCM_WIN_VERSION}")
+    return commands
+
+
+def check_runtime(makers: set, gfx: set) -> None:
     """Stops when the GPUs of `makers` lack their makers' packages, and says how to install them; names oneMKL and
     cuBLAS too when they are missing, without stopping (XeStrata's own kernels do their work).  Windows: the GPU
     makers' drivers bring what the engine runs on (Level Zero, the CUDA driver), the 7z the rest, and the launcher
-    checks the Visual C++ runtime.  NVIDIA's cuBLAS, CUDA runtime and cuDNN are named when the engine would not find
-    them, with pip's command for the Python the 7z carries."""
+    checks the Visual C++ runtime.  NVIDIA's cuBLAS, CUDA runtime and cuDNN, and AMD's rocBLAS and hipBLASLt for the
+    AMD GPUs' families (`gfx`, their gfx names), are named when the engine would not find them, with pip's command for
+    the Python the 7z carries."""
     if WIN:
         missing = windows_nvidia_libs() if "nvidia" in makers and packaged_engine().get("license") == "contrib" else []
         if missing:
             warn("faster with NVIDIA's " + ", ".join(missing) + " (not free software: cuBLAS for the matrix products, "
                  "cuDNN for the image engine's attention; without them XeStrata's own kernels do the work):")
             say(f'  "{sys.executable}" -m pip install ' + " ".join(missing))
+        amd = windows_amd_libs(gfx) if "amd" in makers else []
+        if amd:
+            warn("faster with AMD's rocBLAS and hipBLASLt for the matrix products (without them XeStrata's own kernels "
+                 "do the work):")
+            for c in amd:
+                say("  " + c)
         return
     check_igc(makers)
     need, fast, repos = runtime_missing(makers)
@@ -5433,7 +5472,8 @@ def main() -> int:
         fail("no access to the GPU's compute device (/dev/kfd)",
              "add yourself to the render group (sudo usermod -aG render $USER), log out and in, and run it again")
     if PACKAGED:                                       # the GPU makers' packages the package only suggests
-        check_runtime({x["vendor"] for x in chosen} | {gpu_info(i)["vendor"] for i in sel[1:]})
+        check_runtime({x["vendor"] for x in chosen} | {gpu_info(i)["vendor"] for i in sel[1:]},
+                      {x.get("gfx") for x in [*chosen, *(gpu_info(i) for i in sel[1:])] if x["vendor"] == "amd"})
     if not WIN and (gpu["render"] is None or not os.access(gpu["render"], os.R_OK | os.W_OK)):
         fail(f"no access to the GPU ({gpu['render'] or 'no render node'})",
              "NVIDIA's driver is not loaded (nvidia-smi says why)" if gpu.get("vendor") == "nvidia" else
