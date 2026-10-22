@@ -2398,7 +2398,6 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                                 m.cpu_x_n = want;
                             }
                         }
-                        if (cpu_maybe) strata::gpu::copy_async(m.cpu_x, m.mixed, want * sizeof(float), m.cs);
                     }
                     strata::gpu::stream_sync(m.cs);
                     pt.fold();
@@ -2508,6 +2507,13 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         std::sort(cand.begin(), cand.end());
                         const double share = cpu_share_env() >= 0.0 ? cpu_share_env() : cpu_arm ? m.cpu_share_now : 0.0;
                         const size_t take = std::min(cand.size(), (size_t) std::llround(share * (double) n_stream));
+                        // the MoE input for the CPU's experts, only when it takes some (a layer whose experts all have
+                        // more rows than the CPU takes, MAXT, copied the whole input for nothing: 323 MB at 32K tokens)
+                        if (take > 0 && (!strata::gpu::copy_async(m.cpu_x, m.mixed, (size_t) T * N * sizeof(float), m.cs) ||
+                                         !strata::gpu::stream_sync(m.cs))) {
+                            err = std::string("prefill: the CPU share's input: ") + strata::gpu::last_error();
+                            return false;
+                        }
                         // an expert without a blob stays on the GPU
                         for (size_t i = 0; i < cand.size() && n_cpu < (int64_t) take; ++i) {
                             const int32_t e = cand[i].second;
