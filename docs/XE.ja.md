@@ -32,6 +32,34 @@ Qwen3.8 の prompt は、xmx_gemm が動く GPU では FP16 の経路のまま�
 `STRATA_NO_XMX=1` は XMX を使わない経路を選ばせます。
 CPU 内蔵のグラフィックス（開発機では UHD 770）は、確認用の 2 つ目の実機として使います。
 
+## Strata 0.2.2 の取り込み
+
+upstream の Strata 0.2.1.1 から 0.2.2（`011c9e60`）までの変更を Xe に移しています。
+この間の upstream の変更の多くは、アプリ・ターミナル・Mac・upstream の `sycl/` のもので、移していません（0.2.0-beta と同じ理由）。
+
+移したものは次のとおりです。
+
+- CPU のプール: ワーカーの置き場所を起動時に言い、`--pool-cores`（実験的）で置き場所を指定できる。エンジンのスレッドに名前を付ける。serve は設定の `pool_cores` をエンジンに渡す。
+- 推測デコード: 開始の規則を `spec_loop_runs` にまとめ、`STRATA_SPEC_WATCH` で止まりを見張る。
+- serve: prefill の短い残りの窓で logits が非有限になったら、次の要求は prompt 全体をまとめて読む。エンジンを起動できないときは、接続を切らずに理由つきの 503 を返す。`"api_key": "none"` と `--no-api-key` でキーなしを選べる。
+- serve: Anthropic の usage で、次の要求のために残したトークンを `cache_creation_input_tokens` として返す。llama.cpp の `thinking_budget_tokens` も思考の上限として読む。1 トークンずれた囲みのツールの呼び出しを読み、宣言していないツールの呼び出しは文として返す。done の行の速さはエンジンの decode の時間から取る。
+- setup: SHA-256 が合わないダウンロードは消さずに違う部分だけ取り直し、大きなファイルの確かめにも進み具合を出す。`--gguf-dir` の利用者のファイルは消さない。空き容量は入り切らないときだけ止める。ごみ箱の中のフォルダーを前のインストールとして覚えない。
+- iq_pack: experts.bin の書き込みが途中で止まったら、書き終えた層を残して次の層から続ける。
+
+この取り込みの間に XeStrata の側で直したもの:
+
+- intel/llvm v7.2.0 での後退: XMX の積と grouped の積の `joint_matrix_prefetch` を外す（IGC 2.28 が v7.2.0 の先読みを扱えず、B70 の 1K の prefill が 468 → 751 tok/s）。AMD 向けの libspirv に GroupNonUniform の shuffle を足す（パッチ `hip-group-shuffle`）。iq_mmq の作業グループの大きさを属性で宣言し、AMD でのレジスターの退避をなくす（RX 9060 XT の 32K の prefill が 1,113 → 1,250 tok/s）。
+- 推測デコード: 窓のグラフを作った回の時間を窓の選び方の測りに入れない。測っていない大きさの窓の時間は、いちばん近い測った小さい大きさから見積もる。Gyro の trellis の層では、VRAM の入れ替えの位置で窓を切らない（Gyro-M の decode が B70 の 1K で 48.0 → 54.2 tok/s）。グラフのない大きさの窓は、VRAM が足りなければ収まる大きさに縮める（B70 の 262K で落ちなくなった）。
+
+upstream v0.2.2 と 3 社の GPU で比べました（generate は IQ3_XXS と Gyro-M を 3 枚、Q2_0・IQ2_XS・IQ3_S・UD-Q4_K_XL を B70 と RTX 4070、IQ3_XXS の serve と通常使用）。
+IQ3_XXS の generate では、B70 は upstream の `sycl/` 版より prefill が 1.8〜3.0 倍、decode が 12〜61% 速いです。
+RTX 4070 は prefill が 1.02〜1.16 倍、decode が 25〜37% 速いです。RX 9060 XT は prefill が 2.1〜2.7 倍、decode が 2〜7% 速いです。
+Gyro-M の generate では、B70 は prefill が 1.3〜2.0 倍、decode が 8〜11% 速いです。RX 9060 XT は prefill が 1.3〜2.3 倍、decode が 1〜2% 速いです。
+RTX 4070 は prefill が 1.08〜1.12 倍で、decode は 32K で同等、1K で upstream の文をなぞらせると 3% 遅く、XeStrata 自身の文では 17% 速いです。
+
+移していないのは、CPU のプールを NUMA のノードごとに分ける形（XeStrata のプールにはノードの土台がありません）、アプリとターミナル、Mac、upstream の `sycl/`、
+CUDA の Gyro の decode で trellis のコードブックを共有メモリに置く形と、その Pascal 向けのカーネル（XeStrata の SYCL のカーネルで試し、RX 9060 XT で 17〜19% 遅く、B70 と RTX 4070 でも速くなりませんでした）、HIP の gfx11 と gfx1151 だけの直しです。
+
 ## Strata 0.2.1.1 の取り込み
 
 upstream の Strata 0.2.0-beta から 0.2.1.1（`9ae93f7b`）までの変更を Xe に移しています。

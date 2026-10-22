@@ -30,6 +30,34 @@ A smaller card is checked by making the B70 look like one.
 `STRATA_NO_XMX=1` takes the paths without the matrix engines.
 The processor's own graphics (a UHD 770 on the development machine) is a second, real configuration for checks.
 
+## Integration through Strata 0.2.2
+
+The changes of upstream Strata 0.2.1.1 to 0.2.2 (`011c9e60`) are carried into Xe.
+Most of upstream's changes in this range are for the app, the terminal, the Mac and upstream's `sycl/`, and are not carried in (for the same reasons as 0.2.0-beta).
+
+Carried in:
+
+- The CPU pool: the start-up says where its workers sit, `--pool-cores` (experimental) places them, and the engine's threads carry names; serve passes the setting `pool_cores` to the engine.
+- Speculative decoding: the rule for when it starts is gathered in `spec_loop_runs`, and `STRATA_SPEC_WATCH` watches for stalls.
+- serve: when a short remaining prefill window gives non-finite logits, the next request reads the whole prompt at once; an engine that cannot start gets a 503 with its reason instead of a dropped connection; `"api_key": "none"` and `--no-api-key` choose no key.
+- serve: Anthropic's usage reports the tokens kept for the next request as `cache_creation_input_tokens`; llama.cpp's `thinking_budget_tokens` is read as the thinking limit too; a tool call whose fence is one token off is read as a call, and a call of an undeclared tool comes back as text; the done line's speed comes from the engine's decode time.
+- setup: a download whose SHA-256 does not match is not deleted, only the differing pieces are fetched again, and the check of a large file shows its progress; the user's files under `--gguf-dir` are never deleted; free space stops the install only when it cannot fit; folders in the trash are not remembered as an earlier install.
+- iq_pack: an experts.bin write that stopped halfway keeps the finished layers and goes on from the next.
+
+Fixed on XeStrata's side during this integration:
+
+- Regressions with intel/llvm v7.2.0: the XMX product and the grouped product lose `joint_matrix_prefetch` (IGC 2.28 cannot handle v7.2.0's prefetch; the B70's 1K prefill goes from 468 to 751 tok/s); AMD's libspirv gains GroupNonUniform's shuffles (the patch `hip-group-shuffle`); iq_mmq declares its work-group size by attribute, which ends the register spills on AMD (the RX 9060 XT's 32K prefill goes from 1,113 to 1,250 tok/s).
+- Speculative decoding: the round that builds a window's graph is left out of the measure the window sizes are chosen by; the time of a size not yet measured is estimated from the nearest smaller measured size; Gyro's trellis layers do not cut a window where the VRAM swaps experts (Gyro-M's decode on the B70 at 1K goes from 48.0 to 54.2 tok/s); a window size without a graph shrinks to one that fits when the VRAM is short (the B70 at 262K no longer fails).
+
+Compared with upstream v0.2.2 on the three makers' GPUs (generate with IQ3_XXS and Gyro-M on all three, Q2_0, IQ2_XS, IQ3_S and UD-Q4_K_XL on the B70 and the RTX 4070; IQ3_XXS's serve and everyday use).
+In IQ3_XXS's generate, the B70 is 1.8 to 3.0 times as fast as upstream's `sycl/` build in prefill and 12 to 61% faster in decode.
+The RTX 4070 is 1.02 to 1.16 times as fast in prefill and 25 to 37% faster in decode; the RX 9060 XT is 2.1 to 2.7 times as fast in prefill and 2 to 7% faster in decode.
+In Gyro-M's generate, the B70 is 1.3 to 2.0 times as fast in prefill and 8 to 11% faster in decode; the RX 9060 XT is 1.3 to 2.3 times as fast in prefill and 1 to 2% faster in decode.
+The RTX 4070 is 1.08 to 1.12 times as fast in prefill; its decode is even at 32K, and at 1K 3% slower when it follows upstream's text, 17% faster on XeStrata's own text.
+
+Not carried in: the CPU pool split by NUMA node (XeStrata's pool has no groundwork for nodes), the app and the terminal, the Mac, upstream's `sycl/`,
+CUDA's Gyro decode with the trellis codebook in shared memory and its Pascal kernels (tried in XeStrata's SYCL kernels: 17 to 19% slower on the RX 9060 XT, and no faster on the B70 or the RTX 4070), and HIP's fixes for gfx11 and gfx1151 alone.
+
 ## Integration through Strata 0.2.1.1
 
 The changes of upstream Strata 0.2.0-beta to 0.2.1.1 (`9ae93f7b`) are carried into Xe.
