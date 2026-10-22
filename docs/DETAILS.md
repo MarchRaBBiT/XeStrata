@@ -575,6 +575,18 @@ compare against `0` with the same worker count and workload.
 It changes neither the kernels, the phase barriers nor the PCIe placement; `--calibrate` does not tune it yet.
 For the server, add `"--pool-tasks", "192"` (for example) to the `args` of its configuration and restart it.
 
+The CPU pool puts one worker on each physical core (never on an SMT sibling) and keeps the first core for the host (the thread that waits for the GPU).
+The start-up log says where they sit in one line (`CPU workers on logical processors 2,4,...,30 (15 workers, one per physical core; host on 0)`).
+Where the OS does not say which logical processors share a core (some containers), the line says so.
+The workers are named `strata-pool-N` and the host `strata-host` (the other helper threads too, `strata-adapt` and so on), so Linux's `ps -L -o tid,psr,comm` and the Windows tools that read thread names tell them apart.
+`--pool-cores LIST` (experimental, off by default, upstream 7a5599581) pins the workers to exactly these logical processors, in this order.
+`STRATA_POOL_CORES=LIST` or `"pool_cores": "2,4,6,8"` in the configuration sets it too.
+The list is numbers, ranges and `first-last:step` (`0,2,4,6`, `2-14:2`), numbered as Task Manager and `lscpu` show them.
+The worker count is the list's length; `--pool-workers N` takes its first N entries.
+Nothing is refused; the engine warns when two entries are the two threads of one core, when an entry is the host's logical processor, and when one is a processor this process may not use (left out). With nothing usable left the pool keeps its default placement, and a list that cannot be read is said and ignored.
+The host keeps the first core, so leave it out of the list. It moves threads only and does not change the answers.
+It applies to the Qwen3.8-Flash-Next engines; the other MoE models (Ornith, llm-jp, Qwen3.6, GLM-5.3-Flash) keep the default placement.
+
 `--aux-cpus` decides which CPUs run the threads that are neither CPU pool workers nor the host thread (Linux, `off` by
 default, upstream 91f1e85d): the expert cache's refills, the prefill copies, the file reads, the GPU runtime's threads
 and the like.

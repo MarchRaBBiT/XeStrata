@@ -37,6 +37,7 @@
 #include "strata/kernels/cpu/expert.hpp"
 #include "strata/kernels/cpu/pool.hpp"
 #include "strata/platform/aux_cpus.hpp"
+#include "strata/platform/thread_name.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
 #include "strata/kernels/cpu/canon_expert.hpp"
 #include "strata/kernels/ngram.hpp"
@@ -337,6 +338,7 @@ struct Options {
     bool graph_only = false;
     bool gpu_only_full = false;   ///< R0.3: pre + post + head, the true per-token GPU floor
     int pool_workers = 0;         ///< R2.2: 0 = "all physical cores minus the host's"; >0 overrides
+    std::string pool_cores;       ///< --pool-cores / STRATA_POOL_CORES (experimental): the workers' logical processors
     /// --aux-cpus off|auto|LIST (STRATA_AUX_CPUS): where the non-pool, non-host threads run (strata/platform/aux_cpus.hpp)
     std::string aux_cpus;
     int pool_tasks = 0;           ///< Batched CPU expert tasks per phase; 0 keeps the existing policy
@@ -801,6 +803,10 @@ void usage() {
                  "  --pool-workers N     R2.2: CPU expert pool worker count.  Default 0 = every physical core\n"
                  "                       except the one the host loop spins on.  A sweep is how the pool's\n"
                  "                       deviation from `cpu_s2` is attributed.\n"
+                 "  --pool-cores LIST    (experimental) Pin the CPU expert workers to exactly these logical processors,\n"
+                 "                       in this order (0,2,4,6 or 2-14:2; also STRATA_POOL_CORES).  The worker count is\n"
+                 "                       the list's length unless --pool-workers says otherwise.  Default: one worker\n"
+                 "                       per physical core.\n"
                  "  --aux-cpus SET       Where the threads that are neither pool workers nor the host thread run (the\n"
                  "                       adaptive tier's job thread, the prefill helpers, the GPU runtime's threads, ...):\n"
                  "                       off (the default: wherever they were created), auto (the SMT siblings of the host's\n"
@@ -2424,6 +2430,7 @@ int main(int argc, char** argv) {
         else if (a == "--graph-only") o.graph_only = true;
         else if (a == "--gpu-only-full") o.gpu_only_full = true;
         else if (a == "--pool-workers") o.pool_workers = (int) std::strtol(next("--pool-workers"), nullptr, 10);
+        else if (a == "--pool-cores") o.pool_cores = next("--pool-cores");
         else if (a == "--aux-cpus") {
             o.aux_cpus = next("--aux-cpus");
             std::string aerr;
@@ -3019,6 +3026,18 @@ int main(int argc, char** argv) {
         (o.expert_cache_remote[2] > 0 && o.expert_cache_remote[1] == 0)) {
         std::fprintf(stderr, "strata generate: invalid sampling or resource parameter\n");
         return 2;
+    }
+    {   // --pool-cores / STRATA_POOL_CORES (experimental): before any expert pool is built.  A list that cannot be read
+        // is said and ignored (the default placement), never a reason to stop.
+        std::string text = o.pool_cores;
+        if (text.empty())
+            if (const char* e = std::getenv("STRATA_POOL_CORES")) text = e;
+        if (!text.empty()) {
+            std::vector<int> cpus;
+            std::string why;
+            if (strata::kernels::cpu::parse_pool_cores(text, cpus, why)) strata::kernels::cpu::set_pool_cores(cpus);
+            else std::fprintf(stderr, "strata generate: --pool-cores: %s; the pool uses its default placement\n", why.c_str());
+        }
     }
     if (o.expert_cache_remote_placement != "stripe" && o.expert_cache_remote_placement != "layer") {
         std::fprintf(stderr, "strata generate: --expert-cache-remote-placement must be stripe or layer\n");
@@ -5704,6 +5723,8 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "strata generate: %d expert-pool workers%s%s\n", pool.workers(),
                  pool.host_works() ? " + the host thread" : "",
                  o.no_pool ? " (UNUSED: --no-pool)" : "");
+    if (const std::string where = pool.placement_line(); !where.empty())
+        std::fprintf(stderr, "strata generate: %s\n", where.c_str());
     {   // --aux-cpus: the plan, now the workers' CPUs are known (the host takes the first physical core, as
         // SessionLoopScratch pins it); the threads that exist already (the GPU runtime's) move now when it is on, the
         // ones created later pin themselves (strata/platform/aux_cpus.hpp)
@@ -8419,6 +8440,7 @@ int main(int argc, char** argv) {
         std::deque<std::string>& in_lines = in_shared->lines;
         bool& in_eof = in_shared->eof;
         std::thread([st = in_shared] {
+            strata::platform::name_this_thread("strata-stdin");
             strata::aux_cpus::pin_current_thread();
             // read(2) on the descriptor, not std::cin: glibc's exit() flushes every stdio stream and waits for
             // stdin's lock, which getline holds while it waits for input - an engine ending on an error (every
@@ -8567,6 +8589,7 @@ int main(int argc, char** argv) {
             const int io_limit = wio ? (int) std::strtol(wio, nullptr, 10) : limit * 10;
             if (limit > 0)
                 std::thread([limit, io_limit] {
+                    strata::platform::name_this_thread("strata-watchdog");
                     strata::aux_cpus::pin_current_thread();
                     strata::core::Progress& p = strata::core::progress();
                     uint64_t last = p.beats.load(), ticks_at = p.ticks.load();
@@ -8931,7 +8954,10 @@ int main(int argc, char** argv) {
             } adapt_run;
             if (!drive.d.usage.empty() && !ajob && !in_prompt_read && (++ba_window % o.adapt_every) == 0 &&
                 pending.empty())
-                adapt_run.th = std::thread([&] { adapt_run.ok = adapt(); });
+                adapt_run.th = std::thread([&] {
+                    strata::platform::name_this_thread("strata-adapt");
+                    adapt_run.ok = adapt();
+                });
             // --batch-mtp: a proposal is kept when the target picked it and there is room to emit both tokens
             std::vector<int> keep(bs.size(), 0);
             for (int a = 0; a < A; ++a) {
@@ -11623,6 +11649,7 @@ int main(int argc, char** argv) {
                 if (!drive.d.usage.empty() && !ajob &&
                     (adapt_period > 0 ? (p + a + 1) / adapt_period > p / adapt_period : ((rounds + 1) % o.adapt_every) == 0))
                     adapt_thr = std::thread([&] {
+                        strata::platform::name_this_thread("strata-adapt");
                         strata::aux_cpus::pin_current_thread();
                         const Clock::time_point ta = Clock::now();
                         adapt_ok = adapt();
@@ -12777,7 +12804,11 @@ int main(int argc, char** argv) {
             bool adapt_ok = true;
             if (adapt_period > 0) ver.add_routing(drive.d.usage.data(), g.n_expert, a + 1);
             if (adapt_period > 0 && (p + a + 1) / adapt_period > p / adapt_period)
-                adapt_thr = std::thread([&] { strata::aux_cpus::pin_current_thread(); adapt_ok = adapt(); });
+                adapt_thr = std::thread([&] {
+                    strata::platform::name_this_thread("strata-adapt");
+                    strata::aux_cpus::pin_current_thread();
+                    adapt_ok = adapt();
+                });
             strata::core::progress_at("spec loop: commit", (int64_t) T);
             if (!ver.commit(a + 1, err)) {
                 if (adapt_thr.joinable()) adapt_thr.join();
