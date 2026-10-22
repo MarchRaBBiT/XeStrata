@@ -458,7 +458,7 @@ bool host_register_on(int device, void* p, size_t bytes) {
 bool peer_access(int a, int b) {
 #if defined(SYCL_EXT_ONEAPI_PEER_ACCESS)
     try {
-        const sycl::device& da = core::Runtime::at(a).device();
+        sycl::device da = core::Runtime::at(a).device();   // a copy: ext_oneapi_can_access_peer is not const
         const sycl::device& db = core::Runtime::at(b).device();
         if (da.get_backend() != db.get_backend()) return false;
         return da.ext_oneapi_can_access_peer(db, sycl::ext::oneapi::peer_access::access_supported);

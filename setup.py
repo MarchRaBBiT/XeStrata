@@ -33,8 +33,10 @@ answers, no questions), --setup (install another model / change settings instead
 --models-dir DIR, --gguf-dir DIR (use GGUF files you already have), --check (only check this PC), --check-update
 (whether a newer XeStrata release is out), --images qwen-image-turbo|qwen-image-base|...-uncensored|no (image
 generation on XeStrata's image engine, POST /v1/images/generations: Qwen-Image-2.1-Turbo in 8 steps, or its base
-model Qwen-Image-2.1 in 40; -uncensored: the text encoder with the refusal direction removed; --image-quant
-Q4_K_M|Q6_K|Q8_0, --image-ssd-offload on|off, --image-gpu-policy auto|keep|shrink|unload).
+model Qwen-Image-2.1 in 40; mage-flow-turbo|mage-flow|mage-flow-base[-uncensored]: Mage-Flow in 4, 20 or 30;
+-uncensored: the text encoder with the refusal direction removed; --image-quant Q4_K_M|Q6_K|Q8_0 (Qwen-Image),
+--image-dit-q8 auto|on|off and --image-dit-keep on|off (Mage-Flow), --image-ssd-offload on|off, --image-gpu-policy
+auto|keep|shrink|unload).
 
 Setup recommends, it never forces: the recommended answers are the defaults (--yes, or Enter), and a bigger choice
 than it recommends - a longer context, a size it thinks will not fit - is kept, with what it risks.  With --yes, an
@@ -1238,12 +1240,18 @@ def amd_elsewhere() -> str:
 # optional conversation compression's), and each GPU maker's (Intel's oneMKL in the contrib mode only, NVIDIA's in the
 # contrib mode only).  On Arch the
 # Vulkan ICD is the GPU maker's own package, not one mesa-vulkan-drivers carries for both.
+# oneMKL's series the contrib mode takes, and only it (Intel's repositories carry several side by side): one whose SYCL
+# library runs on the SYCL runtime XeStrata builds with, which tools/intel_llvm_build.py's TAG fixes (2026.2's needs
+# functions intel/llvm v7.1.1's libsycl.so.9 lacked, sycl::detail::defaultAsyncHandler among them: v7.2.0).  Raised
+# with TAG.  The packages take it too (tools/package/container.sh, windows.sh), and setup takes a oneMKL of it only
+# (mkl_root, windows_intel_libs; on Windows the engine, which reads its series from the oneMKL it was built with).
+ONEMKL_SERIES = "2026.2"
 PACKAGES = {
     "ubuntu": {
         "base": "python3-venv git cmake ninja-build build-essential lld libhwloc-dev libzstd-dev libvulkan-dev glslc "
                 "spirv-headers mesa-vulkan-drivers libblosc2-dev",
         "intel": "libze1 libze-intel-gpu1 libigc2 libigdfcl2",
-        "intel-contrib": "intel-oneapi-mkl-sycl-devel",
+        "intel-contrib": f"intel-oneapi-mkl-sycl-devel-{ONEMKL_SERIES}",
         "amd": "libamdhip64-dev rocm-device-libs-21 clang-21 libclang-rt-21-dev librocblas-dev libhipblaslt-dev "
                "libhipblas-common-dev",
         "nvidia": "nvidia-cuda-toolkit",
@@ -1252,7 +1260,7 @@ PACKAGES = {
         "base": "python3 git cmake ninja-build gcc-c++ lld hwloc-devel libzstd-devel libzstd-static "
                 "vulkan-loader-devel glslc spirv-headers-devel mesa-vulkan-drivers blosc2-devel",
         "intel": "oneapi-level-zero oneapi-level-zero-devel intel-level-zero",
-        "intel-contrib": "intel-oneapi-mkl-sycl-devel",
+        "intel-contrib": f"intel-oneapi-mkl-sycl-devel-{ONEMKL_SERIES}",
         "amd": "rocm-hip-devel rocm-device-libs rocm-clang rocm-clang-runtime-devel rocblas-devel hipblaslt-devel "
                "hipblas-common-devel",
         "nvidia": "cuda-toolkit-13-4",
@@ -1366,9 +1374,6 @@ INTEL_REPO = {
                "    'gpgkey=https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB' \\\n"
                "    | sudo tee /etc/yum.repos.d/oneAPI.repo > /dev/null"),
 }
-NVIDIA_REPO_FEDORA = ("sudo dnf config-manager addrepo "
-                      "--from-repofile=https://developer.download.nvidia.com/compute/cuda/repos/fedora44/x86_64/"
-                      "cuda-fedora44.repo")
 
 
 def pkg_installed(name: str) -> bool:
@@ -1399,20 +1404,18 @@ def repo_added(url: str) -> bool:
 
 def runtime_missing(makers: set) -> tuple:
     """For the package's engine: the GPU makers' packages (BUILD.json's runtime) that the GPUs of `makers` need and
-    are not installed, those that would make them faster (oneMKL, cuBLAS: contrib), and the commands that add the
-    repositories those come from.  Empty for an engine without the record."""
+    are not installed, those that would make them faster (OpenCL, which oneDNN's attention runs on; oneMKL, cuBLAS:
+    contrib; pip's are linux_nvidia_libs'), and the commands that add the repositories those come from.  Empty for an
+    engine without the record."""
     rt = packaged_engine().get("runtime") or {}
     need = [n for m in ("intel", "amd") if m in makers for n in rt.get(m, []) if not pkg_installed(n)]
-    fast = [n for m, k in (("intel", "onemkl"), ("nvidia", "cublas")) if m in makers for n in rt.get(k, [])
-            if not pkg_installed(n)]
+    fast = [n for m, k in (("intel", "onednn"), ("intel", "onemkl"), ("nvidia", "cublas")) if m in makers
+            for n in rt.get(k, []) if not pkg_installed(n)]
     d = distro_family()
     repos = []
     if any(n in rt.get("onemkl", []) for n in fast) and d in INTEL_REPO and \
             not repo_added("repos.intel.com/oneapi"):
         repos.append(INTEL_REPO[d])
-    if d == "fedora" and any(n in rt.get("cublas", []) for n in fast) and \
-            not repo_added("developer.download.nvidia.com/compute/cuda"):
-        repos.append(NVIDIA_REPO_FEDORA)
     return need, fast, repos
 
 
@@ -1468,14 +1471,173 @@ def check_igc(makers: set) -> None:
          "with Podman (Fedora 44 inside: README, Install).")
 
 
-def check_runtime(makers: set) -> None:
+def windows_nvidia_libs() -> list:
+    """The NVIDIA libraries the engine would not find on Windows, where it looks (add_library_dirs in
+    src/prefill/gemm.cpp, open_cudnn in src/image/qi_sdpa.cpp): the PATH, the CUDA toolkit's (CUDA_PATH), NVIDIA's
+    cuDNN installer's folders, the Python beside the engine (pip's nvidia-*-cu12).  Their pip packages' names."""
+    path = [Path(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+    if os.environ.get("CUDA_PATH"):
+        path.append(Path(os.environ["CUDA_PATH"]) / "bin")
+    pip = Path(sys.executable).parent / "Lib" / "site-packages" / "nvidia"
+    missing = []
+    for pkg, sub, dll in (("nvidia-cublas-cu12", "cublas", "cublas64_12.dll"),
+                          ("nvidia-cuda-runtime-cu12", "cuda_runtime", "cudart64_12.dll"),
+                          ("nvidia-cudnn-cu12", "cudnn", "cudnn64_9.dll")):
+        dirs = path + [pip / sub / "bin"]
+        if sub == "cudnn":
+            root = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "NVIDIA" / "CUDNN"
+            dirs += [p.parent for p in root.glob("*/bin/**/cudnn64_9.dll")] if root.is_dir() else []
+        if not any((d / dll).is_file() for d in dirs):
+            missing.append(pkg)
+    return missing
+
+
+def windows_intel_libs() -> list:
+    """pip's packages of oneMKL (BUILD.json's runtime "onemkl_pip": the version the 7z was built with, without the
+    SYCL runtime they depend on, which the 7z carries) when the engine would not find oneMKL of that series on Windows
+    where it looks first (add_library_dirs in src/prefill/gemm.cpp): pip's in the Python beside the engine (its
+    dist-info's version), oneAPI's installer's folder of the series (ONEAPI_ROOT, its default); empty when it would.
+    Another series (the PATH's, MKLROOT's, oneAPI's latest) is not counted: its SYCL library may not load."""
+    names = (packaged_engine().get("runtime") or {}).get("onemkl_pip") or []
+    version = next((n.split("==", 1)[1] for n in names if n.startswith("onemkl-sycl-blas==")), "")
+    series = ".".join(version.split(".")[:2])
+    site = Path(sys.executable).parent / "Lib" / "site-packages"
+    if version and any(site.glob(f"onemkl_sycl_blas-{version}.dist-info")):
+        return []
+    for root in (os.environ.get("ONEAPI_ROOT"), r"C:\Program Files (x86)\Intel\oneAPI"):
+        d = Path(root) / "mkl" / series / "bin" if root and series else None
+        if d and d.is_dir() and next(d.glob("mkl_sycl_blas*.dll"), None):
+            return []
+    return names
+
+
+# AMD's Python packages for Windows with rocBLAS and hipBLASLt (rocm-sdk-libraries-<family>, free software), one per
+# GPU family: the release whose DLLs export what the engine's rocBLAS backend imports (tools/package/win_rocm.sh)
+ROCM_WIN_INDEX = "https://repo.amd.com/rocm/whl/"
+ROCM_WIN_VERSION = "7.13.0"
+
+
+def rocm_win_family(gfx: str):
+    """The family of AMD's Windows packages (their index's folder) that has rocBLAS's and hipBLASLt's code for `gfx`,
+    or None."""
+    if gfx in ("gfx1150", "gfx1151", "gfx1152"):
+        return gfx
+    for prefix, family in (("gfx103", "gfx103X-all"), ("gfx110", "gfx110X-all"), ("gfx120", "gfx120X-all")):
+        if gfx.startswith(prefix):
+            return family
+    return None
+
+
+def windows_amd_libs(gfx: set) -> list:
+    """pip's commands for AMD's rocBLAS and hipBLASLt the engine would not find on Windows for the AMD GPUs of `gfx`,
+    where it looks (add_library_dirs in src/prefill/gemm.cpp): the PATH, the Python beside the engine."""
+    path = [Path(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+    site = Path(sys.executable).parent / "Lib" / "site-packages"
+    commands = []
+    for family in sorted({f for g in gfx if g and (f := rocm_win_family(g))}):
+        dirs = path + [site / f"_rocm_sdk_libraries_{family.replace('-', '_')}" / "bin"]
+        if not any((d / "rocblas.dll").is_file() and (d / "libhipblaslt.dll").is_file() for d in dirs):
+            # --no-deps: the HIP runtime is the AMD driver's (amdhip64_7.dll), not the SDK's core package
+            commands.append(f'"{sys.executable}" -m pip install --no-deps --index-url {ROCM_WIN_INDEX}{family}/ '
+                            f"rocm-sdk-libraries-{family.lower()}=={ROCM_WIN_VERSION}")
+    return commands
+
+
+def nvidia_libs_dir(data: Path) -> Path:
+    """Linux: where NVIDIA's libraries go that neither Ubuntu's nor Fedora's own repositories have (NVIDIA's
+    repositories are not used): cuDNN and the CUDA runtime cudnn-frontend opens, and Fedora's cuBLAS, from pip, in the
+    data folder's nvidia-libs/, beside the models (a container mounts it at the same path)."""
+    return Path(data) / "nvidia-libs"
+
+
+def nvidia_lib_dirs(data: Path) -> list:
+    """The folders of nvidia_libs_dir's libraries for the engine's library path (a folder that is not there is skipped
+    where the server starts the engine, so what is installed later is taken from the next start): cuDNN's, and CUDA
+    13's (nvidia-cuda-runtime, nvidia-cublas) and 12's CUDA runtime (nvidia-cuda-runtime-cu12)."""
+    nv = nvidia_libs_dir(data) / "nvidia"
+    return [str(nv / "cudnn" / "lib"), str(nv / "cu13" / "lib"), str(nv / "cuda_runtime" / "lib")]
+
+
+def cuda_major(root: str) -> int | None:
+    """The major version of the CUDA toolkit in `root`: its version.json, else its nvcc's (Debian's has no file)."""
+    try:
+        return int(json.loads((Path(root) / "version.json").read_text())["cuda"]["version"].split(".")[0])
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    nvcc = Path(root) / "bin" / "nvcc"
+    try:
+        out = subprocess.run([str(nvcc) if nvcc.exists() else "nvcc", "--version"], capture_output=True, text=True,
+                             timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"release (\d+)\.", out)
+    return int(m.group(1)) if m else None
+
+
+def nvidia_pip_names(major: int) -> list:
+    """pip's packages of cuDNN and the CUDA runtime for a CUDA major version, for an engine compiled here (whose cuBLAS
+    is the CUDA toolkit's); tools/package/container.sh names the packages' (BUILD.json's runtime "nvidia_pip")."""
+    if major == 12:
+        return ["nvidia-cudnn-cu12", "nvidia-cuda-runtime-cu12"]
+    return [f"nvidia-cudnn-cu{major}", f"nvidia-cuda-runtime=={major}.*"]
+
+
+def linux_nvidia_libs(makers: set, data: Path, names: list) -> None:
+    """Names pip's command for NVIDIA's libraries (`names`) when one of them is neither on the system nor in
+    nvidia_libs_dir: into nvidia_libs_dir, which the engine's library path holds (nvidia_lib_dirs), with --target
+    (Ubuntu's Python refuses --user, PEP 668), --upgrade (a target folder's packages are otherwise kept as they are)
+    and --no-deps (what the distribution has, it gives)."""
+    import ctypes.util
+    import importlib.util
+    import shlex
+    if WIN or "nvidia" not in makers or not names:
+        return
+    dirs = [Path(d) for d in nvidia_lib_dirs(data)]
+
+    def found(lib: str) -> bool:
+        return bool(ctypes.util.find_library(lib)) or any(next(d.glob(f"lib{lib}.so.*"), None) for d in dirs
+                                                          if d.is_dir())
+    missing = [what for what, lib, want in (("cuBLAS for the matrix products", "cublas",
+                                             any(n.startswith("nvidia-cublas") for n in names)),
+                                            ("cuDNN for the image engine's attention", "cudnn", True))
+               if want and not found(lib)]
+    if not missing:
+        return
+    warn(f"faster with NVIDIA's {' and '.join(missing)} (not free software; without them XeStrata's own kernels do "
+         "the work), into the data folder:")
+    if importlib.util.find_spec("pip") is None:
+        say(f"  {install_cmd(['python3-pip'])}")
+    say(f"  python3 -m pip install --target {shlex.quote(str(nvidia_libs_dir(data)))} --upgrade --no-deps "
+        + " ".join(shlex.quote(n) for n in names))
+
+
+def check_runtime(makers: set, gfx: set, data: Path) -> None:
     """Stops when the GPUs of `makers` lack their makers' packages, and says how to install them; names oneMKL and
     cuBLAS too when they are missing, without stopping (XeStrata's own kernels do their work).  Windows: the GPU
     makers' drivers bring what the engine runs on (Level Zero, the CUDA driver), the 7z the rest, and the launcher
-    checks the Visual C++ runtime; the engine there has no oneMath yet, so oneMKL and cuBLAS have no use."""
+    checks the Visual C++ runtime.  Intel's oneMKL, NVIDIA's cuBLAS, CUDA runtime and cuDNN, and AMD's rocBLAS and
+    hipBLASLt for the AMD GPUs' families (`gfx`, their gfx names), are named when the engine would not find them, with
+    pip's command for the Python the 7z carries."""
     if WIN:
+        mkl = windows_intel_libs() if "intel" in makers and packaged_engine().get("license") == "contrib" else []
+        if mkl:
+            warn("faster with Intel's oneMKL for the matrix products (not free software; without it XeStrata's own "
+                 "kernels do the work):")
+            say(f'  "{sys.executable}" -m pip install --no-deps ' + " ".join(f'"{n}"' for n in mkl))
+        missing = windows_nvidia_libs() if "nvidia" in makers and packaged_engine().get("license") == "contrib" else []
+        if missing:
+            warn("faster with NVIDIA's " + ", ".join(missing) + " (not free software: cuBLAS for the matrix products, "
+                 "cuDNN for the image engine's attention; without them XeStrata's own kernels do the work):")
+            say(f'  "{sys.executable}" -m pip install ' + " ".join(missing))
+        amd = windows_amd_libs(gfx) if "amd" in makers else []
+        if amd:
+            warn("faster with AMD's rocBLAS and hipBLASLt for the matrix products (without them XeStrata's own kernels "
+                 "do the work):")
+            for c in amd:
+                say("  " + c)
         return
     check_igc(makers)
+    linux_nvidia_libs(makers, data, (packaged_engine().get("runtime") or {}).get("nvidia_pip") or [])
     need, fast, repos = runtime_missing(makers)
     if not need and not fast:
         return
@@ -1483,7 +1645,7 @@ def check_runtime(makers: set) -> None:
     if need:
         fail("the GPU's libraries are missing: " + ", ".join(need),
              "install them, then run it again:\n" + "\n".join(lines))
-    warn("faster with " + ", ".join(fast) + " (not free software; without them XeStrata's own kernels do the work):")
+    warn("faster with " + ", ".join(fast) + " (without them XeStrata's own kernels do the work):")
     for line in lines:
         say(line)
 
@@ -2570,7 +2732,7 @@ INTEL_LLVM_CONTRIB = ROOT / ".tools" / "intel-llvm-contrib" / "install"
 FREE_HOW = ("intel/llvm's DPC++ 7 or later (free software): build it here: ./setup.sh --intel-llvm-build (13 minutes "
             "on 28 threads, 3.5 GB), or a distribution's package of version 7 or later")
 MKL_HOW = ("oneMKL (not free software; Intel's apt repository, set up as docs/BUILD.md#packages says): "
-           "sudo apt install intel-oneapi-mkl-sycl-devel")
+           f"sudo apt install intel-oneapi-mkl-sycl-devel-{ONEMKL_SERIES}")
 # Intel's repositories carry apt and dnf packages, not Arch's: on Arch the oneAPI packages come from Intel's offline
 # installer, if they are wanted at all (the free and contrib modes build intel/llvm from the source)
 ONEAPI_ARCH = ("Intel oneAPI is not in Arch's repositories (only apt's and dnf's): either install it with Intel's "
@@ -2659,11 +2821,29 @@ def packaged_engine() -> dict:
     return meta
 
 
+def mkl_series(root) -> str | None:
+    """The series of the oneMKL in `root` ("2026.2"): its folder's name (/opt/intel/oneapi/mkl/2026.2), else its
+    mkl_version.h's INTEL_MKL_VERSION (20260200)."""
+    name = Path(root).resolve().name
+    if re.fullmatch(r"\d{4}\.\d+", name):
+        return name
+    try:
+        text = (Path(root) / "include" / "mkl_version.h").read_text(errors="replace")
+        v = int(re.search(r"#define\s+INTEL_MKL_VERSION\s+(\d+)", text).group(1))   # type: ignore[union-attr]
+    except (OSError, AttributeError, ValueError):
+        return None
+    return f"{v // 10000}.{v // 100 % 100}"
+
+
 def mkl_root() -> str | None:
-    """Where oneMKL is (the contrib modes' dense products, the SYCL image encoder): oneAPI's MKLROOT, else oneAPI's
-    default folder."""
-    root = (oneapi_env() or {}).get("MKLROOT") or "/opt/intel/oneapi/mkl/latest"
-    return root if Path(root, "lib").is_dir() else None
+    """Where oneMKL of ONEMKL_SERIES is (the contrib modes' dense products, the SYCL image encoder): the first of
+    oneAPI's MKLROOT, oneAPI's folder of the series and its latest that is of the series, else None (another series's
+    SYCL library may not load on the engine's runtime: ONEMKL_SERIES)."""
+    for root in ((oneapi_env() or {}).get("MKLROOT"), f"/opt/intel/oneapi/mkl/{ONEMKL_SERIES}",
+                 "/opt/intel/oneapi/mkl/latest"):
+        if root and Path(root, "lib").is_dir() and mkl_series(root) == ONEMKL_SERIES:
+            return root
+    return None
 
 
 def compiler_version(cxx, env) -> str:
@@ -2994,7 +3174,7 @@ def engine_cmake_args() -> list:
     return keep
 
 
-def build_engine(visions, llama, comp: dict) -> Path:
+def build_engine(visions, llama, comp: dict, data: Path) -> Path:
     """Compile the engine with `comp` (choose_compiler) and the image encoders in `visions` ("cpu", "vulkan"); the
     results go to engine/.  A compiled engine or encoder whose source files or compiler changed since (a
     `git pull`, another intel/llvm) is compiled again.  Each encoder has its own binary, so installing one never
@@ -3010,6 +3190,11 @@ def build_engine(visions, llama, comp: dict) -> Path:
             "hip_archs": comp.get("hip_archs", [])}
     if extra := engine_cmake_args():                   # (only when given: a build without them stays as it was)
         used["cmake_args"] = extra
+    # cuDNN's headers where pip put them (nvidia_libs_dir), for the image engine's attention on NVIDIA GPUs: the
+    # engine is compiled again once they are there
+    cudnn = nvidia_libs_dir(data) / "nvidia" / "cudnn"
+    if comp["license"] == "contrib" and comp["cuda_archs"] and (cudnn / "include" / "cudnn.h").exists():
+        used["cudnn_root"] = str(cudnn)
     engine_ok = (xe and (eng / EXE).exists() and (eng / IMAGE_EXE).exists() and meta.get("src") == src
                  and meta.get("compiler") == used)
     built = dict(meta.get("vision_srcs") or {}) if xe else {}
@@ -3037,7 +3222,8 @@ def build_engine(visions, llama, comp: dict) -> Path:
                      f"-DSTRATA_ONEMKL={'ON' if comp['onemkl'] else 'OFF'}",
                      *([f"-DMKL_ROOT={mkl_root()}"] if comp["onemkl"] else []), "-DSTRATA_ENABLE_XE=ON",
                      "-DSTRATA_NATIVE_EXPERTS=ON", "-DSTRATA_BUILD_TESTS=OFF", "-DSTRATA_PORTABLE=ON",
-                     f"-DSTRATA_GGML_DIR={llama}", *(f"-D{x}" for x in used.get("cmake_args", []))], comp["env"])
+                     f"-DSTRATA_GGML_DIR={llama}", *(f"-D{x}" for x in used.get("cmake_args", [])),
+                     *([f"-DSTRATA_CUDNN_ROOT={used['cudnn_root']}"] if "cudnn_root" in used else [])], comp["env"])
         install_binary(bdir / EXE, eng / EXE)
         install_binary(bdir / IMAGE_EXE, eng / IMAGE_EXE)
     for v in missing:
@@ -3105,7 +3291,7 @@ def update_installed_engine() -> None:
         return
 
     try:
-        build_engine(visions, get_llama_cpp(), recorded_compiler(meta))
+        build_engine(visions, get_llama_cpp(), recorded_compiler(meta), data_folder_path(None, load_settings()))
     except (Exception, SystemExit) as e:
         why = "" if isinstance(e, SystemExit) else f" ({e})"
         if not engine_is_xe(meta):
@@ -3166,19 +3352,26 @@ def setup_images(a, gpu: dict, models_dir: Path, eng: Path, text_gb: float | Non
     exe = eng / IMAGE_EXE
     if not exe.exists():
         fail(f"the image engine is missing ({exe})", "run setup again to compile the engine (it builds both)")
-    asked = a.image_quant or QI.DEFAULT_QUANT
     _, dit, enc = QI.IMAGE_MODELS[a.images]
     label, steps, _ = QI.DITS[dit]
+    asked = a.image_quant or QI.DEFAULT_QUANT
+    if QI.is_mage(dit):   # Mage-Flow's DiT comes in one size (bf16: the engine's FP16 or 8 bits of it, --image-dit-q8)
+        if a.image_quant:
+            warn(f"--image-quant {a.image_quant}: {label} comes in one size, which the engine quantizes itself "
+                 "(--image-dit-q8 auto|on|off)")
+        asked = QI.dit_quants(dit)[-1]
+    dit_q8 = {"on": True, "off": False}.get(getattr(a, "image_dit_q8", None) or "auto")   # None: by the VRAM
+    dit_keep = getattr(a, "image_dit_keep", None) != "off"
     tasked = QI.DEFAULT_TEXT_QUANT
     ssd = getattr(a, "image_ssd_offload", None) == "on"
     quant, tquant = asked, tasked
     lowered = None
     if not ssd and text_gb is not None:
         left = ram_gb() - text_gb
-        quant, tquant, fits = QI.fit_ram(left, enc, asked, tasked, dit)
+        quant, tquant, fits = QI.fit_ram(left, enc, asked, tasked, dit, dit_keep)
         if (quant, tquant) != (asked, tasked):
             # kept in the config: the server says it at start and on the web page (the user's decision, 2026-10-15)
-            need = QI.ram_need_gb(asked, enc, tasked, dit)
+            need = QI.ram_need_gb(asked, enc, tasked, dit, dit_keep)
             lowered = {"from": asked, "to": quant, "text_from": tasked, "text_to": tquant,
                        "need_gb": round(need, 1), "ram_left_gb": round(max(left, 0.0), 1)}
             warn(f"image model lowered from {asked} (text encoder {tasked}) to {quant} (text encoder {tquant}): "
@@ -3186,7 +3379,8 @@ def setup_images(a, gpu: dict, models_dir: Path, eng: Path, text_gb: float | Non
                  f"leaves ~{max(left, 0):.0f} GB. --image-ssd-offload on keeps both and reads what does not fit "
                  "from the SSD (slower)")
         if not fits:
-            warn(f"even {quant} with a {tquant} text encoder (~{QI.ram_need_gb(quant, enc, tquant, dit):.0f} GB) "
+            least = QI.ram_need_gb(quant, enc, tquant, dit, dit_keep)
+            warn(f"even {quant} with a {tquant} text encoder (~{least:.0f} GB) "
                  f"does not fit the ~{max(left, 0):.0f} GB of RAM the text model leaves: images read part of the model "
                  "from the SSD (slower), and the PC may run short of RAM while one is made")
     elif ssd:
@@ -3196,7 +3390,8 @@ def setup_images(a, gpu: dict, models_dir: Path, eng: Path, text_gb: float | Non
         "POST /v1/images/generations)")
     tfile = QI.FILES[QI.text_file(enc, tquant)]
     say(f"  Text encoder: {Path(tfile[1]).name} ({tfile[0]}"
-        + (", Qwen3-VL-8B with its refusal direction removed)" if enc == "uncensored" else ")"))
+        + (f", Qwen3-VL-{'4B' if QI.is_mage(dit) else '8B'} with its refusal direction removed)"
+           if enc.endswith("uncensored") else ")"))
     say("  " + QI.license_note(dit))
     names = QI.file_names(quant, enc, tquant, dit)
     need = sum(QI.FILES[k][2] for k in names) / 1e9
@@ -3211,7 +3406,8 @@ def setup_images(a, gpu: dict, models_dir: Path, eng: Path, text_gb: float | Non
         download(QI.file_url(name, hf_endpoint()), dst, f"image model: {Path(path).name}")
         verify_sha256(dst, size, sha)
     cfg = QI.image_config(quant, exe, models_dir, model=a.images, uma=bool((gpu or {}).get("integrated")),
-                          policy=a.image_gpu_policy or "auto", ssd_offload=ssd, text_quant=tquant)
+                          policy=a.image_gpu_policy or "auto", ssd_offload=ssd, text_quant=tquant, dit_q8=dit_q8,
+                          dit_keep=dit_keep)
     if lowered:
         cfg["quant_lowered"] = lowered
     ok(f"image generation: {quant}, text encoder {tquant}, GPU policy {cfg['gpu_policy']}")
@@ -4823,15 +5019,19 @@ def prepare_engine(a, gpu: dict, vision: str) -> tuple[Path, Path, str, list]:
         lib_dirs = list(meta.get("lib_dirs", []))
         if meta.get("license") == "contrib" and (mkl := mkl_root()):
             lib_dirs.append(str(Path(mkl) / "lib"))
+        if meta.get("license") == "contrib" and not WIN:
+            lib_dirs += nvidia_lib_dirs(data_folder_path(a.data_dir, load_settings()))
         ok(f"engine: {eng / EXE} ({meta.get('package', 'package')})")
     else:
         llama = get_llama_cpp()
         ok(f"llama.cpp {LLAMA_CPP_COMMIT[:7]} (gguf-py, ggml, mtmd)")
         comp = choose_compiler(a, gpu)
         enc = "vulkan"
-        eng = build_engine({"none": [], "gpu": [enc, "cpu"], "cpu": ["cpu"]}[vision], llama, comp)
-        # the runtime of the compiler the engine was built with (none for the distribution's)
-        lib_dirs = list(dict.fromkeys(comp["lib_dirs"]))
+        data = data_folder_path(a.data_dir, load_settings())
+        eng = build_engine({"none": [], "gpu": [enc, "cpu"], "cpu": ["cpu"]}[vision], llama, comp, data)
+        # the runtime of the compiler the engine was built with (none for the distribution's), and pip's NVIDIA ones
+        nvidia_libs = nvidia_lib_dirs(data) if comp["license"] == "contrib" else []
+        lib_dirs = list(dict.fromkeys(comp["lib_dirs"] + nvidia_libs))
         ok(f"engine: {eng / EXE}")
     return llama, eng, enc, lib_dirs
 
@@ -5111,16 +5311,28 @@ def main() -> int:
                     help="the most image tokens a picture becomes (default 1024 with the encoder on the GPU, 300 on "
                          "the CPU): more reads small text and charts better, and takes longer to encode; remembered "
                          "for this model")
-    ap.add_argument("--images", metavar="qwen-image-turbo|qwen-image-base[-uncensored]|no",
+    ap.add_argument("--images", metavar="qwen-image-turbo|qwen-image-base|mage-flow-turbo|mage-flow|"
+                    "mage-flow-base[-uncensored]|no",
                     help="image generation (POST /v1/images/generations) on XeStrata's image engine: "
                          "qwen-image-turbo (Qwen-Image-2.1-Turbo, 8 steps) or qwen-image-base (its base model "
                          "Qwen-Image-2.1, 40 steps by default, about 5 times as long an image); the text encoder "
                          "Unsloth's Qwen3-VL-8B or, -uncensored, AtomicChat's with its refusal direction removed "
                          "(either Q8_0, lowered first (Q6_K, Q5_K, Q4_K) when the files would not fit the RAM the "
-                         "text model leaves); no = take it out of the config")
+                         "text model leaves); mage-flow-turbo (Mage-Flow-Turbo, 4 steps), mage-flow (20 steps, "
+                         "guidance 5) or mage-flow-base (30 steps, guidance 5), the text encoder Unsloth's "
+                         "Qwen3-VL-4B or, -uncensored, huihui-ai's abliterated one; no = take it out of the config")
     ap.add_argument("--image-quant", choices=["Q4_K_M", "Q6_K", "Q8_0"],
                     help="the image model's size (default Q8_0, lowered when its files would not fit the RAM the "
                          "text model leaves, after its text encoder; the GPU's memory does not decide it)")
+    ap.add_argument("--image-dit-q8", choices=["auto", "on", "off"],
+                    help="Mage-Flow: auto (default) keeps its image model in VRAM as 16-bit when it fits there "
+                         "with the text encoder (nearer the reference) and quantizes it to 8 bits when it does not "
+                         "(half the VRAM and the bytes streamed; int8 products where the GPU's math library has "
+                         "them, else Q8_0); on always 8 bits, off always 16-bit")
+    ap.add_argument("--image-dit-keep", choices=["on", "off"],
+                    help="Mage-Flow: on (default) keeps the image model not in use (the generation's or the edit's) in "
+                         "RAM as Q8_0, so switching is quick; off lets it go (about 4.4 GB less RAM) and reads it from "
+                         "the file again at each switch")
     ap.add_argument("--image-ssd-offload", choices=["on", "off"],
                     help="on: keep the image model's and its text encoder's sizes even when the RAM is short, and "
                          "read what does not fit from the SSD (slower); off (default): smaller sizes instead")
@@ -5458,8 +5670,12 @@ def main() -> int:
     if not WIN and gpu.get("vendor") == "amd" and not os.access("/dev/kfd", os.R_OK | os.W_OK):
         fail("no access to the GPU's compute device (/dev/kfd)",
              "add yourself to the render group (sudo usermod -aG render $USER), log out and in, and run it again")
+    makers = {x["vendor"] for x in chosen} | {gpu_info(i)["vendor"] for i in sel[1:]}
+    amd_gfx = {x.get("gfx") for x in [*chosen, *(gpu_info(i) for i in sel[1:])] if x["vendor"] == "amd"}
     if PACKAGED:                                       # the GPU makers' packages the package only suggests
-        check_runtime({x["vendor"] for x in chosen} | {gpu_info(i)["vendor"] for i in sel[1:]})
+        check_runtime(makers, amd_gfx, data)
+    elif not WIN and (majors := [v for t in cuda_toolkits() if (v := cuda_major(t))]):   # a contrib build: its CUDA
+        linux_nvidia_libs(makers, data, nvidia_pip_names(max(majors)))
     if not WIN and (gpu["render"] is None or not os.access(gpu["render"], os.R_OK | os.W_OK)):
         fail(f"no access to the GPU ({gpu['render'] or 'no render node'})",
              "NVIDIA's driver is not loaded (nvidia-smi says why)" if gpu.get("vendor") == "nvidia" else

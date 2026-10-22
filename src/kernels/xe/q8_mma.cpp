@@ -85,7 +85,7 @@ struct Kernel {
     int64_t T, K, ldy, row_bytes, tiles_m;
     sycl::local_accessor<uint8_t, 1> lm;
 
-    [[intel::max_work_group_size(1, 1, LANES)]] void operator()(sycl::nd_item<1> it) const {
+    void operator()(sycl::nd_item<1> it) const {
 #if STRATA_Q8_MMA
         const int64_t g = (int64_t) it.get_group(0);
         // M first: the work-groups that read a tile of W run side by side and find it in L2 (as mma_gemm)
@@ -194,7 +194,9 @@ struct Kernel {
         (void) it;
 #endif
     }
-    auto get(syclex::properties_tag) const { return syclex::properties{syclex::sub_group_size<32>}; }
+    auto get(syclex::properties_tag) const {
+        return syclex::properties{syclex::sub_group_size<32>, syclex::max_work_group_size<LANES>};
+    }
 };
 
 // a Q8_0 row (K / 32 blocks of an FP16 scale and 32 int8 values) as its K int8 values, then its K / 32 scales: the

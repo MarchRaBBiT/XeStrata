@@ -1,10 +1,19 @@
 // SPDX-FileCopyrightText: 2026 MistVVK and the XeStrata contributors
 // SPDX-License-Identifier: LGPL-3.0-or-later
-// src/image/strata_image.cpp - strata-image: Qwen-Image-2.1 text to image on the GPU.
+// src/image/strata_image.cpp - strata-image: Qwen-Image-2.1 or Mage-Flow text to image on the GPU.
 //
 //   strata-image --dit DIT.gguf --vae VAE.safetensors --text TEXT_ENCODER.gguf [--vision MMPROJ.gguf]
 //                [--budget-mib M] (--ids 1,2,3 [--drop N] [--width W] [--height H] [--seed S] [--sigmas 1,...,0]
 //                [--ref IMAGE]... [--mask IMAGE] [--repeat N] --out IMAGE.rgba | --serve)
+//   strata-image --dit DIT.safetensors ... [--dit-q8 auto|0|1] [--edit-dit EDIT_DIT.safetensors --vision MMPROJ.gguf]
+//                [--dit-keep 0|1]
+//
+// The DiT's file says the model: a GGUF is Qwen-Image-2.1's, a safetensors file Mage-Flow's (its bf16 weights as
+// Comfy-Org has them; its blocks FP16 on the GPU when they fit the budget with the text encoder's layers, else
+// quantized to 8 bits as they are read (MfDit: W8A8 or Q8_0): --dit-q8 auto, the default; 1 always 8 bits, 0 always
+// FP16).  Mage-Flow's edits take
+// its edit DiT (--edit-dit) and Qwen3-VL-4B's mmproj (--vision), up to three --ref; --dit-keep 1, the default, keeps the
+// DiT not in use in RAM between a generation and an edit (0: read from its file again).
 //
 // One image: --ids, the prompt in the model's chat form, tokenized (the server's tokenizer); --drop, the leading ids of
 // the system turn; --budget-mib, the VRAM the engine may take (default: the free VRAM); --repeat, the image again N
@@ -39,6 +48,7 @@
 
 #include "strata/core/gpu.hpp"
 #include "strata/image/qi_image_io.hpp"
+#include "strata/image/mf_pipeline.hpp"
 #include "strata/image/qi_pipeline.hpp"
 
 #include <atomic>
@@ -48,6 +58,7 @@
 #include <deque>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
@@ -172,7 +183,7 @@ struct Lines {
     }
 };
 
-int serve(si::QiPipeline& p) {
+int serve(si::ImagePipeline& p) {
     {   // the warm-up: a 256 x 256 image of one step from token ids the vocabulary has; where the GPU has no room
         // for it now (another program holds it), the first request builds the kernels instead
         si::QiRequest r;
@@ -276,13 +287,25 @@ int serve(si::QiPipeline& p) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // oneMath's rocBLAS backend times hipBLASLt's first algorithms on a shape's first product and keeps the fastest:
+    // an image model's few shapes repeat every step (RX 9060 XT: its int8 products 20 to 40% faster), where the text
+    // engine's change with each prompt (it leaves the timing off)
+    if (std::getenv("ONEMATH_HIPBLASLT_TUNE") == nullptr) {
+#if defined(_WIN32)
+        _putenv_s("ONEMATH_HIPBLASLT_TUNE", "1");
+#else
+        setenv("ONEMATH_HIPBLASLT_TUNE", "1", 0);
+#endif
+    }
     try {
         std::string dit, vae, text, vision, out, ids;
         std::vector<std::string> ref_paths;
         si::QiRequest r;
         uint64_t budget = 0;
         int repeat = 1;
-        bool serving = false;
+        std::string edit_dit;
+        int dit_q8 = -1;   // Mage-Flow: by the budget
+        bool serving = false, dit_keep = true;
         for (int i = 1; i < argc; ++i) {
             const std::string a = argv[i];
             auto val = [&]() -> std::string {
@@ -307,17 +330,34 @@ int main(int argc, char** argv) {
             else if (a == "--budget-mib") budget = std::stoull(val()) << 20;
             else if (a == "--repeat") repeat = std::stoi(val());
             else if (a == "--serve") serving = true;
+            else if (a == "--dit-q8") {
+                const std::string v = val();
+                dit_q8 = v == "auto" ? -1 : v != "0";
+            }
+            else if (a == "--edit-dit") edit_dit = val();
+            else if (a == "--dit-keep") dit_keep = val() != "0";
             else throw std::invalid_argument("unknown option " + a);
         }
         if (dit.empty() || vae.empty() || text.empty() || (!serving && (out.empty() || ids.empty()))) {
             std::fprintf(stderr, "usage: %s --dit F --vae F --text F [--vision F] [--budget-mib M] (--ids 1,2,3 "
                          "[--drop N] [--width W] [--height H] [--seed S] [--sigmas 1,...,0] [--ref IMAGE]... "
-                         "[--mask IMAGE] [--repeat N] --out IMAGE.rgba | --serve)\n", argv[0]);
+                         "[--mask IMAGE] [--repeat N] --out IMAGE.rgba | --serve) [--dit-q8 auto|0|1] [--edit-dit F] "
+                         "[--dit-keep 0|1]\n", argv[0]);
             return 2;
         }
-        si::QiPipeline p;
+        std::unique_ptr<si::ImagePipeline> pipe;
         std::string err;
-        if (!p.open(dit, vae, text, err, vision)) throw std::runtime_error(err);
+        const bool mage = dit.size() > 12 && dit.compare(dit.size() - 12, 12, ".safetensors") == 0;
+        if (mage) {
+            auto m = std::make_unique<si::MfPipeline>();
+            if (!m->open(dit, vae, text, err, dit_q8, edit_dit, vision, dit_keep)) throw std::runtime_error(err);
+            pipe = std::move(m);
+        } else {
+            auto q = std::make_unique<si::QiPipeline>();
+            if (!q->open(dit, vae, text, err, vision)) throw std::runtime_error(err);
+            pipe = std::move(q);
+        }
+        si::ImagePipeline& p = *pipe;
         if (budget > 0) p.set_budget(budget);
         if (serving) return serve(p);
         r.ids = parse_ids(ids);

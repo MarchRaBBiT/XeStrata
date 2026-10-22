@@ -80,7 +80,7 @@ So XeStrata runs only on the GPUs the distribution's rocBLAS has code for.
 - **On an RX 6700 or an RX 7600, use Fedora 44.** Ubuntu 26.04's rocBLAS has no code for these GPUs.
 - The RX 6600 (gfx1032) and the RX 6500 / 6400 (gfx1034) do not run: neither distribution's rocBLAS has code for them.
 - gfx1152 and gfx1153 (some Ryzen AI integrated graphics) do not run: Fedora 44's rocBLAS has code for them, but the
-  intel/llvm 7.1.1 XeStrata builds with has no target for them.
+  intel/llvm 7.2.0 XeStrata builds with has no target for them.
 - `xestrata --check` shows your GPU's gfx after its name.
 - The table is that of ROCm 7.1's rocBLAS on both distributions. Only the RX 9060 XT (gfx1200) has been checked.
 
@@ -210,8 +210,11 @@ It goes with any text model, and the images are made by XeStrata's own image eng
 | --- | --- | --- | --- |
 | `qwen-image-turbo` | [Qwen-Image-2.1-Turbo](https://huggingface.co/unsloth/Qwen-Image-2.1-Turbo-GGUF) | fast (8 steps) | everyday images and edits (**recommended**) |
 | `qwen-image-base` | [Qwen-Image-2.1](https://huggingface.co/unsloth/Qwen-Image-2.1-GGUF) | slow (40 steps, about 5 times Turbo) | the model Turbo was made from; its steps can be changed |
+| `mage-flow-turbo` | [Mage-Flow-Turbo](https://huggingface.co/Comfy-Org/Mage-Flow) | fastest (4 steps) | a small 4B model, for PCs with little RAM or VRAM |
+| `mage-flow` | [Mage-Flow](https://huggingface.co/Comfy-Org/Mage-Flow) | slow (20 steps, CFG) | tuned for following instructions and drawing text |
+| `mage-flow-base` | [Mage-Flow-Base](https://huggingface.co/Comfy-Org/Mage-Flow) | slow (30 steps, CFG) | the model before that tuning |
 
-With `-uncensored` (`qwen-image-turbo-uncensored` and so on), the text encoder is AtomicChat's Qwen3-VL-8B with its refusal direction removed.
+With `-uncensored` (`qwen-image-turbo-uncensored`, `mage-flow-turbo-uncensored` and so on), the text encoder is one with its refusal direction removed (for Qwen-Image-2.1 AtomicChat's Qwen3-VL-8B, for Mage-Flow huihui-ai's Qwen3-VL-4B).
 
 | Image model size (`--image-quant`) | Download | RAM (about) | VRAM |
 | --- | ---: | ---: | ---: |
@@ -223,8 +226,14 @@ The download is the image model, the text encoder (Qwen3-VL-8B Q8_0), the VAE an
 The RAM is what it takes besides the text model: when it is short, setup lowers the text encoder down to Q4_K, then the image model (with `--image-ssd-offload on` it keeps them and reads what does not fit from the SSD).
 More VRAM makes it faster.
 
+Mage-Flow (Microsoft, MIT) has one image model for generation and another for edits: setup installs both, and the engine switches to the edit one for an edit.
+It comes in one size: the download is the two image models (bf16), the text encoder (Qwen3-VL-4B Q8_0), the VAE and the vision encoder for the edits, 21.9 GB together, and the RAM about 16 GB.
+The engine keeps the image model in VRAM as 16-bit when it fits there with the text encoder; when it does not, the engine turns it into 8 bits as it loads it and streams what does not fit from RAM (`--image-dit-q8 on` always 8 bits, `off` always 16-bit). With 8 bits the products take int8 weights and activations where the GPU's math library has int8 products (Intel and NVIDIA in the contrib-llvm mode, AMD), and Q8_0 elsewhere.
+The image model not in use stays in RAM in 8 bits, so switching is quick; `--image-dit-keep off` lets it go, the RAM about 12 GB, and reads it from the file again at each switch.
+An edit takes up to 3 reference images, and no mask or transparent background.
+
 Images are made through `POST /v1/images/generations` and `/v1/images/edits` (vLLM-Omni compatible, so OpenAI compatible), the Images tab of the web page, and the chat ([details](docs/DETAILS.md#image-generation-optional)).
-Qwen-Image-2.1's weights are under the Qwen Research License, not a free software license.
+Qwen-Image-2.1's weights are under the Qwen Research License, not a free software license. Mage-Flow's are under MIT, but Microsoft's README says the models are for research and not meant for products or services.
 
 ## Install
 
@@ -235,11 +244,14 @@ Only Podman and podman-compose go on the host. XeStrata goes into a Fedora 44 co
 ```bash
 git clone https://github.com/MistVVK/XeStrata && cd XeStrata/container
 mkdir -p ~/.config/xestrata ~/.local/state/xestrata ~/.local/share/xestrata
+export PODMAN_COMPOSE_PROVIDER=podman-compose
 podman compose build                         # the image, with the latest release and the GPU libraries
 podman compose run --rm xestrata --setup     # answer the questions; it downloads the model
 podman compose up -d                         # http://127.0.0.1:8095 (podman compose down stops it)
 ```
 
+- **podman-compose**: `PODMAN_COMPOSE_PROVIDER` makes `podman compose` run podman-compose. Where Docker's compose plugin
+  is installed too, it is taken otherwise, and stops unless Podman's API socket runs.
 - **GPU**: Intel's as it is. For AMD add `-f compose.yaml -f compose.amd.yaml` after `podman compose`, for NVIDIA
   `-f compose.yaml -f compose.nvidia.yaml` (or `export COMPOSE_FILE=compose.yaml:compose.nvidia.yaml`).
   NVIDIA needs the NVIDIA Container Toolkit's CDI specification on the host ([docs/BUILD.md](docs/BUILD.md#podman)).
@@ -464,7 +476,7 @@ permission under GPL section 7, what goes in, and how to report).
    - [intel/llvm](https://github.com/intel/llvm)'s DPC++ (Apache-2.0 WITH LLVM-exception): the free and contrib-llvm
      modes' compiler, built with XeStrata's fixes (`third_party/main/intel-llvm/patches/`, under the same license);
      the packages carry its SYCL runtime;
-   - [ROCm's device libraries](https://github.com/ROCm/llvm-project/tree/rocm-7.2.4/amd/device-libs), by AMD
+   - [ROCm's device libraries](https://github.com/ROCm/llvm-project/tree/f30ae3e6b680ad23dcf522e668c6d4c5c90838d0/amd/device-libs), by AMD
      (University of Illinois/NCSA): built with intel/llvm, and linked into the code for AMD GPUs; the target features
      their build is given are transcribed from the `debian/rules` of Debian's
      [rocm-llvm](https://salsa.debian.org/rocm-team/rocm-llvm) package (Expat);

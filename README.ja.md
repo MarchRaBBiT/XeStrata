@@ -77,7 +77,7 @@ AMD の GPU では、prefill の密な行列積をディストリビューショ
 
 - **RX 6700 と RX 7600 では Fedora 44 を使ってください。** Ubuntu 26.04 の rocBLAS には、これらの GPU のコードがありません。
 - RX 6600（gfx1032）と RX 6500 / 6400（gfx1034）は、どちらのディストリビューションの rocBLAS にもコードがないので動きません。
-- gfx1152 と gfx1153（Ryzen AI の一部の内蔵 GPU）は、Fedora 44 の rocBLAS にはコードがありますが、XeStrata が使う intel/llvm 7.1.1 にそのターゲットがないので動きません。
+- gfx1152 と gfx1153（Ryzen AI の一部の内蔵 GPU）は、Fedora 44 の rocBLAS にはコードがありますが、XeStrata が使う intel/llvm 7.2.0 にそのターゲットがないので動きません。
 - 自分の GPU の gfx は、`xestrata --check` が GPU の名前の後ろに出します。
 - 表は、どちらのディストリビューションも ROCm 7.1 の rocBLAS のものです。確かめたのは RX 9060 XT（gfx1200）だけです。
 
@@ -196,8 +196,11 @@ BETA の 4 つの RAM の目安は、ダウンロードの大きさに約 8 GB �
 | --- | --- | --- | --- |
 | `qwen-image-turbo` | [Qwen-Image-2.1-Turbo](https://huggingface.co/unsloth/Qwen-Image-2.1-Turbo-GGUF) | 速い（8 ステップ） | ふだんの画像の生成と編集（**おすすめ**） |
 | `qwen-image-base` | [Qwen-Image-2.1](https://huggingface.co/unsloth/Qwen-Image-2.1-GGUF) | 遅い（40 ステップ、Turbo の約 5 倍） | Turbo の元のモデル。ステップ数を変えられる |
+| `mage-flow-turbo` | [Mage-Flow-Turbo](https://huggingface.co/Comfy-Org/Mage-Flow) | いちばん速い（4 ステップ） | 小さい 4B のモデル。RAM や VRAM の少ない PC 向け |
+| `mage-flow` | [Mage-Flow](https://huggingface.co/Comfy-Org/Mage-Flow) | 遅い（20 ステップ、CFG） | 指示への従い方と文字の描き方を調整した版 |
+| `mage-flow-base` | [Mage-Flow-Base](https://huggingface.co/Comfy-Org/Mage-Flow) | 遅い（30 ステップ、CFG） | 調整の前の元のモデル |
 
-`-uncensored` を付けると（`qwen-image-turbo-uncensored` など）、文の読み手が AtomicChat の拒否の方向を取り除いた Qwen3-VL-8B になります。
+`-uncensored` を付けると（`qwen-image-turbo-uncensored`、`mage-flow-turbo-uncensored` など）、文の読み手が拒否の方向を取り除いたものになります（Qwen-Image-2.1 は AtomicChat の Qwen3-VL-8B、Mage-Flow は huihui-ai の Qwen3-VL-4B）。
 
 | 画像のモデルの大きさ（`--image-quant`） | ダウンロード | RAM の目安 | VRAM |
 | --- | ---: | ---: | ---: |
@@ -209,8 +212,14 @@ BETA の 4 つの RAM の目安は、ダウンロードの大きさに約 8 GB �
 RAM の目安は、文章のモデルとは別に要る量です。足りなければ setup は文の読み手を Q4_K まで下げ、それでも足りなければ画像のモデルを下げます（`--image-ssd-offload on` なら下げずに、入らない分を SSD から読みます）。
 VRAM が大きいほど速くなります。
 
+Mage-Flow（Microsoft、MIT）は生成用と編集用で画像のモデルが別で、setup は両方を入れ、編集のときだけエンジンが差し替えます。
+大きさは 1 つで、ダウンロードは 2 つの画像のモデル（bf16）、文の読み手（Qwen3-VL-4B の Q8_0）、VAE、編集のための画像の読み手の合計 21.9 GB、RAM の目安は 16 GB です。
+画像のモデルは、文の読み手と一緒に VRAM に入るときは 16 ビットのまま置き、入らないときはエンジンが読み込むときに 8 ビットにして、入らない分を RAM から流します（`--image-dit-q8 on` で常に 8 ビット、`off` で常に 16 ビット）。8 ビットは、GPU の計算ライブラリが int8 の積を持つとき（contrib-llvm の Intel・NVIDIA、AMD）は重みと活性の両方を int8 で掛け、ほかは Q8_0 です。
+使っていない方の画像のモデルは 8 ビットのまま RAM に残すので、差し替えが速くなります。`--image-dit-keep off` にすると残さず、RAM の目安は 12 GB になりますが、差し替えのたびにファイルから読み直します。
+編集の参照画像は 3 枚までで、マスクと透明な背景はありません。
+
 画像は `POST /v1/images/generations` と `/v1/images/edits`（vLLM-Omni 互換（OpenAI 互換））、Web のページの Images のタブ、チャットから作れます（[詳細](docs/DETAILS.ja.md#画像の生成任意)）。
-Qwen-Image-2.1 の重みは Qwen Research License で、自由なソフトウェアのライセンスではありません。
+Qwen-Image-2.1 の重みは Qwen Research License で、自由なソフトウェアのライセンスではありません。Mage-Flow の重みは MIT ですが、Microsoft の README は研究のためのモデルで、製品やサービスに使うことを想定していないとしています。
 
 ## インストール
 
@@ -221,11 +230,14 @@ Qwen-Image-2.1 の重みは Qwen Research License で、自由なソフトウェ
 ```bash
 git clone https://github.com/MistVVK/XeStrata && cd XeStrata/container
 mkdir -p ~/.config/xestrata ~/.local/state/xestrata ~/.local/share/xestrata
+export PODMAN_COMPOSE_PROVIDER=podman-compose
 podman compose build                         # 最新のリリースと GPU のライブラリを入れたイメージを作ります
 podman compose run --rm xestrata --setup     # 質問に答えてモデルを取ってきます
 podman compose up -d                         # http://127.0.0.1:8095（止めるときは podman compose down）
 ```
 
+- **podman-compose**: `PODMAN_COMPOSE_PROVIDER` で、`podman compose` に podman-compose を使わせます。Docker の compose プラグインも
+  入った PC では、指定しないとそちらが選ばれ、Podman の API のソケットが動いていないと止まります。
 - **GPU**: Intel はこのままです。AMD は `-f compose.yaml -f compose.amd.yaml`、NVIDIA は `-f compose.yaml -f compose.nvidia.yaml` を
   `podman compose` の後に付けます（`export COMPOSE_FILE=compose.yaml:compose.nvidia.yaml` でも同じです）。
   NVIDIA はホストに NVIDIA Container Toolkit の CDI の設定が要ります（[docs/BUILD.ja.md](docs/BUILD.ja.md#podman)）。
@@ -436,7 +448,7 @@ RAM が足りていません。ほかのプログラムを閉じるか、小さ�
      CMake が XeStrata の変更の入ったフォーク（[MistVVK/oneMath](https://github.com/MistVVK/oneMath)、同じライセンス）から取得します。
    - [intel/llvm](https://github.com/intel/llvm) の DPC++（Apache-2.0 WITH LLVM-exception）: free と contrib-llvm のコンパイラ。
      XeStrata の修正（`third_party/main/intel-llvm/patches/`、同じライセンス）を当ててビルドし、パッケージにはその SYCL の実行時を入れます。
-   - AMD による [ROCm のデバイスライブラリ](https://github.com/ROCm/llvm-project/tree/rocm-7.2.4/amd/device-libs)（University of Illinois/NCSA）:
+   - AMD による [ROCm のデバイスライブラリ](https://github.com/ROCm/llvm-project/tree/f30ae3e6b680ad23dcf522e668c6d4c5c90838d0/amd/device-libs)（University of Illinois/NCSA）:
      intel/llvm と一緒にビルドし、AMD の GPU 向けのコードがリンクします。
      そのビルドに渡す機能の指定は、Debian の [rocm-llvm](https://salsa.debian.org/rocm-team/rocm-llvm) のパッケージ（Expat）の `debian/rules` から写しました。
    - 画面のフォント [Outfit](https://github.com/Outfitio/Outfit-Fonts)（SIL Open Font License 1.1）。

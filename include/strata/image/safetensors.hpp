@@ -47,6 +47,8 @@ public:
         return it == t_.end() ? nullptr : &it->second;
     }
     const std::map<std::string, SafeTensor>& tensors() const { return t_; }
+    /// Where the data section starts in the file (a tensor's bytes are at data_base() + begin .. + end).
+    uint64_t data_base() const { return base_; }
 
     /// The tensor's values as FP32 (BF16, F16 and F32 files).
     std::vector<float> f32(const std::string& name) {

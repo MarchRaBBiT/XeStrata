@@ -43,16 +43,17 @@ OUT, BUILD, INSTALL, RECORD = BASE, BASE / "build", BASE / "install", BASE / "in
 REPO = "https://github.com/intel/llvm.git"
 # The release this script builds: one with the Arc Pro B70 in the runtime's matrix table (v7.0.0 or later).  Raised by
 # a change to this line, not by following the newest release, so a run does not start a build by itself.
-TAG = "v7.1.1"
+TAG = "v7.2.0"
 
 # ROCm's device libraries (ocml, ockl and the others; the University of Illinois/NCSA license), which the AMD code
 # links: built with the toolchain, into install/amdgcn/bitcode, since a clang reads bitcode of its own LLVM or older
 # only - ROCm 7.14's (LLVM 23) stopped v7.1.1's (LLVM 22) build for an RX 7900 XTX (a field report).  CMake takes them
 # where the installed ROCm's do not build (cmake/StrataHip.cmake).  amd/device-libs of
-# ROCm's llvm-project at a release on TAG's LLVM (rocm-7.2.x is LLVM 22): raised with TAG.  third_party/main/
-# rocm-device-libs/.
+# ROCm's llvm-project at a release on TAG's LLVM, raised with TAG: v7.2.0 is LLVM 23, as ROCm 7.14 is (10.1 is LLVM
+# 24).  ROCm's releases since 7.9 are TheRock's, which tags no llvm-project commit: the one its release tag pins
+# (TheRock's compiler/amd-llvm at therock-7.14.1).  third_party/main/rocm-device-libs/.
 DEVICE_LIBS_REPO = "https://github.com/ROCm/llvm-project.git"
-DEVICE_LIBS_TAG = "rocm-7.2.4"
+DEVICE_LIBS_TAG = "f30ae3e6b680ad23dcf522e668c6d4c5c90838d0"   # ROCm 7.14.1 (TheRock's therock-7.14.1)
 DEVICE_LIBS_SRC = BASE / "rocm-device-libs"
 
 # Fixes the release lacks (its sycl branch too, on 2026-10-05): third_party/main/intel-llvm/patches/NN-<id>.patch,
@@ -220,7 +221,7 @@ def rocm_dirs() -> tuple | None:
 def target_options(contrib: bool) -> list:
     """configure.py's options for the GPU targets besides Intel's: HIP where ROCm is installed (free software, in both
     modes), and CUDA for the contrib toolchain."""
-    opts, libclc = [], []
+    opts: list = []
     if contrib:
         if shutil.which("nvcc") is None and not Path("/usr/local/cuda/include/cuda.h").exists():
             p = PREREQUISITES[distro_family()]
@@ -228,7 +229,6 @@ def target_options(contrib: bool) -> list:
                  "install it: " + p["how"] + p["cuda"] +
                  (" (Ubuntu: multiverse; Debian: non-free)" if distro_family() == "ubuntu" else ""))
         opts.append("--cuda")
-        libclc.append("nvptx64--nvidiacl")
     rocm = rocm_dirs()
     if rocm is None:
         say("note: no ROCm HIP (hipcc's headers, libamdhip64): building without the HIP target (AMD GPUs)")
@@ -237,48 +237,58 @@ def target_options(contrib: bool) -> list:
         # LLVM_ENABLE_PROJECTS too, whose folders LLVM takes from the clone's top (src/device-libs), so a link there.
         # They use AMDGPU builtins without an -mcpu, which upstream LLVM (and intel/llvm with it) allows only with
         # their target features: the four transcribed from Debian's rocm-llvm package (debian/rules of
-        # 7.2.4+dfsg-1~exp1; Expat License, Copyright 2022-2026 its debian/ authors, see NOTICE)
+        # 7.2.4+dfsg-1~exp1; Expat License, Copyright 2022-2026 its debian/ authors, see NOTICE), and msad-insts and
+        # mqsad-pk-insts, which ROCm 7.14's ockl uses too (its media builtins; the others it takes in functions with
+        # their own target attribute)
         link = SRC / "device-libs"
         if link.is_symlink() or link.exists():
             link.unlink()
         link.symlink_to(fetch_device_libs())
         features = ";".join(f"-Xclang;-target-feature;-Xclang;+{f}"
-                            for f in ("lerp-inst", "cube-insts", "qsad-insts", "sad-insts"))
+                            for f in ("lerp-inst", "cube-insts", "qsad-insts", "sad-insts", "msad-insts",
+                                      "mqsad-pk-insts"))
         opts += ["--hip", "--hip-platform", "AMD", f"--cmake-opt=-DUR_HIP_ROCM_DIR={rocm[0]}",
                  f"--cmake-opt=-DUR_HIP_LIB_DIR={rocm[1]}", "--llvm-external-projects", "device-libs",
-                 f"--cmake-opt=-DCLANG_OPTIONS_APPEND={features}"]
-        # the name libclc builds the AMD libspirv for (its list of known targets lacks it: the fix hip-libclc-target)
-        libclc.append("amdgcn--amdhsa")
-    return opts + ([f"--cmake-opt=-DLIBCLC_TARGETS_TO_BUILD={';'.join(libclc)}"] if libclc else [])
+                 f"--cmake-opt=-DCLANG_OPTIONS_APPEND={features};-Wno-error=attribute-alias"]
+    # (libclc's targets, LLVM runtimes of their own since v7.2.0, are configure.py's for --cuda and --hip)
+    return opts
 
 
 def fetch_device_libs() -> Path:
-    """ROCm's llvm-project at DEVICE_LIBS_TAG, amd/device-libs alone (a shallow, sparse clone: a few MB)."""
-    if (DEVICE_LIBS_SRC / ".git").exists():
-        have = subprocess.run(["git", "-C", str(DEVICE_LIBS_SRC), "describe", "--tags", "--exact-match"],
-                              capture_output=True, text=True).stdout.strip()
-        if have != DEVICE_LIBS_TAG:
-            run(["git", "-C", DEVICE_LIBS_SRC, "fetch", "--depth", "1", "--filter=blob:none", "origin", "tag",
-                 DEVICE_LIBS_TAG])
-            run(["git", "-C", DEVICE_LIBS_SRC, "checkout", "--detach", DEVICE_LIBS_TAG])
-    else:
-        run(["git", "clone", "--depth", "1", "--filter=blob:none", "--sparse", "--branch", DEVICE_LIBS_TAG,
-             DEVICE_LIBS_REPO, DEVICE_LIBS_SRC])
+    """ROCm's llvm-project at DEVICE_LIBS_TAG (a commit), amd/device-libs alone (a shallow, sparse clone: a few MB)."""
+    if not (DEVICE_LIBS_SRC / ".git").exists():
+        run(["git", "init", "-q", DEVICE_LIBS_SRC])
+        run(["git", "-C", DEVICE_LIBS_SRC, "remote", "add", "origin", DEVICE_LIBS_REPO])
         run(["git", "-C", DEVICE_LIBS_SRC, "sparse-checkout", "set", "amd/device-libs"])
+    have = subprocess.run(["git", "-C", str(DEVICE_LIBS_SRC), "rev-parse", "HEAD"], capture_output=True,
+                          text=True).stdout.strip()
+    if have != DEVICE_LIBS_TAG:
+        run(["git", "-C", DEVICE_LIBS_SRC, "fetch", "--depth", "1", "--filter=blob:none", "origin", DEVICE_LIBS_TAG])
+        run(["git", "-C", DEVICE_LIBS_SRC, "checkout", "--detach", DEVICE_LIBS_TAG])
     return DEVICE_LIBS_SRC / "amd" / "device-libs"
 
 
 def build_device_libs(jobs: int) -> bool:
     """ROCm's device libraries, built in the toolchain's tree (an LLVM external project, as their README builds them)
-    and installed into install/amdgcn/bitcode.  Apart from compile.py's target, so a failure keeps the toolchain:
+    and copied into install/amdgcn/bitcode: those a SYCL program's AMD code links (ocml, ockl, oclc_*) and opencl,
+    whose presence the driver asks for, not the HIP language's (hip) and the sanitizer's (asanrtl).  ROCm 7.14's
+    opencl has aliases whose types differ from their aliasees', a warning (attribute-alias) its build takes for an
+    error, which ROCm's clang does not give: not an error here (target_options).  Apart from compile.py's target, so a
+    failure keeps the toolchain:
     CMake then takes a ROCm's device libraries the compiler reads, or says why none (cmake/StrataHip.cmake)."""
-    for cmd in (["cmake", "--build", BUILD, "--target", "rocm-device-libs", "-j", str(jobs)],
-                ["cmake", "--install", BUILD, "--component", "device-libs"]):
-        say("  > " + " ".join(str(c) for c in cmd))
-        if subprocess.run([str(c) for c in cmd]).returncode != 0:
-            say(f"note: ROCm's device libraries ({DEVICE_LIBS_TAG}) did not build with this toolchain; the engine's "
-                "AMD code takes the system's where this compiler reads them")
-            return False
+    r = subprocess.run(["ninja", "-C", str(BUILD), "-t", "targets", "all"], capture_output=True, text=True)
+    libs = sorted({m.group(1) for m in re.finditer(r"^((?:ocml|ockl|oclc_\w+|opencl)):", r.stdout, re.M)})
+    cmd = ["cmake", "--build", str(BUILD), "--target", *libs, "-j", str(jobs)]
+    say("  > " + " ".join(cmd[:5]) + f" ... ({len(libs)} libraries)")
+    if not libs or subprocess.run(cmd).returncode != 0:
+        say(f"note: ROCm's device libraries ({DEVICE_LIBS_TAG}) did not build with this toolchain; the engine's "
+            "AMD code takes the system's where this compiler reads them")
+        return False
+    dest = INSTALL / "amdgcn" / "bitcode"
+    dest.mkdir(parents=True, exist_ok=True)
+    for bc in BUILD.glob("**/amdgcn/bitcode/*.bc"):
+        if bc.stem in libs:
+            shutil.copy2(bc, dest / bc.name)
     return True
 
 
@@ -352,7 +362,7 @@ def build(tag: str, keep_build: bool, contrib: bool, jobs: int | None = None) ->
     jobs = jobs or os.cpu_count() or 4
     started = time.time()
     run([sys.executable, SRC / "buildbot" / "compile.py", "-o", BUILD, "-j", str(jobs)])
-    # the tools a --windows build runs that the toolchain does not install (libclc's)
+    # the tools a --windows build runs that the toolchain does not install (libdevice's)
     for tool in HOST_TOOLS_EXTRA:
         if (BUILD / "bin" / tool).exists():
             shutil.copy2(BUILD / "bin" / tool, INSTALL / "bin" / tool)
@@ -375,11 +385,11 @@ def build(tag: str, keep_build: bool, contrib: bool, jobs: int | None = None) ->
 # it does not install), so no compiler is built for Windows or for this machine: only the parts a Windows engine links
 # and runs with (no Debug libraries, no clang.exe).
 WIN_OUT = ROOT / ".tools" / "intel-llvm-win"
-# the tools libdevice and libclc take from LIBCLC_CUSTOM_LLVM_TOOLS_BINARY_DIR; the toolchain installs all but
-# HOST_TOOLS_EXTRA, which build() copies from its build tree
+# the tools libdevice takes from LIBCLC_CUSTOM_LLVM_TOOLS_BINARY_DIR; the toolchain installs all but HOST_TOOLS_EXTRA,
+# which build() copies from its build tree
 HOST_TOOLS = ("clang", "llvm-ar", "append-file", "clang-offload-bundler", "llvm-offload-binary", "file-table-tform",
               "llvm-foreach", "llvm-spirv", "sycl-post-link", "llvm-link")
-HOST_TOOLS_EXTRA = ("llvm-as", "opt", "libclc-remangler")
+HOST_TOOLS_EXTRA = ("opt",)
 # NVIDIA's Windows CUDA headers and import libraries (cuda.lib, nvml.lib) the CUDA adapter links: the toolkit's
 # redistributable archives (not free software; downloaded, never bundled), of the version the contrib packages build
 # for, which every newer driver runs
@@ -401,15 +411,15 @@ echo "#$ LIBRARIES=\"-L{root}/lib/x64\""
 # Linux runtime of the same major version exports
 WIN_HIP_DLL = "amdhip64_7.dll"
 # what a Windows engine's SYCL runtime is: the headers and the device libraries, installed by their components, and
-# the DLLs and import libraries, copied (their components install the Debug ones too, which are not built)
-WIN_COMPONENTS = ("sycl-headers", "sycl-headers-extras", "OpenCL-Headers", "ur_headers", "libsycldevice",
-                  "libspirv-builtins")
-WIN_FILES = ("bin/sycl9.dll", "bin/ur_loader.dll", "bin/ur_win_proxy_loader.dll",
+# the DLLs and import libraries, copied (their components install the Debug ones too, which are not built); the UR
+# loader and the OpenCL adapter are linked into sycl9.dll since v7.2.0 (UR_STATIC_LOADER, UR_STATIC_ADAPTER_OPENCL)
+WIN_COMPONENTS = ("sycl-headers", "sycl-headers-extras", "OpenCL-Headers", "ur_headers", "libsycldevice")
+WIN_FILES = ("bin/sycl9.dll", "bin/ur_win_proxy_loader.dll",
              "bin/ur_adapter_cuda.dll", "bin/ur_adapter_level_zero.dll", "bin/ur_adapter_level_zero_v2.dll",
-             "bin/ur_adapter_opencl.dll", "bin/xptifw.dll", "lib/sycl9.lib", "lib/sycl.lib",
-             "lib/sycl-devicelib-host.lib", "lib/ur_loader.lib", "lib/xpti.lib", "lib/xptifw.lib")
-WIN_TARGETS = ("sycl9.dll", "ur_loader", "ur_win_proxy_loader", "ur_adapter_cuda", "ur_adapter_level_zero",
-               "ur_adapter_level_zero_v2", "ur_adapter_opencl", "xptifw", "libsycldevice", "libspirv-builtins")
+             "bin/xptifw.dll", "lib/sycl9.lib", "lib/sycl.lib",
+             "lib/sycl-devicelib-host.lib", "lib/xpti.lib", "lib/xptifw.lib")
+WIN_TARGETS = ("sycl9.dll", "ur_win_proxy_loader", "ur_adapter_cuda", "ur_adapter_level_zero",
+               "ur_adapter_level_zero_v2", "xptifw", "libsycldevice")
 # Windows names the build asks for in another case than the SDK's files (Linux's file names are case-sensitive)
 WIN_CASE_HEADERS = {"Libloaderapi.h": "um/libloaderapi.h"}
 WIN_CASE_LIBS = {"Shlwapi.lib": "um/x86_64/shlwapi.lib"}
@@ -477,27 +487,6 @@ def win_hip(dest: Path) -> Path | None:
     run([llvm_bin_with("llvm-dlltool"), "-m", "i386:x86-64", "-d", dest / "amdhip64.def", "-l",
          dest / "lib" / "amdhip64.lib"])
     return dest
-
-
-def win_device_libs(host: Path, dest: Path) -> None:
-    """ROCm's device libraries for a Windows host in `dest`: the contrib toolchain's, with their wchar_size module flag
-    2 in place of 4.  ROCm builds Windows' with -fshort-wchar (device-libs' cmake/OCL.cmake), which changes nothing
-    else (none of their sources uses wchar_t), and a module of a Windows host's (wchar_t of 16 bits) does not link with
-    4.  Each goes to text through the toolchain's clang, which runs no pass on it (the toolchain has no llvm-dis), has
-    the flag changed, and back through its llvm-as."""
-    tmp = OUT / "wchar2"
-    tmp.mkdir(parents=True, exist_ok=True)
-    dest.mkdir(parents=True, exist_ok=True)
-    for bc in sorted((host / "amdgcn" / "bitcode").glob("*.bc")):
-        ll = tmp / (bc.stem + ".ll")
-        run([host / "bin" / "clang", "-cc1", "-triple", "amdgcn-amd-amdhsa", "-emit-llvm", "-disable-llvm-passes",
-             "-x", "ir", bc, "-o", ll])
-        text, n = re.subn(r'(!\{i32 \d+, !"wchar_size", i32 )4\}', r"\g<1>2}", ll.read_text())
-        if n != 1:
-            fail(f"{bc.name}: no wchar_size flag of 4 to change", "a ROCm device library of another form")
-        ll.write_text(text)
-        run([host / "bin" / "llvm-as", ll, "-o", dest / bc.name])
-    shutil.rmtree(tmp)
 
 
 def win_toolchain(xwin: Path, host_bin: Path) -> Path:
@@ -572,7 +561,9 @@ def build_windows(tag: str, xwin: Path, keep_build: bool, jobs: int | None) -> N
         "-DLLVM_HOST_TRIPLE=x86_64-pc-windows-msvc",
         # BLAKE3's MASM files: LLVM's ml (llvm-ml) does not assemble them; the C versions are taken
         "-DLLVM_DISABLE_ASSEMBLY_FILES=ON",
-        f"-DLLVM_EXTERNAL_PROJECTS={projects}", f"-DLLVM_ENABLE_PROJECTS=clang;{projects};libclc",
+        # no libclc: its libspirv for a Windows host (libspirv.l32.*, the Windows long) is the contrib toolchain's,
+        # which builds every variant of each device target (LLVM runtimes since v7.2.0)
+        f"-DLLVM_EXTERNAL_PROJECTS={projects}", f"-DLLVM_ENABLE_PROJECTS=clang;{projects}",
         f"-DLLVM_EXTERNAL_SYCL_SOURCE_DIR={s / 'sycl'}", f"-DLLVM_EXTERNAL_LLVM_SPIRV_SOURCE_DIR={s / 'llvm-spirv'}",
         f"-DLLVM_EXTERNAL_XPTI_SOURCE_DIR={s / 'xpti'}", f"-DXPTI_SOURCE_DIR={s / 'xpti'}",
         f"-DLLVM_EXTERNAL_XPTIFW_SOURCE_DIR={s / 'xptifw'}", f"-DLLVM_EXTERNAL_LIBDEVICE_SOURCE_DIR={s / 'libdevice'}",
@@ -585,8 +576,6 @@ def build_windows(tag: str, xwin: Path, keep_build: bool, jobs: int | None) -> N
         # LLVM's code generation and clang for Windows
         "-DSYCL_ENABLE_EXTENSION_JIT=OFF",
         "-DSYCL_ENABLE_MAJOR_RELEASE_PREVIEW_LIB=OFF",
-        f"-DLIBCLC_TARGETS_TO_BUILD=nvptx64--nvidiacl{';amdgcn--amdhsa' if hip else ''}",
-        "-DLIBCLC_GENERATE_REMANGLED_VARIANTS=ON", "-DLIBCLC_NATIVECPU_HOST_TARGET=OFF",
         "-DSYCL_UR_FORCE_FETCH_LEVEL_ZERO=ON", f"-DCUDAToolkit_ROOT={cuda}", "-DLLVM_ENABLE_DIA_SDK=OFF",
         "-DLLVM_ENABLE_ZSTD=OFF",
         # the device libraries' tools, this machine's (patch build-libdevice-custom-tools); each also by its own
@@ -613,14 +602,6 @@ def build_windows(tag: str, xwin: Path, keep_build: bool, jobs: int | None) -> N
     for rel in (*WIN_FILES, *(["bin/ur_adapter_hip.dll"] if hip else [])):
         (INSTALL / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(BUILD / rel, INSTALL / rel)
-    if hip:
-        win_device_libs(host, INSTALL / "amdgcn" / "bitcode")
-    # the libspirv of the Windows long (l32) into the contrib toolchain's own folder, where its driver looks for it when
-    # it compiles for a Windows host: one -fsycl-libspirv-path cannot name both the NVIDIA and the AMD one
-    clc_in = next(INSTALL.glob("lib/clang/*/lib/libclc"))
-    clc_host = next(host.glob("lib/clang/*/lib/libclc"))
-    for f in clc_in.glob("remangled-l32-*.bc"):
-        shutil.copy2(f, clc_host / f.name)
     shutil.copytree(s / "xpti" / "include" / "xpti", INSTALL / "include" / "xpti", dirs_exist_ok=True)
     # the license texts of what the DLLs carry: intel/llvm's, and those of the projects its build fetched (UMF and the
     # hwloc it links statically, Level Zero's loader and headers, emhash, parallel-hashmap, OpenCL's headers and ICD

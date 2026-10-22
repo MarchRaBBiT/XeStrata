@@ -518,7 +518,7 @@ The experts of the pieces given back are computed on the CPU: the same answers, 
 `GET /v1/status` shows the current size under `"vram"`.
 A reserve that cannot be met (the cache at its smallest size, or no VRAM from the driver for the next segment) still answers `200`: compare the answer's `vram_free_mib` with your `reserve_mib` (upstream #1034).
 While a request runs or waits, it waits up to 300 s, then answers `409`.
-Where the GPU's runtime has no virtual memory it is off and the cache stays as it started (Intel's Level Zero and NVIDIA's CUDA have it; AMD's HIP in intel/llvm 7.1.1 does not).
+Where the GPU's runtime has no virtual memory it is off and the cache stays as it started (Intel's Level Zero and NVIDIA's CUDA have it; AMD's HIP in intel/llvm 7.2.0 does not).
 
 ### Model files downloaded by hand, or from a mirror
 
@@ -840,7 +840,7 @@ on easy questions all three think briefly, on hard ones `high` thinks longest an
   With a key the check is off: such a page cannot send the key, and tunnels and proxies that pass their own name on keep working.
   The names it knows, on any port:
   `localhost` (and `*.localhost`), any IP address (`127.0.0.1`, `[::1]`, `192.168.x.x`, ...), the address it listens on,
-  and, when it listens beyond this PC (`0.0.0.0` or a LAN address), this PC's name (`mypc`, `mypc.local`) and `host.docker.internal`.
+  and, when it listens beyond this PC (`0.0.0.0` or a LAN address), this PC's name (`mypc`, `mypc.local`) and the names a container reaches this PC by (Podman's `host.containers.internal`, Docker's `host.docker.internal`).
   Others get **403** naming the setting, and the server window prints one line for each.
   To reach it under another name (a reverse proxy that keeps the name, a tunnel, a DNS name on your network, another container's name for it), add the name:
   `"allowed_hosts": ["strata.example.com"]` in `xestrata-<model>.json` or `STRATA_ALLOWED_HOSTS=strata.example.com` (comma-separated).
@@ -1313,6 +1313,7 @@ the model uses interleaved M-RoPE.
 
 `./setup.sh --images qwen-image-turbo` sets up image generation with Qwen-Image-2.1-Turbo beside the text model (upstream 0.1.44).
 Images are made by XeStrata's own image engine, `strata-image`, which setup builds with the text engine: the same SYCL kernels, on every maker's GPU.
+The image attention runs through oneDNN on Intel GPUs and aotriton on AMD GPUs (both in the packages), through cuDNN on NVIDIA GPUs where it is installed (contrib-llvm; `xestrata --setup` says how), and through XeStrata's own kernel elsewhere. Where the GPU's math library has int8 products (Intel and NVIDIA in the contrib-llvm mode, AMD), the image models' products take int8 weights and activations.
 Setup downloads the image model, its VAE, its text encoder (Qwen3-VL-8B) and, for the edits, its vision encoder (Qwen3-VL's mmproj), and adds an `"images"` section to the config.
 The image model is Q8_0 by default. The engine streams from RAM the layers that do not fit in VRAM, so the GPU's memory does not decide the size.
 Its text encoder is Q8_0 by default too. The RAM decides both: when the four files (the vision encoder for the edits among them) and the engine's own (about 20.2 GB with both at Q8_0) do not fit the RAM the text model leaves, setup first lowers the text encoder (Q6_K, Q5_K, Q4_K), and only when that does not fit either takes the largest image model that fits (Q6_K, Q4_K_M), with the largest text encoder that fits beside it.
@@ -1323,6 +1324,14 @@ With the same seed it makes the image stable-diffusion.cpp makes with the model 
 With `--images qwen-image-base` the images are made by Qwen-Image-2.1, the model Turbo was made from (`qwen-image-base-uncensored` takes AtomicChat's text encoder above). Only the image model is another file: the VAE, the text encoder and the vision encoder are Turbo's.
 It runs 40 steps by default (the default of Qwen's diffusers pipeline, without guidance), about 5 times as long an image as Turbo; a request's `steps` (2 to 100) changes them. The steps' sigmas follow diffusers' scheduler, shifted by the image's size.
 The weights of Qwen-Image-2.1-Turbo and Qwen-Image-2.1 are under the Qwen Research License, not a free software license: read it before any commercial use.
+
+With `--images mage-flow-turbo` the images are made by Microsoft's Mage-Flow-Turbo (4B, 4 steps). `mage-flow` (the model tuned with reinforcement learning, 20 steps) and `mage-flow-base` (the model before it, 30 steps) take CFG (scale 5 by default).
+setup downloads the image models for generation and for edits (Comfy-Org's bf16 safetensors), the VAE, the text encoder (Qwen3-VL-4B) and the vision encoder for the edits (Qwen3-VL-4B's mmproj). The text encoder's size is chosen as for Qwen-Image-2.1; the image model comes in one size.
+When the image model's blocks all fit in VRAM with the text encoder's layers the engine keeps them 16-bit (FP16) and multiplies them as they are; when they do not, it turns them into 8 bits as it loads them and streams the blocks that do not fit from RAM (`--image-dit-q8 on` always 8 bits, `off` always 16-bit). Where the GPU's math library has int8 products (Intel and NVIDIA in the contrib-llvm mode, AMD), 8 bits are the weights rotated by Hadamard matrices in groups of 256 and made int8 with a scale for each row, and the activations rotated alike and made int8 for each token (ComfyUI's int8_convrot form; the time modulations stay Q8_0); elsewhere Q8_0, turned back into 16 bits for each product.
+With `-uncensored` the text encoder is huihui-ai's Qwen3-VL-4B with its refusal direction removed (noctrex's GGUF).
+The API takes `steps` (each model's count by default), the CFG scale as `true_cfg_scale` or `guidance_scale` (1: no CFG) and `negative_prompt` (one space by default). It has no masks and no transparent backgrounds.
+Edits (`POST /v1/images/edits`, the Images tab of the web page, the chat's `edit_image`) are made with the edit image model, which the engine switches to. An edit takes up to 3 reference images (as the edit models were trained), in 4 steps by default with Turbo and 30 with the other two. The image model not in use stays in RAM in 8 bits (`--image-dit-keep off` lets it go and reads it from the file again at each switch); a switch takes a few seconds.
+Mage-Flow's weights are under MIT, but Microsoft's README says the models are for research and not meant for products or services. XeStrata adds no content filter and no watermark for Mage-Flow.
 
 The server makes images on `POST /v1/images/generations` (OpenAI's images API, plus `seed`, and `steps` with Qwen-Image-2.1), and the web page gets an Images tab.
 The image API is vLLM-Omni compatible (OpenAI compatible), vLLM-Omni's extra fields included: `num_inference_steps` is `steps` (Turbo keeps its 8 steps and ignores a number of steps asked for); `true_cfg_scale` above 1 with a `negative_prompt` puts classifier-free guidance on Qwen-Image-2.1 (diffusers' Qwen-Image-2.1 formula; with the prompt's and the negative prompt's both computed, it takes about twice as long at 1024x1024 and 1.5 times at 512x512). Without either, there is no guidance, and `guidance_scale` has no use with Qwen-Image-2.1.
@@ -1479,7 +1488,7 @@ The model files are not part of it; their licenses apply to them (below).
 - **[intel/llvm](https://github.com/intel/llvm)**'s DPC++ (Apache-2.0 WITH LLVM-exception): the free and contrib-llvm modes' compiler and SYCL runtime.
   It is not in the repository: `tools/intel_llvm_build.py` fetches the release and builds it,
   with XeStrata's fixes from `third_party/main/intel-llvm/patches/`, under intel/llvm's license. See `third_party/main/intel-llvm/LICENSE.TXT`.
-- **[ROCm's device libraries](https://github.com/ROCm/llvm-project/tree/rocm-7.2.4/amd/device-libs)** (University of Illinois/NCSA, by AMD): ocml, ockl and the others, which the code for AMD GPUs links.
+- **[ROCm's device libraries](https://github.com/ROCm/llvm-project/tree/f30ae3e6b680ad23dcf522e668c6d4c5c90838d0/amd/device-libs)** (University of Illinois/NCSA, by AMD): ocml, ockl and the others, which the code for AMD GPUs links.
   They are not in the repository: `tools/intel_llvm_build.py` fetches them from a release of ROCm's llvm-project and builds them with intel/llvm. See `third_party/main/rocm-device-libs/LICENSE.TXT`.
   The target features their build is given are transcribed from the `debian/rules` of Debian's [rocm-llvm](https://salsa.debian.org/rocm-team/rocm-llvm) package (Expat; its authors in NOTICE).
 - **Ideas** (references in the paper) from:

@@ -44,6 +44,9 @@ foreach(dir "${STRATA_XWIN}/crt/include" "${STRATA_XWIN}/sdk/include/ucrt" "${ST
   string(APPEND _strata_win_flags " -idirafter \"${dir}\"")
 endforeach()
 set(CMAKE_C_FLAGS_INIT "${_strata_win_flags}")
+# llvm-rc's (a library's version resource, xz's among them)
+set(CMAKE_RC_FLAGS_INIT "-I\"${STRATA_XWIN}/sdk/include/um\" -I\"${STRATA_XWIN}/sdk/include/shared\" \
+-I\"${STRATA_XWIN}/crt/include\" -I\"${STRATA_XWIN}/sdk/include/ucrt\"")
 set(CMAKE_CXX_FLAGS_INIT "${_strata_win_flags}")
 # CMake adds -fuse-ld=lld-link itself and clang finds it through -B: a folder with lld-link alone, as the LLVM folder's
 # other tools (clang-offload-bundler) would take the place of intel/llvm's

@@ -49,7 +49,6 @@ void qi_ref_size(int64_t ref_w, int64_t ref_h, int64_t& w, int64_t& h) {
     h = std::max<int64_t>(32, (int64_t) std::nearbyint(vh / 32) * 32);
 }
 
-// the most the engine could have: the device's memory less the margin, within the small-card limit
 uint64_t vram_cap(uint64_t total) {
     uint64_t cap = total > kMargin ? total - kMargin : 0;
     if (const char* lim = std::getenv("STRATA_VRAM_LIMIT_MIB")) {

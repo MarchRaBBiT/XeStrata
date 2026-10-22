@@ -29,13 +29,13 @@ Rules for the whole run:
 ```sh
 git status --short --untracked-files=no   # must be empty, on dev
 gh auth status 2>&1 | grep -v -i token    # logged in to github.com as MistVVK
-docker info --format '{{.ServerVersion}}' # the package builds run in Docker
+podman info --format '{{.Version.Version}}' # the package builds run in rootless Podman
 git fetch origin main --tags
 git merge-base --is-ancestor main dev     # main must fast-forward to dev
 git tag -l 'xe*' --sort=-v:refname | head -n 1; git ls-remote --tags origin 'xe*'
 ```
 
-Stop and report if a tracked file has changes, gh is not logged in, Docker does not answer, or `main` has commits `dev` lacks.
+Stop and report if a tracked file has changes, gh is not logged in, Podman does not answer, or `main` has commits `dev` lacks.
 Untracked files (a record not yet committed, for example) may stay: the packages are built from the tag, and the push takes only commits.
 The newest `xe*` tag is the previous release (none before the first one).
 
@@ -76,7 +76,7 @@ Steps 5 and 6 are done while it builds.
 Write `build/release/xe<VERSION>/NOTES.md`: the English section first, then the same content in Japanese (the user's decision, 2026-10-12), under a first line linking the two: `[English](#english) | [日本語](#日本語)`.
 
 - What changed for users since the previous release tag (`git log --no-merges <previous>..xe<VERSION>`; for the first release, since `origin/main`), grouped by what a user notices, not a list of commits.
-- How to install: README's install section, as it is there (the user's decision, 2026-10-11). On Linux two ways, in this order (the user's decision, 2026-10-19): `#### 1. Podman` (README's Podman part: the commands, then its GPU and host lines), then `#### 2. apt / dnf`: the four numbered steps (download from the table with `SHA256SUMS`, `sha256sum -c SHA256SUMS --ignore-missing`, `sudo apt install ./…deb` or `sudo dnf install ./…rpm` with the release's file names, `xestrata --setup`, which shows the GPU makers' packages that are missing and the command that installs them: AGENTS.md, "Packages", the notes do not list them), then the `> [!NOTE]` that without an NVIDIA GPU either CUDA version works the same, then the package table (Intel, AMD (RDNA2 or later), NVIDIA (Turing or later): `xestrata-contrib-cuda13.1`, `cuda13.4` on Fedora; Intel, AMD (RDNA2 or later), NVIDIA Pascal and Volta: `xestrata-contrib-cuda12.4`), then its Windows part (download `XeStrata-<VERSION>-windows-x64.7z`, start `xestrata.exe`; what it needs, the GPUs, where things go). A change to one goes into the other.
+- How to install: README's install section, as it is there (the user's decision, 2026-10-11). On Linux two ways, in this order (the user's decision, 2026-10-19): `#### 1. Podman` (README's Podman part: the commands, `export PODMAN_COMPOSE_PROVIDER=podman-compose` among them, then its podman-compose, GPU and host lines), then `#### 2. apt / dnf`: the four numbered steps (download from the table with `SHA256SUMS`, `sha256sum -c SHA256SUMS --ignore-missing`, `sudo apt install ./…deb` or `sudo dnf install ./…rpm` with the release's file names, `xestrata --setup`, which shows the GPU makers' packages that are missing and the command that installs them: AGENTS.md, "Packages", the notes do not list them), then the `> [!NOTE]` that without an NVIDIA GPU either CUDA version works the same, then the package table (Intel, AMD (RDNA2 or later), NVIDIA (Turing or later): `xestrata-contrib-cuda13.1`, `cuda13.4` on Fedora; Intel, AMD (RDNA2 or later), NVIDIA Pascal and Volta: `xestrata-contrib-cuda12.4`), then its Windows part (download `XeStrata-<VERSION>-windows-x64.7z`, start `xestrata.exe`; what it needs, the GPUs, where things go). A change to one goes into the other.
 - When the version changed: saved conversations from another version are not read.
 - That the release has no free packages: a free build is made from the source (docs/BUILD.md).
 
@@ -165,7 +165,7 @@ The table's method stays fixed from release to release so the releases compare: 
 The engines, built from the tags (no package installed), each in a worktree of its own under `.claude/worktrees/`:
 
 - XeStrata: the contrib-llvm build of `xe<VERSION>` (docs/BUILD.md, with `LD_LIBRARY_PATH` to intel/llvm's `lib`); one GPU at a time with `ONEAPI_DEVICE_SELECTOR` (`level_zero:*` for the B70, `cuda:*` for the RTX 4070).
-- upstream on the B70: its `sycl/` port, built in its Docker image as its docs/INTEL.md says (`docker build -t strata-sycl-dev sycl/tools`, then its `build.sh` with `AOT=bmg-g31`), and run through `scripts/up-sycl.sh` (`UP=".claude/skills/release/scripts/up-sycl.sh"` with `UP_TREE`, `DATA` and `IDS` exported), which runs it as its setup configures an Intel card: the arguments get what its `sycl/setup_intel.py` writes (the xe cards' expert profile, the streamed experts, KV streaming from 64K, the VRAM reserve, the prompt chunks), and the engine the run-time switches of its `sycl/serve/strata-sycl.sh`.
+- upstream on the B70: its `sycl/` port, built in its container image as its docs/INTEL.md says, with Podman (`podman build -t strata-sycl-dev sycl/tools`, then its `build.sh` with `AOT=bmg-g31`), and run through `scripts/up-sycl.sh` (`UP=".claude/skills/release/scripts/up-sycl.sh"` with `UP_TREE`, `DATA` and `IDS` exported), which runs it as its setup configures an Intel card: the arguments get what its `sycl/setup_intel.py` writes (the xe cards' expert profile, the streamed experts, KV streaming from 64K, the VRAM reserve, the prompt chunks), and the engine the run-time switches of its `sycl/serve/strata-sycl.sh`.
 - upstream on the RTX 4070: its CUDA build, with the CMake options its own setup.py builds it with.
 
 Each engine's own shipped expert profile (`data/expert-profile.bin` of its tree; upstream's `sycl/` port takes the one its `sycl/setup_intel.py` writes in its place, `data/expert-profile-sycl.bin` from v0.1.43).
@@ -196,7 +196,7 @@ XE="..." UP="..." XE_ROOT=<xe tree> UP_ROOT=<up tree> XE_PROFILE=... UP_PROFILE=
 python $u/sync_collect.py $o/serve xe<VERSION> <upstream tag>                 # matrix-serve.json, matrix-usage.json
 ```
 
-`XE` and `UP` are as above; serve and everyday use pass stdin to them, so upstream's `sycl/` wrapper runs `docker run -i`.
+`XE` and `UP` are as above; serve and everyday use pass stdin to them, so upstream's `sycl/` wrapper runs `podman run -i`.
 `XE_ROOT` and `UP_ROOT` are the engines' worktrees (their `serve/server.py`), `PY` a Python with the server's packages (the data folder's `venv`); everyday use runs at a 262144 context with what setup writes for it.
 
 ### image generation

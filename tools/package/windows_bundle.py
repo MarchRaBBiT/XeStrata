@@ -31,27 +31,36 @@ from pathlib import Path
 
 # The SYCL runtime's DLLs a Windows engine loads (sycl-jit.dll, the runtime compiler, is not: 120 MB the engine does
 # not use).  ze_loader.dll comes with Intel's driver, nvcuda.dll and nvml.dll with NVIDIA's, amdhip64_7.dll with AMD's.
-SYCL_DLLS = ("sycl9.dll", "ur_win_proxy_loader.dll", "ur_loader.dll", "ur_adapter_cuda.dll", "ur_adapter_hip.dll",
+SYCL_DLLS = ("sycl9.dll", "ur_win_proxy_loader.dll", "ur_adapter_cuda.dll", "ur_adapter_hip.dll",
              "ur_adapter_level_zero.dll", "ur_adapter_level_zero_v2.dll", "xptifw.dll")
 ENGINE_EXES = ("strata.exe", "strata-device.exe", "strata-image.exe", "strata-vision-cpu.exe")
 # oneMath and its oneMKL backend (the engine's build folder's bin/), which loads oneMKL where the user installed it
-ONEMATH_DLLS = ("onemath.dll", "onemath_blas_mklgpu.dll")
+ONEMATH_DLLS = ("onemath.dll", "onemath_blas_mklgpu.dll", "onemath_blas_cublas.dll", "onemath_blas_rocblas.dll")
+# AMD GPUs' image attention: the engine's module that opens aotriton (on an AMD GPU only), aotriton's library (built
+# in the engine's build, liblzma linked in) and its kernels' images, which it finds beside it
+AOTRITON_DLLS = ("strata_sdpa_aotriton.dll", "aotriton_v2.dll")
+# Intel GPUs' image attention: oneDNN (built in the engine's build, onednn/bin/)
+ONEDNN_DLLS = ("dnnl.dll",)
 # what a Windows PC brings (the Visual C++ runtime, which xestrata.exe checks for) and what must never be carried
 FORBIDDEN = ("vcruntime*.dll", "msvcp*.dll", "concrt*.dll", "ucrtbase*.dll", "api-ms-win-*.dll", "nvcuda.dll",
-             "nvml.dll", "cublas*.dll", "cudart*.dll", "mkl_*.dll", "amdhip64*.dll", "amd_comgr*.dll")
+             "nvml.dll", "cublas*.dll", "cudart*.dll", "mkl_*.dll", "amdhip64*.dll", "amd_comgr*.dll", "rocblas*.dll",
+             "*hipblaslt*.dll")
 # the Python packages the 7z carries (requirements.txt, and colorama, which tqdm takes on
 # Windows): a wheel not named here stops the script
 WHEELS = ("numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "pillow", "psutil", "markupsafe", "certifi",
-          "charset-normalizer", "charset_normalizer", "idna", "urllib3", "colorama")
+          "charset-normalizer", "charset_normalizer", "idna", "urllib3", "colorama", "pip")
 
 # name, version (a key of `versions`, or the text), license, source, license texts (paths relative to `roots`' keys, or
 # URLs), the files in the folder it covers (globs relative to its top)
 COMPONENTS = [
     ("XeStrata", "version", "LGPL-3.0-or-later (with MIT parts: NOTICE)", "https://github.com/MistVVK/XeStrata",
      [], ["xestrata.exe", "xestrata-cli.exe", "xestrata.dll", "xestrata-cli.dll", "Xestrata.Launcher.Core.dll",
-          *(f"app/engine/{e}" for e in ENGINE_EXES)]),
+          *(f"app/engine/{e}" for e in ENGINE_EXES), f"app/engine/{AOTRITON_DLLS[0]}"]),
     ("oneMath (XeStrata's fork)", "onemath", "Apache-2.0", "https://github.com/MistVVK/oneMath", ["onemath:LICENSE"],
      [f"app/engine/{d}" for d in ONEMATH_DLLS]),
+    ("ROCm BLAS headers (rocBLAS, hipBLASLt and hipblas-common; compiled into onemath_blas_rocblas.dll)",
+     "ROCm 7.1 (Ubuntu 26.04's)", "MIT",
+     "https://github.com/ROCm/rocm-libraries", ["rocm:LICENSE-*.txt"], []),
     ("intel/llvm (DPC++) SYCL runtime, with Unified Runtime, UMF and hwloc", "intel-llvm",
      "Apache-2.0 WITH LLVM-exception; UMF Apache-2.0 WITH LLVM-exception; hwloc BSD-3-Clause; Level Zero loader "
      "headers MIT; AMD's HIP headers MIT", "https://github.com/intel/llvm", ["sycl:licenses/*"],
@@ -84,6 +93,19 @@ COMPONENTS = [
     ("gguf-py (llama.cpp)", "llama.cpp", "MIT", "https://github.com/ggml-org/llama.cpp", ["llama:LICENSE"], []),
     ("Outfit (the web app's font)", "outfit", "OFL-1.1", "https://github.com/Outfitio/Outfit-Fonts",
      ["src:third_party/main/outfit/OFL.txt"], []),
+    ("AOTriton (its library and kernels' images)", "0.14.2b", "MIT; the images can carry parts of aiter (MIT), "
+     "FlyDSL's kernels (Apache-2.0) and Triton (MIT)", "https://github.com/ROCm/aotriton",
+     ["src:third_party/main/aotriton/LICENSE", "src:third_party/main/aotriton/LICENSE.aiter",
+      "src:third_party/main/aotriton/LICENSE.FlyDSL", "src:third_party/main/aotriton/LICENSE.triton"],
+     ["app/engine/aotriton_v2.dll", "app/engine/aotriton.images/*"]),
+    ("liblzma of XZ Utils (linked into aotriton_v2.dll)", "5.8.1", "0BSD", "https://tukaani.org/xz/",
+     ["src:third_party/main/xz/COPYING.0BSD"], []),
+    ("oneDNN", "3.12", "Apache-2.0 (parts of it under other licenses, listed in THIRD-PARTY-PROGRAMS)",
+     "https://github.com/uxlfoundation/oneDNN",
+     ["src:third_party/main/oneDNN/LICENSE", "src:third_party/main/oneDNN/THIRD-PARTY-PROGRAMS"],
+     ["app/engine/dnnl.dll"]),
+    ("cuDNN Frontend (compiled into strata-image.exe)", "1.31.0", "Apache-2.0 (parts MIT)",
+     "https://github.com/NVIDIA/cudnn-frontend", ["src:third_party/main/cudnn-frontend/LICENSE.txt"], []),
     ("stb_image (compiled into strata-image.exe)", "2.30", "MIT OR Unlicense", "https://github.com/nothings/stb",
      ["src:third_party/main/stb/LICENSE"], []),
     ("quantscope", "quantscope", "MIT OR Apache-2.0", "https://github.com/1872183316/quantscope",
@@ -143,12 +165,13 @@ def unbundle_runtime(site: Path) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    for name in ("src", "engine", "sycl", "launcher", "nuget", "wheels", "llama", "out"):
+    for name in ("src", "engine", "sycl", "launcher", "nuget", "wheels", "llama", "rocm", "out"):
         ap.add_argument(f"--{name}", type=Path, required=True)
     ap.add_argument("--python-zip", type=Path, required=True)
     ap.add_argument("--version", required=True)
     ap.add_argument("--cuda-archs", required=True, help="the engine's NVIDIA architectures, sm_60;sm_61;...")
     ap.add_argument("--hip-archs", required=True, help="the engine's AMD architectures, gfx1030;gfx1100;...")
+    ap.add_argument("--mkl-version", required=True, help="the oneMKL the engine was built with, 2026.2.0")
     a = ap.parse_args()
 
     top_name = f"XeStrata-{a.version}-windows-x64"
@@ -184,10 +207,20 @@ def main() -> None:
         shutil.copy2(a.sycl / "bin" / d, eng / d)
     for d in ONEMATH_DLLS:
         shutil.copy2(a.engine / "bin" / d, eng / d)
+    for d in ONEDNN_DLLS:
+        shutil.copy2(a.engine / "onednn" / "bin" / d, eng / d)
+    aot = a.engine / "_deps" / "aotriton" / "aotriton"
+    shutil.copy2(a.engine / AOTRITON_DLLS[0], eng / AOTRITON_DLLS[0])
+    shutil.copy2(aot / "lib" / AOTRITON_DLLS[1], eng / AOTRITON_DLLS[1])
+    shutil.copytree(aot / "lib" / "aotriton.images", eng / "aotriton.images")
     archs = [x for x in a.cuda_archs.split(";") if x]
     (eng / "BUILD.json").write_text(json.dumps({
         "source": "package", "backend": "xe", "package": top_name, "version": a.version, "license": "contrib",
-        "cuda_archs": archs, "hip_archs": [x for x in a.hip_archs.split(";") if x], "runtime": {}, "lib_dirs": []},
+        "cuda_archs": archs, "hip_archs": [x for x in a.hip_archs.split(";") if x],
+        # oneMKL's pip packages for the Python the 7z carries (setup names them), the version the engine was built with,
+        # without the SYCL runtime they depend on (the 7z's)
+        "runtime": {"onemkl_pip": [f"onemkl-sycl-blas=={a.mkl_version}", f"mkl=={a.mkl_version}", "tbb==2023.*",
+                                   f"onemkl-license=={a.mkl_version}"]}, "lib_dirs": []},
         indent=1) + "\n")
 
     # ---- Python: the embeddable distribution without its Visual C++ runtime (the user's, which xestrata.exe checks)
@@ -225,7 +258,7 @@ def main() -> None:
     for pkg in ("avalonia", "avalonia.angle.windows.natives", "skiasharp", "harfbuzzsharp", "fsharp.core",
                 "microcom.runtime", "tmds.dbus.protocol"):
         versions[pkg] = nuget_version(a.nuget, pkg)
-    roots = {"sycl": a.sycl, "python": py, "llama": a.llama, "src": a.src, "nuget": a.nuget,
+    roots = {"sycl": a.sycl, "python": py, "llama": a.llama, "src": a.src, "nuget": a.nuget, "rocm": a.rocm,
              "onemath": a.engine / "_deps" / "strata_onemath-src"}
     rows = []
     covered: set = set()
@@ -267,7 +300,9 @@ def main() -> None:
             fail(f"{dist.name}: no license text in the wheel")
         kept = []
         for text in wheel_texts:
-            dst = lic / f"python-{field('Name').lower()}-{text.name}"
+            # a text below licenses/'s own folders (pip's of the packages it vendors, all named LICENSE) by its path
+            parts = text.relative_to(dist).parts
+            dst = lic / f"python-{field('Name').lower()}-{'-'.join(parts[1:]) if len(parts) > 2 else text.name}"
             shutil.copy2(text, dst)
             kept.append(dst.relative_to(top).as_posix())
         record = (dist / "RECORD").read_text().splitlines()

@@ -13,6 +13,7 @@
 // kept too.
 #pragma once
 
+#include "strata/image/pipeline.hpp"
 #include "strata/image/qi_dit.hpp"
 #include "strata/image/qi_text.hpp"
 #include "strata/image/qi_vae.hpp"
@@ -26,24 +27,6 @@
 
 namespace strata::image {
 
-/// An edit's reference image: RGBA8 [height][width][4] as read (qi_image_io).
-struct QiRef {
-    std::vector<uint8_t> rgba;
-    int64_t width = 0, height = 0;
-};
-
-struct QiRequest {
-    std::vector<int32_t> ids;   // the prompt in the model's chat form, tokenized; an edit's one <|image_pad|> per ref
-    int64_t drop = 0;           // the leading ids whose states the DiT does not take (the system turn)
-    int64_t width = 1024, height = 1024;   // multiples of 16
-    uint64_t seed = 0;
-    std::vector<float> sigmas;  // empty: Turbo's 8 steps
-    std::vector<QiRef> refs;    // an edit's reference images, in the order of their pads
-    QiRef mask;                 // an edit's mask over refs[0] (OpenAI's: alpha 0 where the image changes); empty: none
-    std::vector<int32_t> neg_ids;   // classifier-free guidance's negative prompt, as ids (its pads as the prompt's)
-    float cfg = 1.0f;               // its scale (diffusers' true_cfg_scale): above 1 with neg_ids, guidance
-};
-
 /// The size an edit's reference image is worked at: about 1024 x 1024 pixels in the reference's shape, sides rounded to
 /// multiples of 32, whatever the image's size (diffusers' QwenImage21Pipeline, its output_resolution 1024).
 void qi_ref_size(int64_t ref_w, int64_t ref_h, int64_t& w, int64_t& h);
@@ -51,59 +34,39 @@ void qi_ref_size(int64_t ref_w, int64_t ref_h, int64_t& w, int64_t& h);
 /// The token id of <|image_pad|> in Qwen3-VL's vocabulary.
 constexpr int32_t kImagePad = 151655;
 
-struct QiTimes {
-    double text = 0, sampling = 0, decode = 0;
-};
-
-/// How a request's budget was split (bytes; the report).
-struct QiPlan {
-    uint64_t budget = 0, fixed = 0, activations = 0, blocks = 0, layers = 0, vae = 0, prefix_kv = 0;
-    int resident_blocks = 0, resident_layers = 0, resident_kv = 0;   // resident_kv: the blocks whose prefix cache is in VRAM
-    int64_t mlp_rows = 0;   // 0: all
-    bool vae_tiled = false, text_cached = false;
-};
-
-/// The VRAM an image needs (bytes): `least`, the budget it runs in at all (the layers streamed, the MLP in bands, the
-/// VAE in tiles); `full`, the budget with the DiT's blocks resident and the VAE in one piece (the encoder, run once a
-/// prompt, streamed); `held`, what the engine holds now; `free`, the device's free VRAM; `cap`, the most the engine
-/// could have (the device's memory less a margin, within STRATA_VRAM_LIMIT_MIB); `host`, the prefix cache that goes to
-/// pinned RAM with `cap` (its blocks past those it leaves room for).
-struct QiNeed {
-    uint64_t least = 0, full = 0, held = 0, free = 0, cap = 0, host = 0;
-};
-
-class QiPipeline {
+class QiPipeline : public ImagePipeline {
 public:
     /// Reads the parts' files for their sizes; the parts go on the GPU with the first request (ensure_open).
     bool open(const std::string& dit, const std::string& vae, const std::string& text, std::string& err,
               const std::string& vision = "");
 
     /// The VRAM the engine may take (0: the free VRAM at open, less a margin, within STRATA_VRAM_LIMIT_MIB).
-    void set_budget(uint64_t bytes);
+    void set_budget(uint64_t bytes) override;
     /// The budget in force: the one set, else the free VRAM's at open.
-    uint64_t budget() const { return budget_ > 0 ? budget_ : auto_budget_; }
+    uint64_t budget() const override { return budget_ > 0 ? budget_ : auto_budget_; }
     /// Frees what the engine holds on the GPU beyond its fixed weights (the cache): the next request loads again.
     /// `all`: the fixed weights and the products' scratch too (the parts are opened again on the next request).
-    void release(bool all = false);
+    void release(bool all = false) override;
     /// The budget set to what the engine holds and the VRAM free now, less `reserve` (another program's room): taken
     /// before a request when the GPU's memory is shared.
-    void fit(uint64_t reserve);
+    void fit(uint64_t reserve) override;
     /// What the engine holds on the GPU now (an estimate of its own buffers).
-    uint64_t held() const;
+    uint64_t held() const override;
 
     /// What an image of n_text prompt ids (after the system turn) at width x height needs (from the parts' sizes:
     /// nothing put on the GPU); refs: an edit's reference images' sizes (width, height as read); mask: the edit has a
     /// mask (the first reference encoded again at the image's size, and the sampler's base latent, noise and mask);
     /// n_neg: guidance's negative prompt's ids after the system turn (0: no guidance), its own prefix beside the first.
     QiNeed need(int64_t n_text, int64_t width, int64_t height,
-                const std::vector<std::pair<int64_t, int64_t>>& refs = {}, bool mask = false, int64_t n_neg = 0);
+                const std::vector<std::pair<int64_t, int64_t>>& refs = {}, bool mask = false,
+                int64_t n_neg = 0) override;
 
     /// RGBA8 [height][width][4] of the request.  `step`: the DiT's progress (QiDit::sample), false to stop.
     /// `stage`: each stage as it starts ("refs", the references through the vision encoder and the VAE's encoder;
     /// "text", the prompt through the text encoder; "sampling"; "decode", the VAE's decoder).
     std::vector<uint8_t> generate(const QiRequest& r, QiTimes* times = nullptr, QiPlan* plan = nullptr,
                                   const std::function<bool(int, int)>& step = {},
-                                  const std::function<void(const char*)>& stage = {});
+                                  const std::function<void(const char*)>& stage = {}) override;
 
 private:
     QiPlan plan(int64_t T, int64_t h, int64_t w, int64_t n_ids = 0, int64_t n_neg_pre = 0);

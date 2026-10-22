@@ -499,7 +499,7 @@ XeStrata は、GPU の空いている VRAM をエキスパートで埋め（エ�
 今の大きさは `GET /v1/status` の `"vram"` にあります。
 目標に届かなくても（キャッシュが最小の大きさに達したとき、ドライバーが次のかたまりの VRAM を出さないとき）答えは `200` なので、答えの `vram_free_mib` を `reserve_mib` と比べます（upstream #1034）。
 要求が動いているか待っているときは、300 秒まで待ってから `409` を返します。
-GPU の実行時ライブラリーが仮想メモリーを持たないときは使えず、起動時のまま動きます（Intel の Level Zero と NVIDIA の CUDA は持ち、intel/llvm 7.1.1 の AMD の HIP は持ちません）。
+GPU の実行時ライブラリーが仮想メモリーを持たないときは使えず、起動時のまま動きます（Intel の Level Zero と NVIDIA の CUDA は持ち、intel/llvm 7.2.0 の AMD の HIP は持ちません）。
 
 ### 手で取ってきたモデルのファイル、ミラーからのダウンロード
 
@@ -820,7 +820,7 @@ print(r.choices[0].message.content)
   キーがあれば確かめません（そうしたページはキーを送れず、名前をそのまま渡すトンネルやプロキシも動き続けます）。
   知っている名前は次のとおりで、ポートは問いません。
   `localhost`（と `*.localhost`）、IP アドレス（`127.0.0.1`、`[::1]`、`192.168.x.x` など）、待ち受けているアドレス、
-  この PC の外でも待ち受けているとき（`0.0.0.0` や LAN のアドレス）はこの PC の名前（`mypc`、`mypc.local`）と `host.docker.internal` です。
+  この PC の外でも待ち受けているとき（`0.0.0.0` や LAN のアドレス）はこの PC の名前（`mypc`、`mypc.local`）と、コンテナからこの PC を指す名前（Podman の `host.containers.internal`、Docker の `host.docker.internal`）です。
   それ以外には、設定の名前を示して **403** を返し、server のウィンドウにも 1 行ずつ出します。
   別の名前で届かせる（名前を残すリバースプロキシ、トンネル、ネットワークの DNS の名前、別のコンテナから見た名前）なら、その名前を足します。
   `xestrata-<model>.json` に `"allowed_hosts": ["strata.example.com"]`、または `STRATA_ALLOWED_HOSTS=strata.example.com`（カンマ区切り）です。
@@ -1286,6 +1286,7 @@ XeStrata はそれを、プロンプトの `<|image_pad|>` のトークンの位
 
 `./setup.sh --images qwen-image-turbo` で、文章のモデルとは別に Qwen-Image-2.1-Turbo で画像を作れるようにします（upstream 0.1.44）。
 画像は XeStrata 自身の画像のエンジン `strata-image` が作ります。setup が文章のエンジンと一緒にビルドし、同じ SYCL のカーネルでどのメーカーの GPU でも動きます。
+画像の注意は、Intel の GPU では oneDNN、AMD の GPU では aotriton（どちらもパッケージに入ります）、NVIDIA の GPU では cuDNN が入っていれば cuDNN（contrib-llvm。`xestrata --setup` が入れ方を示します）で取り、ほかは XeStrata の核で取ります。画像のモデルの積は、GPU の計算ライブラリが int8 の積を持つとき（contrib-llvm の Intel・NVIDIA、AMD）は重みと活性を int8 にして掛けます。
 setup は画像のモデル、VAE、文の読み手（Qwen3-VL-8B）と、編集のための画像の読み手（Qwen3-VL の mmproj）をダウンロードして、設定に `"images"` を足します。
 画像のモデルは既定で Q8_0 です。VRAM に入らない層はエンジンが RAM から流し込むので、GPU のメモリでは大きさを選びません。
 文の読み手も既定で Q8_0 です。選ぶのは RAM です。4 つのファイル（編集のための画像の読み手を含む）とエンジンの分（両方が Q8_0 で約 20.2 GB）が文章のモデルの残す RAM に入らなければ、setup はまず文の読み手を Q6_K、Q5_K、Q4_K の順に下げ、それでも入らないときに画像のモデルを入る中で最も大きいもの（Q6_K、Q4_K_M）に下げます。画像のモデルを下げたときは、文の読み手をその横に入る中で最も大きいものにします。
@@ -1296,6 +1297,14 @@ setup は画像のモデル、VAE、文の読み手（Qwen3-VL-8B）と、編集
 `--images qwen-image-base` なら、Turbo の元のモデルの Qwen-Image-2.1 で作ります（`qwen-image-base-uncensored` なら文の読み手が上の AtomicChat のものになります）。別のファイルになるのは画像のモデルだけで、VAE、文の読み手、画像の読み手は Turbo と同じものを使います。
 既定は 40 ステップ（Qwen の diffusers の pipeline の既定で、ガイダンスはなし）で、1 枚に Turbo の約 5 倍の時間がかかります。リクエストの `steps`（2〜100）で変えられます。各ステップの sigma は diffusers の scheduler と同じ式で、画像の大きさに合わせてずらします。
 Qwen-Image-2.1-Turbo と Qwen-Image-2.1 の重みは Qwen Research License で、自由なソフトウェアのライセンスではありません。商用に使う前にそのライセンスを読んでください。
+
+`--images mage-flow-turbo` なら、Microsoft の Mage-Flow-Turbo（4B、4 ステップ）で作ります。`mage-flow`（強化学習で調整した版、20 ステップ）と `mage-flow-base`（元のモデル、30 ステップ）は CFG を掛けます（既定の強さ 5）。
+setup は生成用と編集用の画像のモデル（Comfy-Org の bf16 の safetensors）、VAE、文の読み手（Qwen3-VL-4B）、編集のための画像の読み手（Qwen3-VL-4B の mmproj）をダウンロードします。文の読み手の大きさの選び方は Qwen-Image-2.1 と同じで、画像のモデルの大きさは 1 つです。
+エンジンは画像のモデルのブロックが文の読み手の層と一緒に VRAM に全部入るときは 16 ビット（FP16）のまま置いてそのまま掛け、入らないときは読み込むときに 8 ビットにして、VRAM に入らないブロックを RAM から流します（`--image-dit-q8 on` で常に 8 ビット、`off` で常に 16 ビット）。8 ビットは、GPU の計算ライブラリが int8 の積を持つとき（contrib-llvm の Intel・NVIDIA、AMD）は重みを 256 個ずつアダマール行列で回して行ごとの尺度の int8 にし、活性も同じく回してトークンごとに int8 にして掛けます（ComfyUI の int8_convrot と同じ形。時刻の変調の層だけは Q8_0）。ほかは Q8_0 で、掛けるたびに 16 ビットに戻します。
+`-uncensored` なら、文の読み手を huihui-ai の Qwen3-VL-4B（拒否の方向を取り除いたもの、noctrex の GGUF）に替えます。
+API では `steps`（既定はそれぞれのステップ数）、CFG の強さ `true_cfg_scale` か `guidance_scale`（1 なら CFG なし）、`negative_prompt`（既定は空白 1 文字）を受けます。マスクと透明な背景はありません。
+編集（`POST /v1/images/edits`、Web のページの Images のタブ、会話の `edit_image`）は、エンジンが編集用の画像のモデルに差し替えて作ります。参照画像は 3 枚まで（編集のモデルの学習と同じ）、ステップ数の既定は Turbo が 4、ほかの 2 つは 30 です。使っていない方の画像のモデルは 8 ビットのまま RAM に残し（`--image-dit-keep off` なら残さず、差し替えのたびにファイルから読み直します）、差し替えは数秒です。
+Mage-Flow の重みは MIT ですが、Microsoft の README は研究のためのモデルで、製品やサービスに使うことは想定していないとしています。XeStrata は Mage-Flow の内容のフィルターも透かしも入れていません。
 
 サーバーは `POST /v1/images/generations`（OpenAI の images API の形。`seed` と、Qwen-Image-2.1 では `steps` も受けます）で画像を作り、Web のページには「Images」のタブが出ます。
 画像の API は vLLM-Omni 互換（OpenAI 互換）で、vLLM-Omni の拡張の項目も受けます。`num_inference_steps` は `steps` と同じです（Turbo は 8 ステップのままで、ステップ数の指定は無視します）。`true_cfg_scale` を 1 より大きくして `negative_prompt` を付けると、Qwen-Image-2.1 に CFG を掛けます（diffusers の Qwen-Image-2.1 と同じ式です。条件ありとネガティブの 2 つ分を計算するので、時間は 1024×1024 で約 2 倍、512×512 では約 1.5 倍です）。どちらかが欠けていればガイダンスなしで、`guidance_scale` は Qwen-Image-2.1 では使いません。
@@ -1451,7 +1460,7 @@ Strata と ggml / llama.cpp（どちらも MIT）から来たコードも XeStra
 - **[intel/llvm](https://github.com/intel/llvm)** の DPC++（Apache-2.0 WITH LLVM-exception）: free と contrib-llvm のコンパイラと SYCL のランタイム。
   リポジトリには含めず、`tools/intel_llvm_build.py` がリリースを取ってきてビルドします。
   そのとき当てる XeStrata の修正は `third_party/main/intel-llvm/patches/` にあり、intel/llvm と同じライセンスです。`third_party/main/intel-llvm/LICENSE.TXT` を参照。
-- **[ROCm のデバイスライブラリ](https://github.com/ROCm/llvm-project/tree/rocm-7.2.4/amd/device-libs)**（University of Illinois/NCSA、AMD）: ocml・ockl などの、AMD の GPU 向けのコードがリンクするライブラリ。
+- **[ROCm のデバイスライブラリ](https://github.com/ROCm/llvm-project/tree/f30ae3e6b680ad23dcf522e668c6d4c5c90838d0/amd/device-libs)**（University of Illinois/NCSA、AMD）: ocml・ockl などの、AMD の GPU 向けのコードがリンクするライブラリ。
   リポジトリには含めず、`tools/intel_llvm_build.py` が ROCm の llvm-project のリリースから取ってきて、intel/llvm と一緒にビルドします。`third_party/main/rocm-device-libs/LICENSE.TXT` を参照。
   そのビルドに渡す機能の指定は、Debian の [rocm-llvm](https://salsa.debian.org/rocm-team/rocm-llvm) のパッケージ（Expat、著作者は NOTICE）の `debian/rules` から写しました。
 - **参考にした考え方**（文献は論文にあります）:

@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Niko1221 and the Strata contributors
 # SPDX-FileCopyrightText: 2026 MistVVK and the XeStrata contributors
 # SPDX-License-Identifier: LGPL-3.0-or-later AND MIT
-"""tools/image/qimage.py - Qwen-Image-2.1-Turbo and Qwen-Image-2.1 for XeStrata's image endpoint: the models' four
-files at pinned Hugging Face revisions, and the run config's "images" section for XeStrata's own image engine
+"""tools/image/qimage.py - Qwen-Image-2.1-Turbo, Qwen-Image-2.1 and Mage-Flow for XeStrata's image endpoint: the
+models' files at pinned Hugging Face revisions, and the run config's "images" section for XeStrata's own image engine
 (strata-image, built with the text engine).
 
 setup.py (--images, IMAGE_MODELS) and tools/image/install.py use these pieces; serve/images.py runs the result.
@@ -18,6 +18,13 @@ undistilled one) sampled in 40 steps on the scheduler's shifted sigmas instead o
             (--images qwen-image-turbo) or, with --images qwen-image-turbo-uncensored, AtomicChat's abliterated
             one (the same tensors, its refusal direction projected out).  The VAE (bf16).  Each file is checked
             against the SHA-256 the Hugging Face API lists for it at the pinned revision.
+
+Mage-Flow (Microsoft, MIT; mage-flow-turbo, mage-flow, mage-flow-base): its DiT as Comfy-Org has it (bf16 safetensors,
+one size: the engine keeps its blocks FP16 in VRAM when they fit, else quantizes them to Q8_0 as it reads them,
+"dit_q8"), its VAE, and Qwen3-VL-4B as its text
+encoder (Unsloth's GGUF, or with -uncensored huihui-ai's abliterated one as noctrex quantized it), with its edit model
+(the DiT the engine switches to for an edit, "edit_model") and Qwen3-VL-4B's vision encoder, in its own folder
+(mage-flow).  Only its text encoder is lowered for the RAM.
 """
 from __future__ import annotations
 
@@ -30,11 +37,17 @@ REVISIONS = {                                       # the `sha` of https://huggi
     "unsloth/Qwen3-VL-8B-Instruct-GGUF": "b93a7ee713758252c555be4210c00540df954dc2",
     "AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF": "df96693dbdfb8738c0bf1bbd0337d149808db948",  # 2026-10-19
     "unsloth/Qwen-Image-2.1-GGUF": "2c31ccd392b367a6637841a143813320a02dff55",                    # 2026-10-21
+    "Comfy-Org/Mage-Flow": "6ff68fbf3c667325e961d551691b246791d5eec0",                            # 2026-10-21
+    "unsloth/Qwen3-VL-4B-Instruct-GGUF": "00c00da0690c4b14b5539b02c4ea5d7c9102b35e",              # 2026-10-21
+    "noctrex/Huihui-Qwen3-VL-4B-Instruct-abliterated-GGUF": "0e204140ef43727fb4ee4d4bbd88c948c64719df",  # 2026-10-21
 }
 _DIT = "unsloth/Qwen-Image-2.1-Turbo-GGUF"
 _BASE = "unsloth/Qwen-Image-2.1-GGUF"
 _VL = "unsloth/Qwen3-VL-8B-Instruct-GGUF"
 _AC = "AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF"
+_MF = "Comfy-Org/Mage-Flow"
+_VL4 = "unsloth/Qwen3-VL-4B-Instruct-GGUF"
+_HH4 = "noctrex/Huihui-Qwen3-VL-4B-Instruct-abliterated-GGUF"
 # name -> (repo, path in the repo, bytes, sha256): the Hub's LFS pointers at the pinned revisions
 FILES = {
     # the DiTs, "<dit>-<QUANTS>"
@@ -72,6 +85,41 @@ FILES = {
     # Qwen3-VL's vision encoder, for the edits: the reference images into the text encoder's prompt
     "mmproj": (_VL, "mmproj-F16.gguf", 1_159_030_336,
                "d406d03ebabefdef86a2c86bf0c1b65f9e046f7a81c218f25de4931b46a07fc4"),
+    # Mage-Flow: its DiTs ("<dit>-bf16"), its VAE, its text encoders ("llm-mf-stock-<TEXT_QUANTS>",
+    # "llm-mf-uncensored-")
+    "mf-turbo-bf16": (_MF, "diffusion_models/mage_flow_turbo_bf16.safetensors", 8_231_536_760,
+                      "6df47df3d7efc9ebdad075b87b3e9e4f74d09dca672d592271788f0ee27ab97d"),
+    "mf-rl-bf16": (_MF, "diffusion_models/mage_flow_bf16.safetensors", 8_231_536_784,
+                   "04431abbc3acd1a5b86a7f77269f8e77e05a6cac3b21f35e1aef7493f6ab4934"),
+    "mf-base-bf16": (_MF, "diffusion_models/mage_flow_base_bf16.safetensors", 8_231_536_784,
+                     "689b8aa28b5736cd47e038115cc49a02d18cfa3715ebe5b66555d89a1bfd9524"),
+    "mf-edit-turbo-bf16": (_MF, "diffusion_models/mage_flow_edit_turbo_bf16.safetensors", 8_231_536_760,
+                           "29c3726ecd64afe149eef28af3e27b6b40de52646bfd16757a37da4b6fbcf288"),
+    "mf-edit-rl-bf16": (_MF, "diffusion_models/mage_flow_edit_bf16.safetensors", 8_231_536_784,
+                        "09cee4afa95239d850af02c9b1c006bffc71dca4a984a2a1f56edff9282d53d3"),
+    "mf-edit-base-bf16": (_MF, "diffusion_models/mage_flow_edit_base_bf16.safetensors", 8_231_536_784,
+                          "9d93faa75963ba4a2ef1b64bed4fe94c2554b82e8f3fb2dbb267604a634d450d"),
+    # the edits' vision encoder: Qwen3-VL-4B's (noctrex's of the abliterated model has the same tensors)
+    "mf-mmproj": (_VL4, "mmproj-F16.gguf", 836_180_640,
+                  "1b9f4e92f0fbda14d7d7b58baed86039b8a980fe503d9d6a9393f25c0028f1fc"),
+    "mf-vae": (_MF, "vae/mage_flow_vae_bf16.safetensors", 345_053_056,
+               "34e076dc1e8a15321e1e07be5111d59cf16dd10b804b7c7e20b4de29013427e0"),
+    "llm-mf-stock-Q8_0": (_VL4, "Qwen3-VL-4B-Instruct-Q8_0.gguf", 4_280_406_816,
+                          "e30b41d2f2cc48149dfbba1b3fb2c023c7e6bf2def75833d4d43820df75efeb3"),
+    "llm-mf-stock-Q6_K": (_VL4, "Qwen3-VL-4B-Instruct-UD-Q6_K_XL.gguf", 3_658_224_416,
+                          "2840c980742494481f06415a0e3fe53b34451293d15af67983d2deb64cc3a482"),
+    "llm-mf-stock-Q5_K": (_VL4, "Qwen3-VL-4B-Instruct-UD-Q5_K_XL.gguf", 2_899_222_816,
+                          "58bdbb002fb22e148a219c7464b272af714105381324a76b6e1e818b9995f356"),
+    "llm-mf-stock-Q4_K": (_VL4, "Qwen3-VL-4B-Instruct-UD-Q4_K_XL.gguf", 2_546_342_176,
+                          "a5563711a524defc06d67438a497ce4ba9a0fb126f28456a9f207e2ad104eb75"),
+    "llm-mf-uncensored-Q8_0": (_HH4, "Huihui-Qwen3-VL-4B-Instruct-abliterated-Q8_0.gguf", 4_280_406_720,
+                               "b30ecba482b03d9d07cd21e6653b83017115819605af0bcc7719870956037092"),
+    "llm-mf-uncensored-Q6_K": (_HH4, "Huihui-Qwen3-VL-4B-Instruct-abliterated-Q6_K.gguf", 3_306_262_720,
+                               "b77b439a7fce1ebb9b7c011f031fc5404bc2d17966fab1c9e301fb31cd83432c"),
+    "llm-mf-uncensored-Q5_K": (_HH4, "Huihui-Qwen3-VL-4B-Instruct-abliterated-Q5_K_M.gguf", 2_889_515_200,
+                               "2512dbc59dfdabfee5e2652d735a7ac54ef65827f6e3211baa4bdfd922e0193b"),
+    "llm-mf-uncensored-Q4_K": (_HH4, "Huihui-Qwen3-VL-4B-Instruct-abliterated-Q4_K_M.gguf", 2_497_282_240,
+                               "9789bbc02e77bf3b9cfe7b54a6b212a1e8904ffc77df61243353a05fcb203167"),
 }
 QUANTS = ("Q4_K_M", "Q6_K", "Q8_0")
 TEXT_QUANTS = ("Q4_K", "Q5_K", "Q6_K", "Q8_0")      # the text encoder's, smallest first like QUANTS
@@ -80,12 +128,28 @@ DEFAULT_TEXT_ENCODER = "stock"
 IMAGE_MODELS = {"qwen-image-turbo": ("qwen-image-2.1-turbo", "turbo", "stock"),
                 "qwen-image-turbo-uncensored": ("qwen-image-2.1-turbo-uncensored", "turbo", "uncensored"),
                 "qwen-image-base": ("qwen-image-2.1", "base", "stock"),
-                "qwen-image-base-uncensored": ("qwen-image-2.1-uncensored", "base", "uncensored")}
+                "qwen-image-base-uncensored": ("qwen-image-2.1-uncensored", "base", "uncensored"),
+                "mage-flow-turbo": ("mage-flow-turbo", "mf-turbo", "mf-stock"),
+                "mage-flow-turbo-uncensored": ("mage-flow-turbo-uncensored", "mf-turbo", "mf-uncensored"),
+                "mage-flow": ("mage-flow", "mf-rl", "mf-stock"),
+                "mage-flow-uncensored": ("mage-flow-uncensored", "mf-rl", "mf-uncensored"),
+                "mage-flow-base": ("mage-flow-base", "mf-base", "mf-stock"),
+                "mage-flow-base-uncensored": ("mage-flow-base-uncensored", "mf-base", "mf-uncensored")}
 DEFAULT_MODEL = "qwen-image-turbo"
 # the DiT -> its name, its steps (Turbo's are its own 8 sigmas; the base model's, the default of its pipeline,
 # diffusers' QwenImage21Pipeline, sampled without guidance as Qwen meant it), its Hugging Face model
 DITS = {"turbo": ("Qwen-Image-2.1-Turbo", 8, "Qwen/Qwen-Image-2.1-Turbo"),
-        "base": ("Qwen-Image-2.1", 40, "Qwen/Qwen-Image-2.1")}
+        "base": ("Qwen-Image-2.1", 40, "Qwen/Qwen-Image-2.1"),
+        # Mage-Flow's three (its README's defaults: Turbo 4 steps without guidance, the RL model 20 and the base model
+        # 30 with guidance 5.0), all on its static-shift schedule
+        "mf-turbo": ("Mage-Flow-Turbo", 4, "microsoft/Mage"),
+        "mf-rl": ("Mage-Flow", 20, "microsoft/Mage"),
+        "mf-base": ("Mage-Flow-Base", 30, "microsoft/Mage")}
+MF_CFG = {"mf-turbo": 1.0, "mf-rl": 5.0, "mf-base": 5.0}   # Mage-Flow's guidance scale by DiT
+# each Mage-Flow DiT's edit model and its steps (its README: Edit-Turbo 4, Edit (RL) and Edit-Base 30)
+MF_EDIT = {"mf-turbo": ("mf-edit-turbo", 4), "mf-rl": ("mf-edit-rl", 30), "mf-base": ("mf-edit-base", 30)}
+MF_DIR = "mage-flow"
+MF_Q8_SHARE = 34 / 64      # Mage-Flow's DiT in RAM: its bf16 blocks quantized to Q8_0 (34 bytes a 32 values)
 # every model's files in one folder (named after the first one): they share all but the DiT
 MODEL_DIR = "qwen-image-2.1-turbo"
 IMAGE_EXE = "strata-image.exe" if os.name == "nt" else "strata-image"
@@ -94,8 +158,20 @@ DEFAULT_TEXT_QUANT = "Q8_0"
 HOST_GB = 2.0          # the image engine's own RAM besides its files (its process, the pinned relay, the prompt states)
 
 
+def is_mage(dit: str) -> bool:
+    return dit.startswith("mf-")
+
+
+def dit_quants(dit: str) -> tuple[str, ...]:
+    """The sizes a DiT comes in (smallest first): Mage-Flow's one bf16 file, Qwen-Image's QUANTS."""
+    return ("bf16",) if is_mage(dit) else QUANTS
+
+
 def license_note(dit: str) -> str:
     name, _, repo = DITS[dit]
+    if is_mage(dit):
+        return (f"{name} is under the MIT license; Microsoft released it for research, and asks those who deploy it "
+                f"more widely to add their own safeguards (content moderation): https://github.com/{repo}")
     return (f"{name} is under the Qwen Research License (not Apache 2.0): https://huggingface.co/{repo}/blob/main/"
             "LICENSE - read it before you use the images commercially")
 
@@ -107,28 +183,39 @@ def text_file(text_encoder: str, text_quant: str) -> str:
 
 def file_names(quant: str, text_encoder: str = DEFAULT_TEXT_ENCODER, text_quant: str = DEFAULT_TEXT_QUANT,
                dit: str = "turbo") -> tuple[str, ...]:
-    """The FILES entries an image install with that DiT at `quant` and that text encoder uses."""
+    """The FILES entries an image install with that DiT at `quant` and that text encoder uses (Mage-Flow: the DiT and
+    its edit model, and Qwen3-VL-4B's vision encoder)."""
+    if is_mage(dit):
+        return (f"{dit}-bf16", f"{MF_EDIT[dit][0]}-bf16", "mf-vae", text_file(text_encoder, text_quant), "mf-mmproj")
     return (f"{dit}-{quant}", "vae", text_file(text_encoder, text_quant), "mmproj")
 
 
 def ram_need_gb(quant: str, text_encoder: str = DEFAULT_TEXT_ENCODER, text_quant: str = DEFAULT_TEXT_QUANT,
-                dit: str = "turbo") -> float:
-    """The RAM (GB) an image job keeps busy with that DiT at `quant` and that text encoder: the four files, read
-    through the OS file cache (the engine maps them), and the engine's own."""
-    return sum(FILES[k][2] for k in file_names(quant, text_encoder, text_quant, dit)) / 1e9 + HOST_GB
+                dit: str = "turbo", keep: bool = True) -> float:
+    """The RAM (GB) an image job keeps busy with that DiT at `quant` and that text encoder: the files, read through
+    the OS file cache (the engine maps them), and the engine's own; Mage-Flow's DiTs as the Q8_0 their blocks become
+    (the file's pages dropped once read), its edit model's too with `keep` (else one DiT at a time)."""
+    names = file_names(quant, text_encoder, text_quant, dit)
+    if is_mage(dit) and not keep:
+        names = tuple(k for k in names if k != f"{MF_EDIT[dit][0]}-bf16")
+    return sum(FILES[k][2] * (MF_Q8_SHARE if k.endswith("-bf16") and is_mage(dit) else 1) for k in names) / 1e9 \
+        + HOST_GB
 
 
 def fit_ram(ram_left_gb: float, text_encoder: str = DEFAULT_TEXT_ENCODER, quant: str = DEFAULT_QUANT,
-            text_quant: str = DEFAULT_TEXT_QUANT, dit: str = "turbo") -> tuple[str, str, bool]:
+            text_quant: str = DEFAULT_TEXT_QUANT, dit: str = "turbo", keep: bool = True) -> tuple[str, str, bool]:
     """The DiT and text encoder quants whose files fit `ram_left_gb` (the RAM the text model leaves), from `quant`
     and `text_quant` down -> (quant, text_quant, fits): the encoder is lowered first and the DiT only when the
     smallest encoder does not fit, the encoder then the largest that fits beside that DiT.  The smallest of both, not
-    fitting, when nothing does."""
-    for q in reversed(QUANTS[:QUANTS.index(quant) + 1]):
+    fitting, when nothing does.  Mage-Flow's DiT has one size: only its encoder is lowered."""
+    quants = dit_quants(dit)
+    if quant not in quants:
+        quant = quants[-1]
+    for q in reversed(quants[:quants.index(quant) + 1]):
         for t in reversed(TEXT_QUANTS[:TEXT_QUANTS.index(text_quant) + 1]):
-            if ram_need_gb(q, text_encoder, t, dit) <= ram_left_gb:
+            if ram_need_gb(q, text_encoder, t, dit, keep) <= ram_left_gb:
                 return q, t, True
-    return QUANTS[0], TEXT_QUANTS[0], False
+    return quants[0], TEXT_QUANTS[0], False
 
 
 def file_url(name: str, endpoint: str = "https://huggingface.co") -> str:
@@ -137,13 +224,27 @@ def file_url(name: str, endpoint: str = "https://huggingface.co") -> str:
 
 
 def local_path(models_dir: Path, name: str) -> Path:
-    return Path(models_dir) / MODEL_DIR / Path(FILES[name][1]).name
+    folder = MF_DIR if name.startswith(("mf-", "llm-mf-")) else MODEL_DIR
+    return Path(models_dir) / folder / Path(FILES[name][1]).name
 
 
 def image_config(quant: str, exe: Path, models_dir: Path, *, model: str = DEFAULT_MODEL, uma: bool = False,
-                 policy: str = "auto", ssd_offload: bool = False, text_quant: str = DEFAULT_TEXT_QUANT) -> dict:
-    """The run config's "images" section for `model` (IMAGE_MODELS; serve/images.py reads it)."""
+                 policy: str = "auto", ssd_offload: bool = False, text_quant: str = DEFAULT_TEXT_QUANT,
+                 dit_q8: bool | None = None, dit_keep: bool = True) -> dict:
+    """The run config's "images" section for `model` (IMAGE_MODELS; serve/images.py reads it).  dit_q8: Mage-Flow's
+    blocks as Q8_0 (True), FP16 (False) or by the VRAM (None, the default: no "dit_q8" in the section); dit_keep: its
+    DiT not in use kept in RAM."""
     name, dit, text_encoder = IMAGE_MODELS[model]
+    if is_mage(dit):
+        q8 = {"dit_q8": bool(dit_q8)} if dit_q8 is not None else {}
+        return {**q8, "model_name": name, "family": "mage-flow", "exe": str(exe), "quant": "bf16",
+                "diffusion_model": str(local_path(models_dir, f"{dit}-bf16")), "steps": DITS[dit][1],
+                "schedule": "mage", "cfg_scale": MF_CFG[dit], "mask": False,
+                "edit_model": str(local_path(models_dir, f"{MF_EDIT[dit][0]}-bf16")), "edit_steps": MF_EDIT[dit][1],
+                "vision": str(local_path(models_dir, "mf-mmproj")), "dit_keep": bool(dit_keep),
+                "transparency": False, "vae": str(local_path(models_dir, "mf-vae")),
+                "llm": str(local_path(models_dir, text_file(text_encoder, text_quant))), "text_encoder": text_encoder,
+                "text_quant": text_quant, "gpu_policy": policy, "uma": bool(uma), "ssd_offload": bool(ssd_offload)}
     return {"model_name": name, "exe": str(exe), "quant": quant,
             "diffusion_model": str(local_path(models_dir, f"{dit}-{quant}")), "steps": DITS[dit][1],
             "schedule": dit, "mask": True, "transparency": True, "vae": str(local_path(models_dir, "vae")),

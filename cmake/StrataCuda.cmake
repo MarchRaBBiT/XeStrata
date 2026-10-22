@@ -241,31 +241,21 @@ function(strata_cuda_score covered sum cublas version out)
   set(${out} "${f1}${f2}${cublas_bit}${f4}" PARENT_SCOPE)
 endfunction()
 
-# A Windows cross build: the SYCL compiler, built for Linux, takes the libspirv of a Windows host (its long of 32 bits)
-# for `device_triple` from its own folder, where tools/intel_llvm_build.py --windows copies the Windows SYCL build's
-# over the compiler's own l32 one (only a Windows host takes l32), which, built on Linux, has another wchar_t and does
-# not link into Windows code.  One -fsycl-libspirv-path cannot name both the NVIDIA and the AMD one, so none is given.
+# A Windows cross build: the SYCL compiler, built for Linux, takes the libspirv of a Windows host (its long of 32 bits,
+# libspirv.l32.*) for `device_triple` from its own resource folder, where intel/llvm v7.2.0 and later build it beside
+# the Linux one (libclc's LLVM runtimes, every variant of each device target).  It carries no wchar_size, which kept
+# v7.1.1's Linux-built one out of Windows code, and differs from a Windows-built one in the SYCL image functions'
+# names alone, which the engine does not use.
 function(strata_win_spirv_check device_triple)
   if(NOT (CMAKE_CROSSCOMPILING AND WIN32))
     return()
   endif()
-  set(name "remangled-l32-signed_char.libspirv-${device_triple}.bc")
   execute_process(COMMAND ${CMAKE_CXX_COMPILER} -print-resource-dir OUTPUT_VARIABLE res
                   OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-  file(GLOB win "${STRATA_SYCL_WINDOWS}/lib/clang/*/lib/libclc/${name}")
-  if(NOT win)
-    message(FATAL_ERROR "the Windows SYCL build ${STRATA_SYCL_WINDOWS} has no libspirv for ${device_triple}: build it "
-                        "again with tools/intel_llvm_build.py --windows")
-  endif()
-  list(GET win 0 win)
-  file(SHA256 "${win}" want)
-  set(have "")
-  if(EXISTS "${res}/lib/libclc/${name}")
-    file(SHA256 "${res}/lib/libclc/${name}" have)
-  endif()
-  if(NOT have STREQUAL want)
-    message(FATAL_ERROR "the SYCL compiler's ${res}/lib/libclc/${name} is not the Windows SYCL build's: run "
-                        "tools/intel_llvm_build.py --windows again, which copies it there")
+  if(NOT EXISTS "${res}/lib/${device_triple}/libspirv.l32.signed_char.bc")
+    message(FATAL_ERROR "the SYCL compiler has no libspirv for ${device_triple} on a Windows host "
+                        "(${res}/lib/${device_triple}/libspirv.l32.signed_char.bc): a toolchain of intel/llvm v7.2.0 "
+                        "or later builds it (tools/intel_llvm_build.py --contrib)")
   endif()
 endfunction()
 
