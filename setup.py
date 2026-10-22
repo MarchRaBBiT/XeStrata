@@ -1327,11 +1327,12 @@ def repo_added(url: str) -> bool:
 
 def runtime_missing(makers: set) -> tuple:
     """For the package's engine: the GPU makers' packages (BUILD.json's runtime) that the GPUs of `makers` need and
-    are not installed, those that would make them faster (oneMKL, cuBLAS: contrib; pip's are linux_nvidia_libs'), and
-    the commands that add the repositories those come from.  Empty for an engine without the record."""
+    are not installed, those that would make them faster (OpenCL, which oneDNN's attention runs on; oneMKL, cuBLAS:
+    contrib; pip's are linux_nvidia_libs'), and the commands that add the repositories those come from.  Empty for an
+    engine without the record."""
     rt = packaged_engine().get("runtime") or {}
     need = [n for m in ("intel", "amd") if m in makers for n in rt.get(m, []) if not pkg_installed(n)]
-    fast = [n for m, k in (("intel", "onemkl"), ("nvidia", "cublas")) if m in makers
+    fast = [n for m, k in (("intel", "onednn"), ("intel", "onemkl"), ("nvidia", "cublas")) if m in makers
             for n in rt.get(k, []) if not pkg_installed(n)]
     d = distro_family()
     repos = []
@@ -1565,7 +1566,7 @@ def check_runtime(makers: set, gfx: set, data: Path) -> None:
     if need:
         fail("the GPU's libraries are missing: " + ", ".join(need),
              "install them, then run it again:\n" + "\n".join(lines))
-    warn("faster with " + ", ".join(fast) + " (not free software; without them XeStrata's own kernels do the work):")
+    warn("faster with " + ", ".join(fast) + " (without them XeStrata's own kernels do the work):")
     for line in lines:
         say(line)
 

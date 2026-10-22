@@ -58,6 +58,8 @@ python3-requests, python3-pil, python3-psutil"
     # Ubuntu's libze-intel-gpu1 does not depend on the graphics compiler it opens (libigc2, libigdfcl2): without them
     # the driver aborts at the first kernel
     level_zero="libze1, libze-intel-gpu1, libigc2, libigdfcl2"
+    # oneDNN's SDPA (the image engine's attention on Intel GPUs) runs on OpenCL: Intel's driver and the ICD loader
+    opencl="intel-opencl-icd, ocl-icd-libopencl1"
     vulkan_icd="mesa-vulkan-drivers"
     if [ "$license" = contrib ]; then
       case "$cuda_ver" in
@@ -86,6 +88,7 @@ python3-requests, python3-pil, python3-psutil"
     python_deps="python3 >= 3.10, python3-numpy, python3-jinja2, python3-regex, python3-pyyaml, python3-tqdm, \
 python3-requests, python3-pillow, python3-psutil"
     level_zero="oneapi-level-zero, intel-level-zero"
+    opencl="intel-opencl, OpenCL-ICD-Loader"   # as on Ubuntu
     vulkan_icd="mesa-vulkan-drivers"
     if [ "$license" = contrib ]; then
       dnf install -y -q dnf5-plugins   # config-manager
@@ -187,7 +190,7 @@ pkg_of() {
 }
 rocm="$(pkg_of libamdhip64.so), $(pkg_of librocblas.so), $(pkg_of libhipblaslt.so)"
 if [ "$license" = free ]; then
-  recommends="$level_zero, $rocm, $vulkan_icd"
+  recommends="$level_zero, $opencl, $rocm, $vulkan_icd"
 else
   # and oneMKL's
   mkl=$(readlink -f /opt/intel/oneapi/mkl/latest/lib/libmkl_sycl_blas.so)
@@ -195,13 +198,13 @@ else
     ubuntu*) mklpkg=$(dpkg -S "$mkl" | cut -d: -f1) ;;
     fedora*) mklpkg=$(rpm -qf --qf '%{NAME}' "$mkl") ;;
   esac
-  suggests="$level_zero, $vulkan_icd${cublas:+, $cublas}, $mklpkg, $rocm"
+  suggests="$level_zero, $opencl, $vulkan_icd${cublas:+, $cublas}, $mklpkg, $rocm"
 fi
 # the same, by GPU maker, for setup to tell what a PC lacks (BUILD.json's "runtime"): what each maker's GPUs need,
 # and in the contrib packages oneMKL and cuBLAS, which make them faster, and pip's names of NVIDIA's libraries setup
 # names for the data folder (nvidia_pip: cuDNN and the CUDA runtime, the image engine's attention; Fedora's cuBLAS)
 json_list() { printf '["%s"]' "$(echo "$1" | sed 's/, */", "/g')"; }
-runtime="{\"intel\": $(json_list "$level_zero"), \"amd\": $(json_list "$rocm")"
+runtime="{\"intel\": $(json_list "$level_zero"), \"onednn\": $(json_list "$opencl"), \"amd\": $(json_list "$rocm")"
 if [ "$license" = contrib ]; then
   runtime="$runtime, \"onemkl\": $(json_list "$mklpkg")"
   [ -n "$cublas" ] && runtime="$runtime, \"cublas\": $(json_list "$cublas")"
