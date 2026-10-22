@@ -5327,8 +5327,16 @@ int main(int argc, char** argv) {
                     : xcache.open_sized(sized_slots, g.n_layers, g.n_expert, err);
             }
             if (!ok) {
-                // An auto cache retries a smaller size if the allocation fails.
-                if (auto_cache && failed < 8 && shrink_to(cache_bytes() / 4 * 3)) {
+                // An auto cache retries a smaller size if the allocation fails.  The size comes from what the
+                // device says it has NOW: a refused allocation leaves its bytes counted as used, so every smaller
+                // whole-arena retry after it is refused by open()'s own check (the B70's xe driver, 2026-10-22:
+                // 25.5 GiB refused with 26.4 GiB reported free, then eight 3/4 retries, all refused) - a fresh
+                // figure asks once at the size that can fit, or stops at once when nothing can.
+                int64_t from = cache_bytes() / 4 * 3;
+                size_t fb = 0, tb = 0;
+                if (strata::gpu::mem_info(&fb, &tb))   // the reserve's floor: the loop's own check has the exact one
+                    from = std::min<int64_t>(from, (int64_t) fb - (((int64_t) o.vram_reserve_mib << 20) + (64ll << 20)));
+                if (auto_cache && failed < 8 && shrink_to(from)) {
                     ++failed;
                     std::fprintf(stderr, "strata generate: %s; trying a smaller expert cache: %d slots\n", err.c_str(),
                                  o.expert_cache);
