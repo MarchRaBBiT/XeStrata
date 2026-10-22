@@ -296,7 +296,7 @@ sde64 -version
 - Scratch probes that time single kernels with SYCL event profiling.
 - `STRATA_VERIFY_PROFILE=1` prints the stages of a decode window's layers (device clock ticks) on the `verify profile` line of `--stats`.
   Level Zero does not report the device clock aspect on the B70, but its compiler runs SPIR-V's OpReadClockKHR, so the engine builds the stamp kernel once at start and uses it where that works (NVIDIA: %globaltimer; AMD: no profile).
-  The tick rate is uncertain (about 550 MHz against the host's clock on the B70, yet about 3.5 GHz from a window's total), so read the stages as shares.
+  On the B70 the tick is the GPU's core clock (2.8 GHz against a bandwidth kernel of known length, its `max_freq`), slower when the clock drops, so read the stages as shares.
 
 ### The xe driver's kernel log
 
