@@ -294,7 +294,9 @@ sde64 -version
   decode の `verify window` の行（ホストが GPU を待つ時間、CPU のプール）は、いつも出ます。
 - `STRATA_VERIFY_NODES=1` は、decode の窓のグラフに入るカーネルの数を出します。
 - SYCL のイベントのプロファイリングで単独のカーネルを測る使い捨てのプローブ。
-- `STRATA_VERIFY_PROFILE=1` はデバイス全体で共通の時計を必要とし、B70 にはそれがありません。
+- `STRATA_VERIFY_PROFILE=1` は、decode の窓の層内の段ごとの時間（デバイスの時計の tick）を `--stats` の `verify profile` の行に出します。
+  B70 は Level Zero がデバイスの時計の aspect を報告しませんが、SPIR-V の OpReadClockKHR はコンパイラが動かすので、エンジンは起動時にその stamp のカーネルを試しに組んで使います（NVIDIA は %globaltimer、AMD は出ません）。
+  tick の速さは確かでないので（B70 でホストの時間に対し約 550 MHz、ただし窓の合計からは約 3.5 GHz）、段の比率で読みます。
 
 ### xe ドライバーのカーネルのログ
 
