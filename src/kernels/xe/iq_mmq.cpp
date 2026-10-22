@@ -708,7 +708,7 @@ struct Kernel {
 #endif
     }
 
-    void operator()(sycl::nd_item<1> it) const {
+    void body(sycl::nd_item<1> it) const {
         if constexpr (DP4A) {
             dp4a_body(it);
         } else if constexpr (IS != 0) {
@@ -950,14 +950,23 @@ struct Kernel {
 #endif
         }
     }
-    auto get(syclex::properties_tag) const {
+    // The entry, with the work-group launch() takes.  intel/llvm v7.2.0 bounds the registers a wave of an AMD GPU's
+    // kernel may take by its work-group from the attribute only, not from a kernel property: without it the WMMA
+    // bodies were sized for 1024 lanes, 192 VGPRs on the RX 9060 XT, and 57-64 of them spilled (v7.1.1's code fit in
+    // 118-150), the experts' products of a 32K prompt 1.4x slower.  A kernel takes the attributes or properties, not
+    // both: Intel's XMX bodies, which need the large register file (a property), go without the work-group, which
+    // as a property breaks their (empty) AMD build in v7.2.0 ("reqd_work_group_size requires
+    // amdgpu-flat-work-group-size").
+    [[sycl::reqd_work_group_size(NSG * SG), sycl::reqd_sub_group_size(STRATA_SUB_GROUP(ISG))]]
+    void operator()(sycl::nd_item<1> it) const requires(!DP4A && IS == 0) { body(it); }
+    // no sub-group operations: the device's own size
+    [[sycl::reqd_work_group_size(NSG * SG)]] void operator()(sycl::nd_item<1> it) const requires(DP4A) { body(it); }
+    void operator()(sycl::nd_item<1> it) const requires(!DP4A && IS != 0) { body(it); }
+    auto get(syclex::properties_tag) const requires(!DP4A && IS != 0) {
         // Intel's XMX bodies in the large register file: in the default one their sums and tiles spilled, 3.1x slower
         // (B70, llm-jp-4.1's experts, 256 rows an expert: 6,464 against 2,070 us)
-        if constexpr (DP4A) return syclex::properties{};   // no sub-group operations: the device's own size
-        else if constexpr (IS != 0)
-            return syclex::properties{syclex::sub_group_size<STRATA_SUB_GROUP(ISG)>,
-                                      sycl::ext::intel::experimental::grf_size<256>};
-        else return syclex::properties{syclex::sub_group_size<STRATA_SUB_GROUP(ISG)>};
+        return syclex::properties{syclex::sub_group_size<STRATA_SUB_GROUP(ISG)>,
+                                  sycl::ext::intel::experimental::grf_size<256>};
     }
 };
 
