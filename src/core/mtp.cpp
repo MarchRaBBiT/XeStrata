@@ -223,11 +223,13 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         // 2560 x 10240 at 176 us a call against 34 in the rows layout (B70, 2026-10-24).  The same values reach the
         // same dot in the same order, so the drafts are the same.  The prompt path's MTP pass reads four of them too,
         // with the type tensor_q8_type gives (its dequantization knows the layout).  The shared expert's matrices
-        // keep Q8_0: its own kernel.
+        // too: its kernel reads them through native_mmvq.
         {
             static const char* const rows_names[] = {"fc_embedding.weight", "fc_hidden.weight", "self_attn.k_proj.weight",
                                                      "self_attn.v_proj.weight", "self_attn.q_proj.weight",
-                                                     "self_attn.o_proj.weight"};
+                                                     "self_attn.o_proj.weight", "mlp.shared_expert.gate_proj.weight",
+                                                     "mlp.shared_expert.up_proj.weight",
+                                                     "mlp.shared_expert.down_proj.weight"};
             void* const cs0 = &Runtime::get().compute();
             for (Tensor& t : tensors_) {
                 if (t.kind != "q8_0" || t.cols > INT_MAX || t.rows > INT_MAX ||
@@ -756,9 +758,9 @@ bool MtpDrafter::record_forward(int T, int step_row0, strata::gpu::Stream cs, st
         }
         strata::gpu::Stream sh_cs = branch ? side_ : cs;
         NativeSharedWeights nsw;
-        nsw.gate_type = GGML_Q8_0; nsw.gate_data = q8("mlp.shared_expert.gate_proj.weight");
-        nsw.up_type = GGML_Q8_0; nsw.up_data = q8("mlp.shared_expert.up_proj.weight");
-        nsw.down_type = GGML_Q8_0; nsw.down_data = q8("mlp.shared_expert.down_proj.weight");
+        nsw.gate_type = q8_type("mlp.shared_expert.gate_proj.weight"); nsw.gate_data = q8("mlp.shared_expert.gate_proj.weight");
+        nsw.up_type = q8_type("mlp.shared_expert.up_proj.weight"); nsw.up_data = q8("mlp.shared_expert.up_proj.weight");
+        nsw.down_type = q8_type("mlp.shared_expert.down_proj.weight"); nsw.down_data = q8("mlp.shared_expert.down_proj.weight");
         nsw.q8_1 = xq_;
         const SForm none{};
         for (int t = 0; t < T; ++t) {
