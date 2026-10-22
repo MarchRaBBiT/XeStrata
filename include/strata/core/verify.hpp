@@ -154,6 +154,9 @@ public:
     bool run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool, void* user, int32_t* out, std::string& err);
     /// Whether the last run() captured its window's graph: that round's time is mostly the capture's, not the window's
     bool captured_last() const { return captured_last_; }
+    /// Whether a window of T tokens can run without running the card out of memory: its graph is captured already,
+    /// or the VRAM free leaves room to capture it (half as much again as the most a capture has taken, and 64 MiB)
+    bool window_fits(int T) const;
     /// The head's raw logits for the first `rows` tokens of the last window (the last stage's head):
     /// `rows` x n_vocab floats into `host`.  For --dump-logits; call after `run`, before the next window.
     bool read_logits(int rows, float* host, std::string& err) const;
@@ -470,6 +473,8 @@ private:
     bool fetch_branch_ = false;
     strata::gpu::Graph* exec_[9] = {};
     bool captured_last_ = false;
+    size_t graph_bytes_max_ = 0;   ///< the most VRAM a window's capture and first run have taken
+    size_t graph_free0_ = 0;       ///< the VRAM free before the capture of the window run() is running, else 0
     strata::gpu::Graph* commit_exec_ = nullptr;
     // A device whose running kernels do not see the host's writes (doorbell_visible: the UHD 770) runs a window as
     // segments the host launches one after another, cut before each layer group's experts; no kernel waits on a

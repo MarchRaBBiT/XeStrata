@@ -1442,12 +1442,21 @@ std::string Verifier::profile_report() {
     return out;
 }
 
+bool Verifier::window_fits(int T) const {
+    if (T < 1 || T > max_t_) return false;
+    if (exec_[T] != nullptr || !segs_[T].empty() || exec_res_[T] != nullptr || graph_bytes_max_ == 0) return true;
+    size_t free_b = 0, total_b = 0;
+    if (!strata::gpu::mem_info(&free_b, &total_b)) return true;
+    return free_b >= graph_bytes_max_ / 2 * 3 + ((size_t) 64 << 20);
+}
+
 bool Verifier::capture(int T, std::string& err) {
     if (exec_[T] != nullptr || !segs_[T].empty()) return true;
+    size_t free0 = 0;
     {   // said before the capture: a process that exits inside it leaves this line as the trace (upstream 0f931943)
-        size_t free_b = 0, total_b = 0;
-        if (strata::gpu::mem_info(&free_b, &total_b))
-            std::fprintf(stderr, "strata verify: capturing the %d-token window (%zu MiB of VRAM free)\n", T, free_b >> 20);
+        size_t total_b = 0;
+        if (strata::gpu::mem_info(&free0, &total_b))
+            std::fprintf(stderr, "strata verify: capturing the %d-token window (%zu MiB of VRAM free)\n", T, free0 >> 20);
     }
     if (!strata::gpu::begin_capture(cs_)) {
         err = "verify: begin capture failed";
@@ -1482,6 +1491,7 @@ bool Verifier::capture(int T, std::string& err) {
     const bool synced = strata::gpu::stream_sync(cs_);
     std::fprintf(stderr, "strata verify: captured the %d-token window (sync %s)\n", T,
                  synced ? "ok" : strata::gpu::last_error());
+    graph_free0_ = free0;   // what the graph takes shows at its first run, measured once run() has the window's tokens
     return true;
 }
 
@@ -1833,6 +1843,12 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         }
     }
     VDBG("window done\n");
+    if (graph_free0_ > 0) {
+        size_t free1 = 0, total_b = 0;
+        if (strata::gpu::mem_info(&free1, &total_b) && free1 < graph_free0_)
+            graph_bytes_max_ = std::max(graph_bytes_max_, graph_free0_ - free1);
+        graph_free0_ = 0;
+    }
     ++windows;
     progress_at("decode");
     progress_beat();

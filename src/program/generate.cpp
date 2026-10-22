@@ -12728,6 +12728,11 @@ int main(int argc, char** argv) {
             if (adapt_period > 0 && adapt_cuts_windows())
                 room = (int) std::min<int64_t>(room, (p / adapt_period + 1) * adapt_period - p);
             T = std::min(T, room);
+            // A window size whose graph is not captured yet takes VRAM to capture.  Where too little is free (the
+            // expert cache fills the card, the reserve held the smaller windows' graphs) the largest size that fits
+            // runs instead: the B70 at 262K had 22 MiB left when its 6-token window was captured, and the capture
+            // ran it out of memory.
+            while (T > 1 && !ver.window_fits(T)) --T;
             // --lookup-chain: what followed an earlier occurrence of the context + the MTP's drafts, after them
             int chain_n = 0, cm = 0;
             if (o.lookup_chain > 0 && use_mtp && !first_window && !from_sfx && T < room) {
