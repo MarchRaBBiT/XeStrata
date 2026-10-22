@@ -918,8 +918,14 @@ bool Verifier::record_window(int T, strata::gpu::Stream cs, std::string& err) {
                 else for (int t = tb; t < te; ++t)
                     bf16_gemv_fp32_mmvf(mixed_ + t * N, (const uint16_t*) wik->data, idx_raw + t * ID, (int) N, (int) ID, cs);
                 stamp(l, 7, grp);
-                native_mmvq(wk->native_type, wk->native_data, xq_, kcur_ + tb * NKV * HD, (int) N, (int) (NKV * HD), n, cs);
-                native_mmvq(wv->native_type, wv->native_data, xq_, vcur_ + tb * NKV * HD, (int) N, (int) (NKV * HD), n, cs);
+                // K and V in one launch where the pair's layout applies (each row's bits unchanged; the GDN layers' qkv
+                // and gate are of different types in the packs, so they stay two launches)
+                if (wk->native_type != wv->native_type ||
+                    !native_mmvq_pair(wk->native_type, wk->native_data, wv->native_data, xq_, kcur_ + tb * NKV * HD,
+                                      vcur_ + tb * NKV * HD, (int) N, (int) (NKV * HD), n, cs)) {
+                    native_mmvq(wk->native_type, wk->native_data, xq_, kcur_ + tb * NKV * HD, (int) N, (int) (NKV * HD), n, cs);
+                    native_mmvq(wv->native_type, wv->native_data, xq_, vcur_ + tb * NKV * HD, (int) N, (int) (NKV * HD), n, cs);
+                }
                 if (qb) norm_rope(kcur_ + tb * NKV * HD, wkn, (int) (n * NKV), (int) HD, pos_k + tb * NKV);
                 else for (int t = tb; t < te; ++t) norm_rope(kcur_ + t * NKV * HD, wkn, (int) NKV, (int) HD, pos_ + t * NH);
                 if (st.kv_rot) {   // K and V rotated before they are stored (kv_q4.hpp)
