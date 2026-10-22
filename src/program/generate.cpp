@@ -6646,11 +6646,17 @@ int main(int argc, char** argv) {
         auto fits = [&](const strata::core::ExpertCache& x, int64_t k) {
             return k + 128 <= x.slots() && k * 100 <= pct * x.slots();
         };
+        // the tiers: the default ring, the 96-slot ring, then both again with the int8 products' group scratch sized
+        // for one group's rows instead of the chunk's (Prefill::set_group_cap, 12 GB cards: the 16384-token chunk)
+        for (const bool cap : {false, true}) {
+            strata::prefill::Prefill::set_group_cap(cap);
+            strata::prefill::Prefill::set_ring_override(0);
+            if (const int64_t k = lend_slots(c); fits(xcache, k) && stages_lend(c, fits)) return k;
+            strata::prefill::Prefill::set_ring_override(96);
+            if (const int64_t k = lend_slots(c); fits(xcache, k) && stages_lend(c, fits)) return k;
+        }
         strata::prefill::Prefill::set_ring_override(0);
-        if (const int64_t k = lend_slots(c); fits(xcache, k) && stages_lend(c, fits)) return k;
-        strata::prefill::Prefill::set_ring_override(96);
-        if (const int64_t k = lend_slots(c); fits(xcache, k) && stages_lend(c, fits)) return k;
-        strata::prefill::Prefill::set_ring_override(0);
+        strata::prefill::Prefill::set_group_cap(false);
         return (int64_t) 0;
     };
     // The prompt path's chunk and the slots it borrows for its buffers: the requested chunk halved until it fits,
@@ -6886,7 +6892,8 @@ int main(int argc, char** argv) {
             int64_t chunk = o.prefill_chunk;
             if (const int64_t k = plan_lend(chunk); k > 0) {
                 if (o.prefill_auto)
-                    std::fprintf(stderr, "strata serve: prompt chunk auto: %lld tokens\n", (long long) chunk);
+                    std::fprintf(stderr, "strata serve: prompt chunk auto: %lld tokens%s\n", (long long) chunk,
+                                 strata::prefill::Prefill::group_cap() ? " (the int8 group scratch holds one group's rows)" : "");
                 else if (chunk != o.prefill_chunk)
                     std::fprintf(stderr, "strata serve: prompt chunk %lld -> %lld tokens so its buffers fit in the "
                                          "expert cache\n", (long long) o.prefill_chunk, (long long) chunk);
@@ -12204,7 +12211,8 @@ int main(int argc, char** argv) {
             }
             if (o.prefill_auto) {
                 o.prefill_chunk = k > 0 ? chunk : 1024;
-                std::fprintf(stderr, "strata generate: prompt chunk auto: %lld tokens\n", (long long) o.prefill_chunk);
+                std::fprintf(stderr, "strata generate: prompt chunk auto: %lld tokens%s\n", (long long) o.prefill_chunk,
+                             strata::prefill::Prefill::group_cap() ? " (the int8 group scratch holds one group's rows)" : "");
             } else if (chunk != o.prefill_chunk) {
                 k = 0;                                 // a fixed chunk that does not fit: its own buffers, as before
             }

@@ -532,6 +532,9 @@ struct Prefill::Impl {
     void *Xq = nullptr, *Hq = nullptr;
     float* H = nullptr;
     int32_t *ids_identity = nullptr, *bounds_dev = nullptr;
+    int32_t* ids_rel = nullptr;               // row r of the chunk -> r - its group's first row (the gate/up's dst rows)
+    HostVec<int32_t> ids_rel_host;
+    std::vector<int32_t> grp_start, grp_of, grp_pos;   // the groups over `order`: starts (ng + 1), and expert j's group and place
     uint8_t *grp_gu = nullptr, *grp_d = nullptr;
     uint8_t* mring = nullptr;                 // MMQ_RING slots of MMQ_SLOT() bytes (chunks below STREAM_ALL_MIN)
     strata::gpu::Event* mgrp_used[2] = {};    // a group of ring slots read by its products, by the group's parity
@@ -839,6 +842,20 @@ uint64_t qsa_set_bytes(size_t T, int64_t cap, int64_t max_blocks, int64_t sel_ba
 // pack's experts keep the FP16 path), whether any layer keeps the FP16 path (a type MMQ lacks), and the largest
 // gate/up and down matrices a group buffer slot holds.  STRATA_PREFILL_MMQ=0: the FP16 path everywhere (the A/B).
 constexpr int MMQ_GROUP = 16;                  // experts per MMQ launch
+// The int8 products' group scratch (GU, H, Hq) holds one group's rows instead of the chunk's T x K when the group
+// cap is on (Prefill::set_group_cap: the chunk's planner, where the chunk-sized buffers do not fit the cache): a
+// group of up to MMQ_GROUP experts ends early when its rows would pass the cap (an expert alone has up to T rows,
+// so at least T).  Chunk-sized, GU/H/Hq took 0.69 GB of an 8192-token chunk's buffers and kept a 12 GB card
+// (RTX 4070) at that chunk for a 32K prompt; capped at a chunk's rows / 8 they take 0.1 GB.  Off where the
+// chunk-sized buffers fit: the smaller groups cost launches (B70, 1K: prefill 1167 -> 1039 tok/s), and a group's
+// tile shape rounds its sums, so the answer can differ from the uncapped run's.  STRATA_MMQ_GROUP_CAP=0 / 1: never /
+// always.
+bool g_group_cap = false;
+inline int64_t mmq_group_rows_cap(size_t T) {
+    static const int env = [] { const char* v = std::getenv("STRATA_MMQ_GROUP_CAP"); return v == nullptr ? -1 : (*v != '0' ? 1 : 0); }();
+    const bool on = env < 0 ? g_group_cap : env != 0;
+    return on ? std::max<int64_t>((int64_t) T, ((int64_t) T * K + 7) / 8) : (int64_t) T * K;
+}
 // Below STREAM_ALL_MIN the MMQ layers' experts are multiplied where their blobs land: a ring of two groups' slots in
 // one allocation (a group's slots MMQ_SLOT apart), the streamed ones copied there from the host and the resident ones
 // from the cache, so that a group's products read its experts in place.  A group's slots are released together, when
@@ -1046,7 +1063,8 @@ uint64_t moe_set_bytes(size_t T, int64_t n_expert) {
     Alloc a; a.count_only = true; bool ok = true;
     a.take<float>(T * n_expert, ok); a.take<float>(T * K, ok); a.take<int32_t>(T * K, ok); a.take<int32_t>(T * K, ok);
     a.take<int32_t>(T * K, ok);
-    a.take<float>(T * K * 1280, ok);
+    const size_t GR = mp.any && !mp.fallback ? (size_t) mmq_group_rows_cap(T) : T * K;   // as carve()
+    a.take<float>(GR * 1280, ok);
     a.take<float>(T * K * N, ok); a.take<float>(T * 640, ok);
     a.take<float>(T * 640, ok); a.take<uint16_t>(T * 640, ok); a.take<float>(T * N, ok); a.take<float>(T, ok);
     Alloc q8 = a;
@@ -1056,8 +1074,8 @@ uint64_t moe_set_bytes(size_t T, int64_t n_expert) {
     }
     if (mp.any) {
         q8.take<uint8_t>(mmq::q8_bytes((int64_t) (T * K), N), ok);
-        q8.take<float>(T * K * 640, ok);
-        q8.take<uint8_t>(mmq::q8_bytes((int64_t) (T * K), 640), ok);
+        q8.take<float>(GR * 640, ok);
+        q8.take<uint8_t>(mmq::q8_bytes((int64_t) GR, 640), ok);
     }
     return std::max(a.used, q8.used);
 }
@@ -1274,7 +1292,10 @@ bool Prefill::carve(size_t T, void* alloc) {
         m.logits = c.take<float>(T * m.g->n_expert, ok); m.w = c.take<float>(T * K, ok); m.ids = c.take<int32_t>(T * K, ok);
         m.slot_dev = c.take<int32_t>(T * K, ok); m.src_dev = c.take<int32_t>(T * K, ok);
         const MmqPlan& mp = mmq_plan();
-        m.GU = c.take<float>(T * K * 1280, ok);
+        // GU, H and Hq: one group's rows where every layer takes the int8 products (mmq_group_rows_cap); the chunk's
+        // where some layer's FP16 products write GU by the chunk's rows
+        const size_t GR = mp.any && !mp.fallback ? (size_t) mmq_group_rows_cap(T) : T * K;
+        m.GU = c.take<float>(GR * 1280, ok);
         m.Dm = c.take<float>(T * K * N, ok);
         m.sgate = c.take<float>(T * 640, ok); m.sup = c.take<float>(T * 640, ok); m.sh_h = c.take<uint16_t>(T * 640, ok);
         m.shared = c.take<float>(T * N, ok); m.sg = c.take<float>(T, ok);
@@ -1286,8 +1307,8 @@ bool Prefill::carve(size_t T, void* alloc) {
         m.Hh = mp.fallback ? c.take<uint16_t>(T * K * 640, ok) : nullptr;
         if (mp.any) {
             m.Xq = q8.take<uint8_t>(mmq::q8_bytes((int64_t) (T * K), N), ok);
-            m.H = q8.take<float>(T * K * 640, ok);
-            m.Hq = q8.take<uint8_t>(mmq::q8_bytes((int64_t) (T * K), 640), ok);
+            m.H = q8.take<float>(GR * 640, ok);
+            m.Hq = q8.take<uint8_t>(mmq::q8_bytes((int64_t) GR, 640), ok);
         }
         c.used = std::max(c.used, q8.used);
         if (base == nullptr) ok = false;
@@ -1313,7 +1334,9 @@ bool Prefill::carve(size_t T, void* alloc) {
     m.xb_dev = o.take<int32_t>((size_t) m.g->n_expert + 1, ok);
     if (mmq_plan().any) {
         m.ids_identity = o.take<int32_t>(T * K, ok);
-        m.bounds_dev = o.take<int32_t>((size_t) (2 * (m.g->n_expert + m.g->n_expert / MMQ_GROUP + 2)), ok);
+        m.ids_rel = o.take<int32_t>(T * K, ok);
+        // the bounds: n + 1 absolute, then MMQ_GROUP + 1 relative a group; a group may hold one expert (the rows cap)
+        m.bounds_dev = o.take<int32_t>((size_t) (m.g->n_expert + 1 + m.g->n_expert * (MMQ_GROUP + 1)), ok);
         m.tab_dev = o.take<int32_t>((size_t) (4 * m.g->n_expert), ok);
         if ((int64_t) T < STREAM_ALL_MIN) m.mring = o.take<uint8_t>(MMQ_RING * MMQ_SLOT(), ok);
         m.mgrp_live[0] = m.mgrp_live[1] = false;
@@ -1535,6 +1558,8 @@ bool Prefill::draft_kv(core::MtpDrafter& mtp, const float* R_rows, const int32_t
 }
 void Prefill::set_ring_override(int slots) { g_ring_override = std::clamp(slots,0,RING_MAX); }
 void Prefill::set_pinned_share(double share) { g_pinned_share = share; }
+void Prefill::set_group_cap(bool on) { g_group_cap = on; }
+bool Prefill::group_cap() { return g_group_cap; }
 void Prefill::set_expert_group(int g) { g_expert_group = std::clamp(g, 1, 64); }
 int Prefill::expert_group() { return g_expert_group; }
 double Prefill::pinned_share() { return g_pinned_share; }
@@ -2722,15 +2747,41 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         mmq::quantize_scatter(m.mixed, m.slot_dev, m.src_dev, m.Xq, mmq_gt, N, N, T, (int) K, m.cs);
                         // each group's rows: absolute bounds (gate/up reads the layer's rows), relative ones (down
                         // reads the group's own quantized H)
-                        const size_t n = order.size(), ng = (n + MMQ_GROUP - 1) / MMQ_GROUP;
+                        // the groups: up to MMQ_GROUP experts in `order`, ended early when the rows would pass the
+                        // group scratch's cap (mmq_group_rows_cap)
+                        const size_t n = order.size();
+                        const int64_t cap = mmq_group_rows_cap(T);
+                        m.grp_start.clear();
+                        m.grp_of.assign(n, 0);
+                        m.grp_pos.assign(n, 0);
+                        for (size_t j = 0, rows = 0; j < n; ++j) {
+                            const int64_t c = m.cnt[(size_t) order[j]];
+                            if (m.grp_start.empty() || j - (size_t) m.grp_start.back() >= (size_t) MMQ_GROUP ||
+                                (int64_t) rows + c > cap) {
+                                m.grp_start.push_back((int32_t) j);
+                                rows = 0;
+                            }
+                            m.grp_of[j] = (int32_t) (m.grp_start.size() - 1);
+                            m.grp_pos[j] = (int32_t) (j - (size_t) m.grp_start.back());
+                            rows += (size_t) c;
+                        }
+                        m.grp_start.push_back((int32_t) n);
+                        const size_t ng = m.grp_start.size() - 1;
                         m.bounds_host.resize(n + 1 + ng * (MMQ_GROUP + 1));
                         for (size_t j = 0; j < n; ++j) m.bounds_host[j] = m.off[(size_t) order[j]];
                         m.bounds_host[n] = (int32_t) rows_gpu;
-                        for (size_t g = 0; g < ng; ++g)
+                        m.ids_rel_host.resize((size_t) (T * K));
+                        for (size_t g = 0; g < ng; ++g) {
+                            const size_t j0 = (size_t) m.grp_start[g], j1 = (size_t) m.grp_start[g + 1];
                             for (size_t i = 0; i <= MMQ_GROUP; ++i)
                                 m.bounds_host[n + 1 + g * (MMQ_GROUP + 1) + i] =
-                                    m.bounds_host[std::min(n, g * MMQ_GROUP + i)] - m.bounds_host[g * MMQ_GROUP];
+                                    m.bounds_host[std::min(j1, j0 + i)] - m.bounds_host[j0];
+                            // the gate/up product writes a group's rows from 0 (GU holds one group): row r -> r - first
+                            for (int32_t r = m.bounds_host[j0]; r < m.bounds_host[j1]; ++r)
+                                m.ids_rel_host[(size_t) r] = r - m.bounds_host[j0];
+                        }
                         m.bounds_host.to_device(m.bounds_dev, m.cs);
+                        m.ids_rel_host.to_device(m.ids_rel, m.cs);
                     } else {
                         gather_rows16(m.mixed_h, m.src_dev, m.Xs, T * K, N, m.cs);
                         // APR: Hadamard-folded gate/up take H (s * x); Xs is this layer's own gathered copy (rotated in
@@ -2814,8 +2865,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                                 gu = slot_ptr((int) (j % MMQ_RING));
                                 dn = gu + f.down_off;
                             } else {
-                                gu = m.grp_gu + (j % MMQ_GROUP) * mmq_gub;
-                                dn = m.grp_d + (j % MMQ_GROUP) * mmq_db;
+                                gu = m.grp_gu + (size_t) m.grp_pos[j] * mmq_gub;
+                                dn = m.grp_d + (size_t) m.grp_pos[j] * mmq_db;
                             }
                             put(j, gu);
                             put(n + j, dn);
@@ -2911,12 +2962,14 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     // the MMQ group's last streamed copy into its ring slot (the copy queue is in order): the products
                     // wait for it once, not each copy for its own (upstream 653f0113's grouped staged walk); -1: none yet
                     int grp_last_copy = -1;
+                    int64_t grp_rows_last = 0;   // the rows of the last int8 group (GU and H hold that group's)
                     // one expert's products from its blob on the device; `slot` (a ring slot, or -1 for a resident
                     // expert) is released once the blob is read
                     auto compute = [&](size_t j, const uint8_t* blob_dev, int slot) -> bool {
                         pt.mark(kPfDequant, cs);
                         if (use_mmq) {
-                            const size_t q = j % MMQ_GROUP;
+                            const size_t q = (size_t) m.grp_pos[j];
+                            const bool last_of_group = j + 1 >= (size_t) m.grp_start[(size_t) m.grp_of[j] + 1];
                             const auto& f = lay.fmt[(size_t) l];
                             const bool in_place = mtab && direct[j];   // read in its cache slot: not copied
                             if (mmq_direct) {
@@ -2928,7 +2981,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                                 gg.blob[q] = in_place ? nullptr : blob_dev;
                                 gg.n = (int) q + 1;
                                 if (slot >= 0) gg_slots[gg_nslots++] = slot;
-                                if (q + 1 < MMQ_GROUP && j + 1 < order.size()) return true;
+                                if (!last_of_group) return true;
                                 flush();
                                 gg = mmq::GatherGroup{};
                             } else if (!in_place) {
@@ -2937,9 +2990,9 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                                                    mmq_db, m.grp_gu + q * mmq_gub, m.grp_d + q * mmq_db, m.cs);
                                 if (slot >= 0) { strata::gpu::event_record(m.used[slot], m.cs); m.used_of[slot] = slot; }
                             }
-                            if (q + 1 < MMQ_GROUP && j + 1 < order.size()) return true;
+                            if (!last_of_group) return true;
                             // the group's products: gate/up, swiglu, the group's H to int8, down
-                            const size_t j0 = j - q, g = j0 / MMQ_GROUP, n = order.size();
+                            const size_t j0 = j - q, g = (size_t) m.grp_of[j], n = order.size();
                             const int ngx = (int) (q + 1);
                             const int64_t r0 = m.bounds_host[j0], nr = m.bounds_host[j + 1] - r0;
                             int64_t maxr = 0;
@@ -2954,14 +3007,16 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                             mmq::Product gu;
                             gu.w = mmq_direct ? ring0 : m.grp_gu; gu.type = mmq_gt; gu.w_rows = 1280; gu.w_cols = N;
                             gu.expert_bytes = mmq_direct ? MMQ_SLOT() : mmq_gub;
-                            gu.n = ngx; gu.xq = m.Xq; gu.bounds = m.bounds_dev + j0; gu.ids = m.ids_identity;
+                            // the chunk's rows read (absolute bounds), the group's rows written from 0 (ids_rel)
+                            gu.n = ngx; gu.xq = m.Xq; gu.bounds = m.bounds_dev + j0; gu.ids = m.ids_rel;
                             gu.total_rows = T * K; gu.max_rows = maxr; gu.rows = nr; gu.dst = m.GU; gu.ld_dst = 1280;
                             const auto* tabs = reinterpret_cast<const uint8_t* const*>(m.tab_dev);
                             if (mtab) { gu.wtab = tabs + j0; gu.woff = 0; }
                             m.mmq_ctx->run(gu, m.cs);
-                            mmq::swiglu(m.GU + r0 * 1280, m.H + r0 * 640, nr, 640, !lay.native, m.cs);
+                            mmq::swiglu(m.GU, m.H, nr, 640, !lay.native, m.cs);
                             pt.mark(kPfGemmD, cs);
-                            mmq::quantize(m.H + r0 * 640, nullptr, m.Hq, mmq_dt, 640, 640, nr, m.cs);
+                            mmq::quantize(m.H, nullptr, m.Hq, mmq_dt, 640, 640, nr, m.cs);
+                            grp_rows_last = nr;
                             mmq::Product dn;
                             dn.w = mmq_direct ? ring0 + f.down_off : m.grp_d; dn.type = mmq_dt; dn.w_rows = N; dn.w_cols = 640;
                             dn.expert_bytes = mmq_direct ? MMQ_SLOT() : mmq_db;
@@ -3141,8 +3196,10 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                             return c;
                         };
                         // (the CPU's rows of GU and H are never written by the GPU: not counted, upstream 4322e241)
-                        const int64_t bgu = bad(m.GU, rows_gpu * 1280), bdm = bad(m.Dm, T * K * N), bbo = bad(m.bo, T * N);
-                        const int64_t bh = use_mmq && m.H ? bad(m.H, rows_gpu * 640) : -1;
+                        // (the int8 path's GU and H hold the last group's rows only)
+                        const int64_t bgu = bad(m.GU, (use_mmq ? grp_rows_last : rows_gpu) * 1280), bdm = bad(m.Dm, T * K * N),
+                                      bbo = bad(m.bo, T * N);
+                        const int64_t bh = use_mmq && m.H ? bad(m.H, grp_rows_last * 640) : -1;
                         static int64_t reported = -1;
                         if ((bgu || bdm || bbo || bh > 0) && reported != stats_.chunks) {
                             reported = stats_.chunks;

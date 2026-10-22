@@ -163,6 +163,10 @@ public:
     /// ring (a big one only pays when the copy engine, not the host copies, is the limit); set before bytes_needed.
     static void set_pinned_share(double share);
     static double pinned_share();
+    /// The int8 products' group scratch sized for one group's rows (on) or the chunk's (off, the default): the chunk
+    /// planner turns it on where the chunk-sized buffers do not fit.  Before any prompt; bytes_needed counts it.
+    static void set_group_cap(bool on);
+    static bool group_cap();
     /// #340: the streamed ring's slot count for chunks that stream every expert, instead of the pinned-share rule
     /// (0 = that rule). Set before any `bytes_needed`/`init` (both count the ring); STRATA_PREFILL_RING still wins.
     static void set_ring_override(int slots);
