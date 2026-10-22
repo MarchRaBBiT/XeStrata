@@ -46,12 +46,12 @@ CMake のオプション `STRATA_LICENSE` で選びます。
 
 - **free**（`-DSTRATA_LICENSE=free`）: intel/llvm の DPC++ 7 以降（SYCL ランタイムが libsycl 9）でビルドします。
   自由ソフトウェアだけで済み、oneAPI の環境は使いません。
-  `tools/intel_llvm_build.py` でソースからビルドしたもの（v7.1.1）で確かめています（[setup](#setup) を参照）。
+  `tools/intel_llvm_build.py` でソースからビルドしたもの（v7.2.0）で確かめています（[setup](#setup) を参照）。
   ディストリビューションのパッケージも 7 以降なら使えます。それより古いもの（Ubuntu 26.04 の `dpclang++` 6.2）は、CMake と setup が断ります。
   6.2 の SYCL ランタイムは Arc Pro B70 に XMX がないと報告し、prefill の経路が約 1.6 倍遅くなっていました。
   ROCm の HIP 付きでビルドした intel/llvm なら、`STRATA_HIP_ARCHS`（例 `gfx1200`）で AMD の GPU（RDNA2 以降: gfx103x、gfx11xx、gfx12xx）向けのコードも作ります。
   ROCm は自由ソフトウェアなので、free でも contrib-llvm でも同じです（[DEVTOOLS.ja.md](DEVTOOLS.ja.md#hipamd-の-gpu)）。
-  `auto`（既定）はカーネルの KFD が報告するこの PC の AMD の GPU を選び、`rocblas` はディストリビューションの rocBLAS がコードを持つ RDNA2 以降の GPU のうち、SYCL のコンパイラにターゲットのあるものをすべて選びます（パッケージはこれでビルドします。intel/llvm 7.1.1 には gfx1152 と gfx1153 のターゲットがありません）。
+  `auto`（既定）はカーネルの KFD が報告するこの PC の AMD の GPU を選び、`rocblas` はディストリビューションの rocBLAS がコードを持つ RDNA2 以降の GPU のうち、SYCL のコンパイラにターゲットのあるものをすべて選びます（パッケージはこれでビルドします。intel/llvm 7.2.0 には gfx1152 と gfx1153 のターゲットがありません）。
   ROCm のデバイスライブラリ（`ockl.bc`）は、AMD の `/opt/rocm*`、ディストリビューションのもの、SYCL のコンパイラ自身のもの（`tools/intel_llvm_build.py` が一緒にビルドします）の順に、AMD のカーネルを試しにビルドして、通った最初のものを使います。
   入っている ROCm のものが使えればそれを使い、コンパイラ自身のものは、ROCm のものがコンパイラより新しい LLVM で作られていて読めないとき（ROCm 7.14 など）に使います。
   どれも通らなければ、それぞれの理由（コンパイラより新しい LLVM のビットコード、コンパイラが求めるファイルがない）を出して止まります。
@@ -64,7 +64,7 @@ CMake のオプション `STRATA_LICENSE` で選びます。
   `STRATA_CUDA_ARCHS`（例 `sm_89`）で NVIDIA の GPU 向けのコードも作ります。
   XeStrata のソースは free のときと同じで、自由ソフトウェアのままです。
   ただし、ビルドに NVIDIA の CUDA ツールキット、実行に NVIDIA のドライバが要り、どちらも自由ソフトウェアではありません（XeStrata には含めません）。
-  Ubuntu 26.04 の `nvidia-cuda-toolkit` 12.4 と intel/llvm v7.1.1 で、sm_89 向けのビルドが通ることを確かめています。
+  Ubuntu 26.04 の `nvidia-cuda-toolkit` 12.4 と intel/llvm v7.2.0 で、sm_89 向けのビルドが通ることを確かめています。
   RTX 4070（sm_89）で動くことを確かめています。
   エンジンはメーカーのドライバーのライブラリを直接リンクせず、SYCL のランタイムと oneMath が、あるものだけを実行時に開きます。
   そのため、Intel の GPU だけの PC では NVIDIA のドライバーと CUDA がなくても、NVIDIA の GPU だけの PC では Level Zero がなくても動きます
@@ -83,7 +83,7 @@ CUDA ツールキットがいくつもある PC（ディストリビューショ
 `STRATA_CUDA_PATH` の既定 `auto` は、見つかったツールキット（`CUDA_PATH`・`CUDA_HOME`・`CUDA_ROOT`、`/usr/local/cuda-*`、`/opt/cuda`、`/usr/lib/cuda`、PATH の `nvcc`）を1つずつ試し、この PC の NVIDIA の GPU のうち多くにコードを作れるもの、次にその GPU により新しいアーキテクチャのコードを作れるもの、次に cuBLAS を持つもの、次に新しい版を選びます（`cmake/StrataCuda.cmake`）。
 GPU のコードと oneMath の cuBLAS は、選んだ1つを使います。cuBLAS のないツールキットでは cuBLAS の後端を作らず、密な積は自前のカーネルになります。
 各 GPU には、その GPU のアーキテクチャか、作れるうちでそれより古い最も新しいものを作り、ドライバーがその PTX を GPU に合わせてコンパイルします。
-intel/llvm 7.1.1 の SYCL は sm_90 より上の名前を持たないので、名前のないアーキテクチャ（RTX 50 の sm_120）は汎用の NVIDIA のターゲット（`nvptx64-nvidia-cuda` に `--cuda-gpu-arch`）で作ります。実行ファイルに1つしか入らないので、それが要る GPU のうち最も古いもののアーキテクチャです。CUDA 12.8 より前のツールキットでは作れず、sm_90 のコードになります。
+intel/llvm 7.2.0 の SYCL は sm_90 より上の名前を持たないので、名前のないアーキテクチャ（RTX 50 の sm_120）は汎用の NVIDIA のターゲット（`nvptx64-nvidia-cuda` に `--cuda-gpu-arch`）で作ります。実行ファイルに1つしか入らないので、それが要る GPU のうち最も古いもののアーキテクチャです。CUDA 12.8 より前のツールキットでは作れず、sm_90 のコードになります。
 oneMath の cuBLAS の後端は、1つのアーキテクチャしか受けないので、最も古いもので作ります（積そのものは cuBLAS の中で走ります）。
 CUDA 13.1 で sm_89 と汎用の sm_120 を作った実行ファイルは、4070 で sm_89 の像を選び、CTest 52 件が通りました。
 ツールキットが外した古い GPU（CUDA 13 の Volta など）は、それを扱うツールキットがあればそれを選び、なければ警告を出してその GPU のコードを作りません。
@@ -386,7 +386,7 @@ tools/package/build.sh fedora44 cuda13.4
 | cuda13.4 | Fedora 44 | NVIDIA のリポジトリの `cuda-toolkit-13-4` | sm_75、sm_80、sm_86、sm_89、sm_90 |
 | cuda12.4 | Ubuntu 26.04 | `nvidia-cuda-toolkit` | sm_60、sm_61、sm_70、sm_75、sm_80、sm_86、sm_89、sm_90 |
 
-AMD のコードは、どの版にも、そのディストリビューションの rocBLAS（ROCm 7.1）がコードを持つ GPU の分を入れます（intel/llvm 7.1.1 にターゲットのない gfx1152 と gfx1153 を除きます）。
+AMD のコードは、どの版にも、そのディストリビューションの rocBLAS（ROCm 7.1）がコードを持つ GPU の分を入れます（intel/llvm 7.2.0 にターゲットのない gfx1152 と gfx1153 を除きます）。
 
 | ディストリビューション | AMD のコード |
 | --- | --- |
@@ -396,7 +396,7 @@ AMD のコードは、どの版にも、そのディストリビューション�
 - cuda の版の名前は、ビルドに使った CUDA の版です。
   Fedora 44 向けの NVIDIA のリポジトリには CUDA 13.3 と 13.4 しかないので、Fedora では 13.4 を使います。CUDA 12 もないので、cuda12.4 は Ubuntu だけです。
 - CUDA 13 は Pascal（sm_60・sm_61）と Volta（sm_70）のコードを作らないので、P100、P40、V100 などは cuda12.4 を使います。
-- intel/llvm 7.1.1 の SYCL には sm_90 より上の名前がないので、RTX 50 などの新しい GPU は sm_90 の PTX をドライバーがコンパイルして動かします。
+- intel/llvm 7.2.0 の SYCL には sm_90 より上の名前がないので、RTX 50 などの新しい GPU は sm_90 の PTX をドライバーがコンパイルして動かします。
 - PTX はツールキットの版なので、ドライバーはその CUDA の版に対応している必要があります。
 
 ### Windows の 7z

@@ -31,7 +31,7 @@ from pathlib import Path
 
 # The SYCL runtime's DLLs a Windows engine loads (sycl-jit.dll, the runtime compiler, is not: 120 MB the engine does
 # not use).  ze_loader.dll comes with Intel's driver, nvcuda.dll and nvml.dll with NVIDIA's, amdhip64_7.dll with AMD's.
-SYCL_DLLS = ("sycl9.dll", "ur_win_proxy_loader.dll", "ur_loader.dll", "ur_adapter_cuda.dll", "ur_adapter_hip.dll",
+SYCL_DLLS = ("sycl9.dll", "ur_win_proxy_loader.dll", "ur_adapter_cuda.dll", "ur_adapter_hip.dll",
              "ur_adapter_level_zero.dll", "ur_adapter_level_zero_v2.dll", "xptifw.dll")
 ENGINE_EXES = ("strata.exe", "strata-device.exe", "strata-image.exe", "strata-vision-cpu.exe")
 # oneMath and its oneMKL backend (the engine's build folder's bin/), which loads oneMKL where the user installed it

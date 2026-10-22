@@ -518,7 +518,7 @@ The experts of the pieces given back are computed on the CPU: the same answers, 
 `GET /v1/status` shows the current size under `"vram"`.
 A reserve that cannot be met (the cache at its smallest size, or no VRAM from the driver for the next segment) still answers `200`: compare the answer's `vram_free_mib` with your `reserve_mib` (upstream #1034).
 While a request runs or waits, it waits up to 300 s, then answers `409`.
-Where the GPU's runtime has no virtual memory it is off and the cache stays as it started (Intel's Level Zero and NVIDIA's CUDA have it; AMD's HIP in intel/llvm 7.1.1 does not).
+Where the GPU's runtime has no virtual memory it is off and the cache stays as it started (Intel's Level Zero and NVIDIA's CUDA have it; AMD's HIP in intel/llvm 7.2.0 does not).
 
 ### Model files downloaded by hand, or from a mirror
 
@@ -1488,7 +1488,7 @@ The model files are not part of it; their licenses apply to them (below).
 - **[intel/llvm](https://github.com/intel/llvm)**'s DPC++ (Apache-2.0 WITH LLVM-exception): the free and contrib-llvm modes' compiler and SYCL runtime.
   It is not in the repository: `tools/intel_llvm_build.py` fetches the release and builds it,
   with XeStrata's fixes from `third_party/main/intel-llvm/patches/`, under intel/llvm's license. See `third_party/main/intel-llvm/LICENSE.TXT`.
-- **[ROCm's device libraries](https://github.com/ROCm/llvm-project/tree/rocm-7.2.4/amd/device-libs)** (University of Illinois/NCSA, by AMD): ocml, ockl and the others, which the code for AMD GPUs links.
+- **[ROCm's device libraries](https://github.com/ROCm/llvm-project/tree/f30ae3e6b680ad23dcf522e668c6d4c5c90838d0/amd/device-libs)** (University of Illinois/NCSA, by AMD): ocml, ockl and the others, which the code for AMD GPUs links.
   They are not in the repository: `tools/intel_llvm_build.py` fetches them from a release of ROCm's llvm-project and builds them with intel/llvm. See `third_party/main/rocm-device-libs/LICENSE.TXT`.
   The target features their build is given are transcribed from the `debian/rules` of Debian's [rocm-llvm](https://salsa.debian.org/rocm-team/rocm-llvm) package (Expat; its authors in NOTICE).
 - **Ideas** (references in the paper) from:

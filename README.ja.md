@@ -77,7 +77,7 @@ AMD の GPU では、prefill の密な行列積をディストリビューショ
 
 - **RX 6700 と RX 7600 では Fedora 44 を使ってください。** Ubuntu 26.04 の rocBLAS には、これらの GPU のコードがありません。
 - RX 6600（gfx1032）と RX 6500 / 6400（gfx1034）は、どちらのディストリビューションの rocBLAS にもコードがないので動きません。
-- gfx1152 と gfx1153（Ryzen AI の一部の内蔵 GPU）は、Fedora 44 の rocBLAS にはコードがありますが、XeStrata が使う intel/llvm 7.1.1 にそのターゲットがないので動きません。
+- gfx1152 と gfx1153（Ryzen AI の一部の内蔵 GPU）は、Fedora 44 の rocBLAS にはコードがありますが、XeStrata が使う intel/llvm 7.2.0 にそのターゲットがないので動きません。
 - 自分の GPU の gfx は、`xestrata --check` が GPU の名前の後ろに出します。
 - 表は、どちらのディストリビューションも ROCm 7.1 の rocBLAS のものです。確かめたのは RX 9060 XT（gfx1200）だけです。
 
@@ -448,7 +448,7 @@ RAM が足りていません。ほかのプログラムを閉じるか、小さ�
      CMake が XeStrata の変更の入ったフォーク（[MistVVK/oneMath](https://github.com/MistVVK/oneMath)、同じライセンス）から取得します。
    - [intel/llvm](https://github.com/intel/llvm) の DPC++（Apache-2.0 WITH LLVM-exception）: free と contrib-llvm のコンパイラ。
      XeStrata の修正（`third_party/main/intel-llvm/patches/`、同じライセンス）を当ててビルドし、パッケージにはその SYCL の実行時を入れます。
-   - AMD による [ROCm のデバイスライブラリ](https://github.com/ROCm/llvm-project/tree/rocm-7.2.4/amd/device-libs)（University of Illinois/NCSA）:
+   - AMD による [ROCm のデバイスライブラリ](https://github.com/ROCm/llvm-project/tree/f30ae3e6b680ad23dcf522e668c6d4c5c90838d0/amd/device-libs)（University of Illinois/NCSA）:
      intel/llvm と一緒にビルドし、AMD の GPU 向けのコードがリンクします。
      そのビルドに渡す機能の指定は、Debian の [rocm-llvm](https://salsa.debian.org/rocm-team/rocm-llvm) のパッケージ（Expat）の `debian/rules` から写しました。
    - 画面のフォント [Outfit](https://github.com/Outfitio/Outfit-Fonts)（SIL Open Font License 1.1）。

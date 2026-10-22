@@ -499,7 +499,7 @@ XeStrata は、GPU の空いている VRAM をエキスパートで埋め（エ�
 今の大きさは `GET /v1/status` の `"vram"` にあります。
 目標に届かなくても（キャッシュが最小の大きさに達したとき、ドライバーが次のかたまりの VRAM を出さないとき）答えは `200` なので、答えの `vram_free_mib` を `reserve_mib` と比べます（upstream #1034）。
 要求が動いているか待っているときは、300 秒まで待ってから `409` を返します。
-GPU の実行時ライブラリーが仮想メモリーを持たないときは使えず、起動時のまま動きます（Intel の Level Zero と NVIDIA の CUDA は持ち、intel/llvm 7.1.1 の AMD の HIP は持ちません）。
+GPU の実行時ライブラリーが仮想メモリーを持たないときは使えず、起動時のまま動きます（Intel の Level Zero と NVIDIA の CUDA は持ち、intel/llvm 7.2.0 の AMD の HIP は持ちません）。
 
 ### 手で取ってきたモデルのファイル、ミラーからのダウンロード
 
@@ -1460,7 +1460,7 @@ Strata と ggml / llama.cpp（どちらも MIT）から来たコードも XeStra
 - **[intel/llvm](https://github.com/intel/llvm)** の DPC++（Apache-2.0 WITH LLVM-exception）: free と contrib-llvm のコンパイラと SYCL のランタイム。
   リポジトリには含めず、`tools/intel_llvm_build.py` がリリースを取ってきてビルドします。
   そのとき当てる XeStrata の修正は `third_party/main/intel-llvm/patches/` にあり、intel/llvm と同じライセンスです。`third_party/main/intel-llvm/LICENSE.TXT` を参照。
-- **[ROCm のデバイスライブラリ](https://github.com/ROCm/llvm-project/tree/rocm-7.2.4/amd/device-libs)**（University of Illinois/NCSA、AMD）: ocml・ockl などの、AMD の GPU 向けのコードがリンクするライブラリ。
+- **[ROCm のデバイスライブラリ](https://github.com/ROCm/llvm-project/tree/f30ae3e6b680ad23dcf522e668c6d4c5c90838d0/amd/device-libs)**（University of Illinois/NCSA、AMD）: ocml・ockl などの、AMD の GPU 向けのコードがリンクするライブラリ。
   リポジトリには含めず、`tools/intel_llvm_build.py` が ROCm の llvm-project のリリースから取ってきて、intel/llvm と一緒にビルドします。`third_party/main/rocm-device-libs/LICENSE.TXT` を参照。
   そのビルドに渡す機能の指定は、Debian の [rocm-llvm](https://salsa.debian.org/rocm-team/rocm-llvm) のパッケージ（Expat、著作者は NOTICE）の `debian/rules` から写しました。
 - **参考にした考え方**（文献は論文にあります）:

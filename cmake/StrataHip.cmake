@@ -163,10 +163,6 @@ function(strata_hip_device_libs arch out)
     # compiler's own only where none of them builds
     get_filename_component(own "${CMAKE_CXX_COMPILER}" DIRECTORY)
     get_filename_component(own "${own}/../amdgcn/bitcode" ABSOLUTE)
-    if(CMAKE_CROSSCOMPILING AND WIN32)
-      # a Windows host's (its wchar_t of 16 bits), which tools/intel_llvm_build.py --windows makes
-      set(own "${STRATA_SYCL_WINDOWS}/amdgcn/bitcode")
-    endif()
     file(GLOB dirs /opt/rocm/amdgcn/bitcode /opt/rocm*/amdgcn/bitcode /opt/rocm*/core-*/amdgcn/bitcode
                    /opt/rocm*/lib/llvm/amdgcn/bitcode /opt/rocm*/core-*/lib/llvm/amdgcn/bitcode
                    /opt/rocm*/lib/llvm/lib/clang/*/lib/amdgcn/bitcode

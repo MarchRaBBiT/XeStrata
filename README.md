@@ -80,7 +80,7 @@ So XeStrata runs only on the GPUs the distribution's rocBLAS has code for.
 - **On an RX 6700 or an RX 7600, use Fedora 44.** Ubuntu 26.04's rocBLAS has no code for these GPUs.
 - The RX 6600 (gfx1032) and the RX 6500 / 6400 (gfx1034) do not run: neither distribution's rocBLAS has code for them.
 - gfx1152 and gfx1153 (some Ryzen AI integrated graphics) do not run: Fedora 44's rocBLAS has code for them, but the
-  intel/llvm 7.1.1 XeStrata builds with has no target for them.
+  intel/llvm 7.2.0 XeStrata builds with has no target for them.
 - `xestrata --check` shows your GPU's gfx after its name.
 - The table is that of ROCm 7.1's rocBLAS on both distributions. Only the RX 9060 XT (gfx1200) has been checked.
 
@@ -476,7 +476,7 @@ permission under GPL section 7, what goes in, and how to report).
    - [intel/llvm](https://github.com/intel/llvm)'s DPC++ (Apache-2.0 WITH LLVM-exception): the free and contrib-llvm
      modes' compiler, built with XeStrata's fixes (`third_party/main/intel-llvm/patches/`, under the same license);
      the packages carry its SYCL runtime;
-   - [ROCm's device libraries](https://github.com/ROCm/llvm-project/tree/rocm-7.2.4/amd/device-libs), by AMD
+   - [ROCm's device libraries](https://github.com/ROCm/llvm-project/tree/f30ae3e6b680ad23dcf522e668c6d4c5c90838d0/amd/device-libs), by AMD
      (University of Illinois/NCSA): built with intel/llvm, and linked into the code for AMD GPUs; the target features
      their build is given are transcribed from the `debian/rules` of Debian's
      [rocm-llvm](https://salsa.debian.org/rocm-team/rocm-llvm) package (Expat);

@@ -225,7 +225,7 @@ case "$distro" in
     # its own assignment, so that set -e stops on a failure (in a pipe the last command's status would hide it)
     # shellcheck disable=SC2046
     substvars=$(cd /stage && dpkg-shlibdeps -O --ignore-missing-info -l"$eng/lib" "$eng"/strata "$eng"/strata-image "$eng"/strata-vision-* \
-      $(find "$eng/lib" -type f \( -name 'libsycl.so*' -o -name 'libur_loader.so*' -o -name 'libumf.so*' \
+      $(find "$eng/lib" -type f \( -name 'libsycl.so*' -o -name 'libumf.so*' \
         -o -name 'libur_adapter_level_zero*' -o -name 'libonemath.so*' \)))
     shlibs=$(echo "$substvars" | sed -n 's/^shlibs:Depends=//p')
     if [ -z "$shlibs" ]; then

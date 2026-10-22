@@ -58,7 +58,7 @@ install(PROGRAMS ${STRATA_PACKAGE_VISION_DIR}/strata-vision-cpu ${STRATA_PACKAGE
 # (tools/intel_llvm_build.py builds no libsycl-jit: libsycl opens it only to compile kernels from source.)
 get_filename_component(_pkg_sycl_lib "${CMAKE_CXX_COMPILER}" DIRECTORY)
 get_filename_component(_pkg_sycl_lib "${_pkg_sycl_lib}/../lib" ABSOLUTE)
-set(_pkg_runtime libsycl.so.9 libur_loader.so.0 libur_adapter_level_zero.so.0 libur_adapter_level_zero_v2.so.0
+set(_pkg_runtime libsycl.so.9 libur_adapter_level_zero.so.0 libur_adapter_level_zero_v2.so.0
                  libumf.so.1)
 if(STRATA_LICENSE STREQUAL "contrib")
   list(APPEND _pkg_runtime libur_adapter_cuda.so.0)

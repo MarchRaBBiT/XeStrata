@@ -90,8 +90,9 @@ sudo dnf install hipcc rocm-hip-devel rocm-runtime-devel rocm-device-libs rocmin
   ROCm 7.14's packages from AMD install no ld.so.conf, so setup adds their `lib` to the engine's library path (the config's `lib_dirs`).
   Without it the build has no HIP.
 - Code for AMD GPUs needs libclc's libspirv for AMD and ROCm's device libraries.
-  A compiler reads bitcode of its own LLVM or an older one only (ROCm 7.14's device libraries are LLVM 23's, which intel/llvm 7.1.1's LLVM 22 cannot read),
-  so the script fetches the device libraries of the ROCm release on intel/llvm's LLVM (`amd/device-libs` of ROCm's llvm-project at `rocm-7.2.4`, under the University of Illinois/NCSA license), builds them in the same tree and installs them into `install/amdgcn/bitcode`.
+  A compiler reads bitcode of its own LLVM or an older one only (ROCm 10.1's device libraries are LLVM 24's, which intel/llvm 7.2.0's LLVM 23 cannot read),
+  so the script fetches the device libraries of the ROCm release on intel/llvm's LLVM (ROCm 7.14.1: `amd/device-libs` of ROCm's llvm-project at the commit TheRock's tag `therock-7.14.1` pins, under the University of Illinois/NCSA license), builds them in the same tree and installs them into `install/amdgcn/bitcode`.
+  It installs those a SYCL program's AMD code links (`ocml`, `ockl`, `oclc_*`) and `opencl`, whose presence the driver asks for.
   CMake takes the installed ROCm's device libraries where the compiler reads them, and these where it does not; when they fail to build, intel/llvm is still built.
 - In a Fedora 44 container (ROCm 7.1.1), a SYCL kernel compiled with `-fsycl-targets=amd_gpu_gfx1200` ran correctly on an RX 9060 XT (gfx1200).
   The HIP adapter reports 1 GiB as the largest allocation, but 12 GiB could be allocated.
@@ -113,7 +114,7 @@ python3 tools/intel_llvm_build.py --contrib --keep-build
   Packages that came in automatically with `rocm-dev` become `apt autoremove` candidates once it is gone; mark them with `sudo apt-mark manual hipcc libamdhip64-dev libhsa-runtime-dev rocminfo`.
 - The script applies fixes the release lacks to the sources before building, as the patches in `third_party/main/intel-llvm/patches/` (`NN-<id>.patch`, in order; under intel/llvm's Apache-2.0 WITH LLVM-exception), and records their ids in `install/XESTRATA.json`.
   A build of the same release without them is offered a rebuild.
-  There are sixteen fixes now; none of the first twelve is fixed in intel/llvm's `sycl` branch either (2026-10-08), nor the fifteenth (2026-10-14).
+  There are sixteen fixes now, for intel/llvm v7.2.0. Of the sixteen v7.1.1 took, libclc's AMD target name is no longer needed, libclc being built otherwise since v7.2.0, and the AMD FMA is fixed in v7.2.0 (2026-10-22).
   First, the CUDA and HIP adapters copied the table of sync points whole for every node they added to a command-buffer, so finalizing a SYCL graph took the square of its node count (a 2600-kernel graph: 90 ms on an RTX 4070, 4 ms fixed; Level Zero 2 ms).
   Second, the SYCL runtime gave every NVIDIA GPU the first NVIDIA image it found, whatever its architecture.
   With an executable carrying code for several architectures, a GPU older than that image did not run and a newer one ran older code.
@@ -127,38 +128,38 @@ python3 tools/intel_llvm_build.py --contrib --keep-build
   Sixth, xptifw, built in the tree, includes LLVM's CMake settings (`HandleLLVMOptions`) a second time, which defined the link job pool twice.
   With the links limited (`LLVM_RAM_PER_LINK_JOB`), Ninja refused the build file and the configuration failed (`duplicate pool 'link_job_pool'`).
   Fixed, each pool is defined once (`build-job-pools`); a fix to the build only, it asks no finished toolchain to be built again.
-  Seventh, libclc builds the AMD libspirv only for the target name `amdgcn--amdhsa`, but left that name out of the targets it accepts.
-  Configured with another name (`amdgcn-amd-amdhsa`), the build went through without an AMD libspirv, and no SYCL program for AMD GPUs compiled.
-  Fixed, `amdgcn--amdhsa` is accepted (`hip-libclc-target`; the `sycl` branch has reorganized libclc's AMD target).
-  Eighth, the HIP adapter, like the CUDA one in the third, left host memory registration out of its table as functions doing nothing, so the loader refused it with `UR_RESULT_ERROR_UNINITIALIZED` (`pinned_shared_test` and `elementwise_parity` failed).
+  Seventh, the HIP adapter, like the CUDA one in the third, left host memory registration out of its table as functions doing nothing, so the loader refused it with `UR_RESULT_ERROR_UNINITIALIZED` (`pinned_shared_test` and `elementwise_parity` failed).
   Fixed, it page-locks the memory with `hipHostRegister` and has the functions in its table (`hip-host-register`; CTest passes on an RX 9060 XT).
-  Ninth, the HIP adapter's queue-empty query took `hipErrorNotReady`, the answer for a stream still at work, as an error and logged it every time.
+  Eighth, the HIP adapter's queue-empty query took `hipErrorNotReady`, the answer for a stream still at work, as an error and logged it every time.
   Fixed, as in the CUDA adapter, it answers "not empty" without a log (`hip-queue-empty`).
-  Tenth, at a process's exit the SYCL runtime unregisters its device images from the executable's finalizers after the HIP runtime has torn itself down, and glibc aborted with "double free or corruption" when the HIP adapter unloaded the module (every SYCL program that had used an AMD GPU ended with SIGABRT).
+  Ninth, at a process's exit the SYCL runtime unregisters its device images from the executable's finalizers after the HIP runtime has torn itself down, and glibc aborted with "double free or corruption" when the HIP adapter unloaded the module (every SYCL program that had used an AMD GPU ended with SIGABRT).
   Fixed, a program released after the exit began is not unloaded (`hip-exit-unload`).
-  Eleventh, libclc took an amdgcn GPU for one without FMA instructions unless the compiler defined `__HAS_FMAF__`.
-  The AMD libspirv is built for no processor and lacks it, so `sycl::fma` and the math built on it ran a software FMA on every AMD GPU (the engine's DeltaNet recurrence about 95 µs a token on an RX 9060 XT).
-  Every amdgcn GPU has `v_fma_f32`: fixed, only r600 keeps the software FMA (`hip-libclc-fma`).
-  Twelfth, a kernel bundle (`get_kernel_bundle`) of a program with code for several AMD architectures got the first architecture's image, which the GPU refused (`hipErrorInvalidImage`).
+  Tenth, a kernel bundle (`get_kernel_bundle`) of a program with code for several AMD architectures got the first architecture's image, which the GPU refused (`hipErrorInvalidImage`).
   AMD images carry no `compile_target`; the runtime asked the HIP adapter about each image alone without handing it the image, and the adapter falls back on the first AMD image when none matches.
   An engine for many AMD GPUs, as the packages build it, stopped with no usable GPU (kernels submitted to a queue were not affected: that path hands the adapter all the images and their bytes).
   Fixed, the runtime hands the HIP adapter the image too, as it does the CUDA one, and the adapter does not fall back on a clang offload bundle without the GPU's architecture (`hip-bundle-arch`).
-  Thirteenth, a program with code for several NVIDIA or AMD architectures had another architecture's device code under each one's name.
+  Eleventh, a program with code for several NVIDIA or AMD architectures had another architecture's device code under each one's name.
   SYCL's bundle IDs carry the GPU without an environment field before it (`sycl-amdgcn-amd-amdhsa-gfx1030`), and clang-offload-bundler read the GPU as the triple's environment.
   The target ID was empty and every architecture of a triple matched every other, so unbundling an object or an archive gave each architecture's link the triple's first unclaimed entry in hash order.
   The packages' engine had gfx1200's code under gfx1030, gfx1030's under gfx1101 and gfx1100's under gfx1201, which an RX 9070 XT refused as an illegal instruction.
   Fixed, a fifth component that names a GPU is read as the target ID (`offload-bundle-arch`).
-  Fourteenth, the HIP adapter answered a GPU's free memory (SYCL's `ext_intel_free_memory`) with `hipMemGetInfo` without making that GPU current, so every AMD GPU reported the free memory of the thread's current one.
+  Twelfth, the HIP adapter answered a GPU's free memory (SYCL's `ext_intel_free_memory`) with `hipMemGetInfo` without making that GPU current, so every AMD GPU reported the free memory of the thread's current one.
   A layer split over two AMD GPUs saw the first stage's free memory, nearly all of it held by its expert cache, on the second stage, which found no room for its own cache and stopped.
   Fixed, the GPU is made current before the query, as the adapter's other calls do (`hip-mem-free-device`; the CUDA adapter makes the GPU's context current for every query).
-  Fifteenth, where the system's Level Zero is older than 1.32 (Ubuntu 26.04's libze 1.28, where the packages are built), the Level Zero adapters link the loader statically, and the static loader hands the stable record and replay graph functions on to the system's loader at run time.
+  Thirteenth, where the system's Level Zero is older than 1.32 (Ubuntu 26.04's libze 1.28, where the packages are built), the Level Zero adapters link the loader statically, and the static loader hands the stable record and replay graph functions on to the system's loader at run time.
   The 1.28 loader lacks them, and the static one answered the first call UNSUPPORTED and called a null pointer on the next (the static loader's ze_libapi.cpp, 1.32 to 1.34).
   The adapter took the functions as there, the static loader's own entry points being not null, and with a driver that announces the stable graph extension (compute-runtime 26.35.39758.10) the query made at every submission to a queue (`urQueueIsGraphCaptureEnabledExp` in `handler::finalize`) went through.
   oneMKL's GEMM takes that path, so with oneMKL installed the engine stopped with SIGSEGV at its first product on an Arc Pro B70 (XeStrata issue #12).
   Fixed, with the static loader the graph functions are used only when the system's loader (`libze_loader.so.1`, `ze_loader.dll`) has them (`l0-static-graph`).
-  Sixteenth, the device libraries (libdevice) depended on the compiler being built and all its tools (`sycl-compiler`) even when `LIBCLC_CUSTOM_LLVM_TOOLS_BINARY_DIR` gives the tools that compile them.
+  Fourteenth, the device libraries (libdevice) depended on the compiler being built and all its tools (`sycl-compiler`) even when `LIBCLC_CUSTOM_LLVM_TOOLS_BINARY_DIR` gives the tools that compile them.
   The cross build for Windows (`--windows`) built a Windows `clang.exe` and tools nobody runs, most of its time.
   Fixed, with the tools given they depend on the SYCL headers alone (`build-libdevice-custom-tools`; a build without them is unchanged). A fix to the build only, it asks no finished toolchain to be built again.
+  Fifteenth, v7.2.0's `configure.py` builds libclc's AMD libspirv as the LLVM runtime target `amdgcn-amd-amdhsa-llvm`, into `lib/clang/<N>/lib/amdgcn-amd-amdhsa-llvm`, but the driver compiles SYCL's AMD device code for `amdgcn-amd-amdhsa` and looks for `libspirv.l64.signed_char.bc` under that name.
+  Every compile for an AMD GPU stopped ("cannot find 'libspirv.l64.signed_char.bc'"), and with the folder linked under the other name, every link warned that the two modules' targets differ.
+  Fixed, the AMD libspirv is built for `amdgcn-amd-amdhsa` (`hip-libclc-triple`).
+  Sixteenth, since v7.2.0 the SYCL build refuses the CUDA and HIP adapters unless libclc is built as an LLVM runtime.
+  The cross build for Windows builds the runtime alone, with the contrib-llvm toolchain's device tools and its libspirv, and builds no libclc, so its configuration stopped.
+  Fixed, with the tools given (`LIBCLC_CUSTOM_LLVM_TOOLS_BINARY_DIR`) the adapters are configured without libclc (`build-cross-adapters`; a build without them is unchanged). A fix to the build only, it asks no finished toolchain to be built again.
   The CUDA fixes ask only the contrib-llvm toolchain to be built again, the HIP ones only a toolchain with HIP (or one that would have it, ROCm being installed now).
   `offload-bundle-arch` and `l0-static-graph` ask every toolchain.
 - The script configures the build tree again when it was configured with other values of its options (the install folder, libclc's targets and others).
@@ -213,7 +214,7 @@ It needs three things:
 - lld-link (LLVM's `lld`): `sudo apt install lld-21` (21.1)
 - the MSVC CRT and the Windows SDK: downloaded from Microsoft with [xwin](https://github.com/Jake-Shadle/xwin) (0.10.0).
   They are not free software; Microsoft's license is accepted with `--accept-license`. They do not go into the repository.
-- intel/llvm's Windows SYCL tree (headers, import libraries, the runtime's DLLs): `tools/intel_llvm_build.py --windows` cross-builds the release XeStrata uses (v7.1.1), with XeStrata's patches, for Windows here ("intel/llvm for Windows" below).
+- intel/llvm's Windows SYCL tree (headers, import libraries, the runtime's DLLs): `tools/intel_llvm_build.py --windows` cross-builds the release XeStrata uses (v7.2.0), with XeStrata's patches, for Windows here ("intel/llvm for Windows" below).
 
 ```sh
 mkdir -p .tools/xwin
@@ -247,13 +248,13 @@ ninja -C build/win $(git diff --name-only HEAD -- '*.cpp' | sed "s|^|$PWD/|; s|$
 ### intel/llvm for Windows
 
 `tools/intel_llvm_build.py --windows` builds the SYCL runtime for Windows from the same clone as the Linux one, into `.tools/intel-llvm-win/install`.
-It builds the parts the engine uses only (`sycl9.dll`, UR's loader and its CUDA, HIP and Level Zero adapters, `xptifw.dll`, the device libraries, the NVIDIA and AMD libspirv, the headers and the import libraries): no Debug DLLs, no `clang.exe` and no sycl-jit.
+It builds the parts the engine uses only (`sycl9.dll` with UR's loader in it, the CUDA, HIP and Level Zero adapters, `xptifw.dll`, SYCL's device libraries (libdevice), the headers and the import libraries): no Debug DLLs, no `clang.exe` and no sycl-jit.
 
-- The clang-cl of the toolchain `--contrib` built, of the same release, compiles and lld-link links. The tools that make the device libraries and libspirv are that toolchain's too (`--contrib`'s build also copies `opt`, `llvm-as` and `libclc-remangler`, which it does not install, into its install folder). No compiler is built, for Windows or for this machine. Build `--contrib` first.
+- The clang-cl of the toolchain `--contrib` built, of the same release, compiles and lld-link links. The tools that make the device libraries are that toolchain's too (`--contrib`'s build also copies `opt`, which it does not install, into its install folder). No compiler is built, for Windows or for this machine. Build `--contrib` first.
 - The MSVC CRT and the Windows SDK are xwin's splat (`--xwin`, by default `.tools/xwin/sdk`). `llvm-lib`, `llvm-rc`, `llvm-mt` and `llvm-ml` are the distribution's LLVM's (`sudo apt install llvm`).
 - The Windows CUDA headers and import libraries the CUDA adapter links come from NVIDIA's redistributable archives (CUDA 12.4.1's `cuda_cudart`, `cuda_nvml_dev` and `cuda_cccl`). They are not free software and do not go into the 7z.
 - The HIP adapter (AMD GPUs) is built where this machine has ROCm's HIP (Ubuntu's `libamdhip64-dev`) and `--contrib` was built with the HIP target. Its headers are that HIP's (MIT; the license text in `install/licenses/hip-headers.txt`), and the `amdhip64.lib` it links is an import library of `amdhip64_7.dll`, made with `llvm-dlltool` from the C names Linux's `libamdhip64.so.7` exports. AMD's driver (Adrenalin 26.5.1 and later) puts `amdhip64_7.dll` into System32.
-- The Windows l32 libspirv it makes (the NVIDIA and the AMD one) is also copied into the `--contrib` toolchain's `lib/clang/<version>/lib/libclc`: the ones built on Linux have another `wchar_t` and do not link into Windows code, and `-fsycl-libspirv-path` names one file only, so building for NVIDIA and AMD together needs them in the compiler's own folder. Linux builds take the l64 ones and do not change.
+- A Windows engine's code for NVIDIA and AMD GPUs links the Windows l32 libspirv the Linux toolchain builds since v7.2.0 (`lib/clang/<version>/lib/<target>`) and that toolchain's ROCm device libraries: neither carries `wchar_size`, so neither is built again for Windows.
 - It takes about three minutes on the development machine (28 threads).
 
 For NVIDIA GPUs, configure the cross build with `-DSTRATA_LICENSE=contrib -DSTRATA_CUDA_ARCHS=<the GPU's architecture> -DSTRATA_CUDA_PATH=<a CUDA toolkit>`, a CUDA toolkit no newer than the version the target PC's driver supports.
@@ -263,7 +264,7 @@ For oneMKL add `-DSTRATA_ONEMKL=ON -DMKL_ROOT=<oneMKL for Windows' Library/>`: o
 
 ### Running on a Windows PC
 
-Put `build/win`'s `strata*.exe` in one folder with `.tools/intel-llvm-win/install/bin`'s `sycl9.dll`, `ur_win_proxy_loader.dll`, `ur_loader.dll`, the adapter of the GPU (`ur_adapter_cuda.dll` for NVIDIA, `ur_adapter_level_zero.dll` for Intel) and `xptifw.dll`.
+Put `build/win`'s `strata*.exe` in one folder with `.tools/intel-llvm-win/install/bin`'s `sycl9.dll`, `ur_win_proxy_loader.dll`, the adapter of the GPU (`ur_adapter_cuda.dll` for NVIDIA, `ur_adapter_level_zero.dll` for Intel) and `xptifw.dll`.
 When `strata-device.exe --list-devices` lists the GPU, the engine runs.
 
 ## Intel SDE (the AVX-512 paths)
