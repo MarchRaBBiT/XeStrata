@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Niko1221 and the Strata contributors
-// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 MistVVK and the XeStrata contributors
+// SPDX-License-Identifier: LGPL-3.0-or-later AND MIT
 // src/spec/draft_policy.cpp - see include/strata/spec/draft_policy.hpp.
 #include "strata/spec/draft_policy.hpp"
 
@@ -41,7 +42,12 @@ double DraftPolicy::lookup_rate(int match) const {
 double DraftPolicy::cost_ms(int t) const {
     t = std::clamp(t, 1, kMaxT);
     if (cost_n_[t] > 0) return cost_[t];
-    // scale from the measured sizes, weighting each by how often it was seen
+    // scale from the nearest measured size below: a round's fixed part flattens the measured curve at its small end,
+    // and scaled from there the wider sizes came out too dear to be tried (Gyro-M on the RX 9060 XT: 46 ms at one
+    // token, 57 at four, the six guessed at 98 against its 74)
+    for (int u = t - 1; u >= 1; --u)
+        if (cost_n_[u] > 0) return cost_[u] * kShape[t] / kShape[u];
+    // none below: scale from the measured sizes, weighting each by how often it was seen
     double num = 0.0, den = 0.0;
     for (int u = 1; u <= kMaxT; ++u)
         if (cost_n_[u] > 0) {
