@@ -63,11 +63,11 @@ std::mutex g_mutex;
 std::unordered_map<sycl::device, Backend> g_backends;
 
 // Windows: the GPU makers' libraries the 7z does not carry, where their installers put them, for oneMath's backends to
-// load: after the PATH the user set (setvars.bat, a Python environment's), oneAPI's mkl and tbb folders (ONEAPI_ROOT,
-// which the installer sets, else its default folder), MKLROOT's and the Library\bin pip's oneMKL makes in the Python the
-// 7z carries for oneMKL; the CUDA toolkit's (CUDA_PATH) and the
-// folders pip's nvidia-cublas-cu12 and nvidia-cuda-runtime-cu12 make in the Python the 7z carries (<7z>\python beside
-// <7z>\app\engine) for cuBLAS; the folder AMD's rocm-sdk-libraries-<family> makes in that Python for rocBLAS and
+// load: before the PATH the user set, oneMKL of the series the engine was built with (the Library\bin pip's oneMKL makes
+// in the Python the 7z carries, <7z>\python beside <7z>\app\engine, and oneAPI's mkl folder of the series, under
+// ONEAPI_ROOT, which the installer sets, else its default folder); after it oneAPI's tbb folder and MKLROOT's for
+// oneMKL; the CUDA toolkit's (CUDA_PATH) and the folders pip's nvidia-cublas-cu12 and nvidia-cuda-runtime-cu12 make in
+// that Python for cuBLAS; the folder AMD's rocm-sdk-libraries-<family> makes in that Python for rocBLAS and
 // hipBLASLt (free software, but built for each GPU family; the import libraries name its DLLs,
 // tools/package/win_rocm.sh).  Without them the backend does not load and the products take XeStrata's own kernels.
 void add_library_dirs() {
@@ -77,9 +77,17 @@ void add_library_dirs() {
         std::vector<std::string> roots;
         if (const char* r = std::getenv("ONEAPI_ROOT")) roots.emplace_back(r);
         roots.emplace_back("C:\\Program Files (x86)\\Intel\\oneAPI");
+        // oneMKL of the series the engine was built with first, before the PATH's (another series's SYCL library may
+        // not load on the engine's SYCL runtime: setup.py's ONEMKL_SERIES): pip's in the Python the 7z carries and
+        // oneAPI's folder of the series
+        std::vector<std::string> first;
         std::vector<std::string> dirs;
-        for (const std::string& r : roots)
-            for (const char* sub : {"mkl\\latest\\bin", "tbb\\latest\\bin"}) dirs.push_back(r + "\\" + sub);
+        for (const std::string& r : roots) {
+#if defined(STRATA_ONEMKL_SERIES)
+            first.push_back(r + "\\mkl\\" + std::string(STRATA_ONEMKL_SERIES) + "\\bin");
+#endif
+            dirs.push_back(r + "\\tbb\\latest\\bin");
+        }
         if (const char* m = std::getenv("MKLROOT")) dirs.push_back(std::string(m) + "\\bin");
         if (const char* c = std::getenv("CUDA_PATH")) dirs.push_back(std::string(c) + "\\bin");
         char exe[MAX_PATH] = {};
@@ -88,7 +96,7 @@ void add_library_dirs() {
                 std::filesystem::path(exe).parent_path().parent_path().parent_path() / "python" / "Lib" / "site-packages";
             for (const char* sub : {"cublas", "cuda_runtime"}) dirs.push_back((site / "nvidia" / sub / "bin").string());
             // pip's oneMKL (onemkl-sycl-blas, mkl, tbb): their DLLs in the Python's Library\bin
-            dirs.push_back((site.parent.parent / "Library" / "bin").string());
+            first.insert(first.begin(), (site.parent.parent / "Library" / "bin").string());
             // AMD's rocm-sdk-libraries-<family> (rocBLAS and hipBLASLt): one folder for the GPU family it was made for
             std::error_code ec;
             for (const auto& e : std::filesystem::directory_iterator(site, ec))
@@ -96,11 +104,13 @@ void add_library_dirs() {
                     dirs.push_back((e.path() / "bin").string());
         }
         const char* old = std::getenv("PATH");
-        std::string path = old != nullptr ? old : "";
-        for (const std::string& d : dirs) {
-            std::error_code ec;
+        std::string path;
+        std::error_code ec;
+        for (const std::string& d : first)
+            if (std::filesystem::is_directory(d, ec)) path += d + ";";
+        path += old != nullptr ? old : "";
+        for (const std::string& d : dirs)
             if (std::filesystem::is_directory(d, ec)) path += ";" + d;
-        }
         _putenv_s("PATH", path.c_str());
     });
 #endif

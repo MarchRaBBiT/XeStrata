@@ -1169,11 +1169,12 @@ def amd_elsewhere() -> str:
 # optional conversation compression's), and each GPU maker's (Intel's oneMKL in the contrib mode only, NVIDIA's in the
 # contrib mode only).  On Arch the
 # Vulkan ICD is the GPU maker's own package, not one mesa-vulkan-drivers carries for both.
-# oneMKL's series the contrib mode takes (Intel's repositories carry several side by side): the newest whose SYCL
-# library runs on the SYCL runtime XeStrata builds with (intel/llvm 7.1.1's libsycl.so.9); 2026.2's needs 4 functions
-# that runtime lacks (sycl::detail::defaultAsyncHandler among them) and does not load.  The packages take it too
-# (tools/package/container.sh, windows.sh).
-ONEMKL_SERIES = "2026.1"
+# oneMKL's series the contrib mode takes, and only it (Intel's repositories carry several side by side): one whose SYCL
+# library runs on the SYCL runtime XeStrata builds with, which tools/intel_llvm_build.py's TAG fixes (2026.2's needs
+# functions intel/llvm v7.1.1's libsycl.so.9 lacked, sycl::detail::defaultAsyncHandler among them: v7.2.0).  Raised
+# with TAG.  The packages take it too (tools/package/container.sh, windows.sh), and setup takes a oneMKL of it only
+# (mkl_root, windows_intel_libs; on Windows the engine, which reads its series from the oneMKL it was built with).
+ONEMKL_SERIES = "2026.2"
 PACKAGES = {
     "ubuntu": {
         "base": "python3-venv git cmake ninja-build build-essential lld libhwloc-dev libzstd-dev libvulkan-dev glslc "
@@ -1422,19 +1423,21 @@ def windows_nvidia_libs() -> list:
 
 def windows_intel_libs() -> list:
     """pip's packages of oneMKL (BUILD.json's runtime "onemkl_pip": the version the 7z was built with, without the
-    SYCL runtime they depend on, which the 7z carries) when the engine would not find it on Windows, where it looks
-    (add_library_dirs in src/prefill/gemm.cpp): the PATH, oneAPI's installer's folders (ONEAPI_ROOT, its default),
-    MKLROOT's, the Python beside the engine (pip's Library/bin); empty when it would."""
+    SYCL runtime they depend on, which the 7z carries) when the engine would not find oneMKL of that series on Windows
+    where it looks first (add_library_dirs in src/prefill/gemm.cpp): pip's in the Python beside the engine (its
+    dist-info's version), oneAPI's installer's folder of the series (ONEAPI_ROOT, its default); empty when it would.
+    Another series (the PATH's, MKLROOT's, oneAPI's latest) is not counted: its SYCL library may not load."""
     names = (packaged_engine().get("runtime") or {}).get("onemkl_pip") or []
-    dirs = [Path(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+    version = next((n.split("==", 1)[1] for n in names if n.startswith("onemkl-sycl-blas==")), "")
+    series = ".".join(version.split(".")[:2])
+    site = Path(sys.executable).parent / "Lib" / "site-packages"
+    if version and any(site.glob(f"onemkl_sycl_blas-{version}.dist-info")):
+        return []
     for root in (os.environ.get("ONEAPI_ROOT"), r"C:\Program Files (x86)\Intel\oneAPI"):
-        if root:
-            dirs.append(Path(root) / "mkl" / "latest" / "bin")
-    if os.environ.get("MKLROOT"):
-        dirs.append(Path(os.environ["MKLROOT"]) / "bin")
-    dirs.append(Path(sys.executable).parent / "Library" / "bin")
-    found = any(next(d.glob("mkl_sycl_blas*.dll"), None) for d in dirs if d.is_dir())
-    return [] if found else names
+        d = Path(root) / "mkl" / series / "bin" if root and series else None
+        if d and d.is_dir() and next(d.glob("mkl_sycl_blas*.dll"), None):
+            return []
+    return names
 
 
 # AMD's Python packages for Windows with rocBLAS and hipBLASLt (rocm-sdk-libraries-<family>, free software), one per
@@ -2741,13 +2744,29 @@ def packaged_engine() -> dict:
     return meta
 
 
+def mkl_series(root) -> str | None:
+    """The series of the oneMKL in `root` ("2026.2"): its folder's name (/opt/intel/oneapi/mkl/2026.2), else its
+    mkl_version.h's INTEL_MKL_VERSION (20260200)."""
+    name = Path(root).resolve().name
+    if re.fullmatch(r"\d{4}\.\d+", name):
+        return name
+    try:
+        text = (Path(root) / "include" / "mkl_version.h").read_text(errors="replace")
+        v = int(re.search(r"#define\s+INTEL_MKL_VERSION\s+(\d+)", text).group(1))   # type: ignore[union-attr]
+    except (OSError, AttributeError, ValueError):
+        return None
+    return f"{v // 10000}.{v // 100 % 100}"
+
+
 def mkl_root() -> str | None:
-    """Where oneMKL is (the contrib modes' dense products, the SYCL image encoder): oneAPI's MKLROOT, else oneAPI's
-    folder of ONEMKL_SERIES, else its latest (a newer series may not load: ONEMKL_SERIES)."""
-    root = (oneapi_env() or {}).get("MKLROOT") or next(
-        (r for r in (f"/opt/intel/oneapi/mkl/{ONEMKL_SERIES}", "/opt/intel/oneapi/mkl/latest") if Path(r).is_dir()),
-        "")
-    return root if root and Path(root, "lib").is_dir() else None
+    """Where oneMKL of ONEMKL_SERIES is (the contrib modes' dense products, the SYCL image encoder): the first of
+    oneAPI's MKLROOT, oneAPI's folder of the series and its latest that is of the series, else None (another series's
+    SYCL library may not load on the engine's runtime: ONEMKL_SERIES)."""
+    for root in ((oneapi_env() or {}).get("MKLROOT"), f"/opt/intel/oneapi/mkl/{ONEMKL_SERIES}",
+                 "/opt/intel/oneapi/mkl/latest"):
+        if root and Path(root, "lib").is_dir() and mkl_series(root) == ONEMKL_SERIES:
+            return root
+    return None
 
 
 def compiler_version(cxx, env) -> str:
