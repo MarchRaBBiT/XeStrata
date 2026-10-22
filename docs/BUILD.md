@@ -313,6 +313,10 @@ It prints other choices too, as in `./setup.sh --packages fedora44/intel,amd --l
 | NVIDIA GPUs (contrib-llvm) | `nvidia-cuda-toolkit` and NVIDIA's driver | `cuda-toolkit-13-4` (NVIDIA's CUDA repository) and NVIDIA's driver | `cuda` and NVIDIA's driver |
 
 - The packages starting with `intel-oneapi-` are in Intel's oneAPI repository (Intel's guides show how to add it: [APT](https://www.intel.com/content/www/us/en/docs/oneapi-toolkit/installation-guide-linux/latest/install-oneapi-toolkit-with-apt.html), [DNF](https://www.intel.com/content/www/us/en/docs/oneapi-toolkit/installation-guide-linux/latest/install-oneapi-toolkit-with-yum-dnf.html)).
+- Intel GPU drivers (`libze-intel-gpu1` and the rest) ship old on Ubuntu 24.04/26.04 (26.04 has compute-runtime 26.05 and IGC 2.28).
+  Below compute-runtime 26.22 a driver state can refuse device allocations while the VRAM is free (Intel's [compute-runtime #916](https://github.com/intel/compute-runtime/issues/916); the driver works around an xe kernel bug fixed in Linux 7.1 — on XeStrata's side, [#34](https://github.com/MistVVK/XeStrata/issues/34)).
+  On Ubuntu 24.04/26.04 with the HWE kernel, setup points to [Intel's graphics PPA](https://launchpad.net/~kobuk-team/+archive/ubuntu/intel-graphics) (a newer compute-runtime and IGC) and stops the start until it is updated (`--old-driver` starts anyway).
+  On the GA kernel it recommends moving to the HWE kernel with the PPA, or Fedora 44 / Podman (whose IGC is 2.32 or later; [Troubleshooting](DETAILS.md#troubleshooting)).
 - The common row's Vulkan packages (`libvulkan-dev` and the others) are for the GPU image encoder, and `libblosc2-dev` (`blosc2-devel`) for compressing the saved conversations (optional; [`conversation_save_compress`](DETAILS.md#keeping-parked-conversations-across-restarts-opt-in)).
 - The AMD row's `clang-21` and `libclang-rt-21-dev` (on Fedora `rocm-clang` and `rocm-clang-runtime-devel`: ROCm's clang and its runtime) compile nothing (intel/llvm does the compiling).
   HIP's CMake package, which oneMath's rocBLAS backend reads, asks the compiler for clang's runtime builtins (`libclang_rt.builtins`) to add them to the link.

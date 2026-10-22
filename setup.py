@@ -1360,6 +1360,19 @@ def print_packages(spec: str, mode: str) -> int:
     return 0
 
 
+# Intel's graphics packages newer than the distribution's, from the PPA the compute-runtime project names
+# (launchpad.net/~kobuk-team/+archive/ubuntu/intel-graphics; the same packages' .deb are on its GitHub releases).
+# Ubuntu 26.04 ships compute-runtime 26.05 and IGC 2.28: below the 26.22 that fixes Level Zero refusing device
+# memory while the VRAM is free (intel/compute-runtime #916, XeStrata #34 - only a host reboot clears it), and in
+# the IGC 2.27-2.30 the engine has to work around.  The PPA's resolute suite carries 26.31 and IGC 2.40.
+INTEL_GRAPHICS_REPO = {
+    "ubuntu": "sudo add-apt-repository -y ppa:kobuk-team/intel-graphics\n"
+              "  sudo apt update\n"
+              "  sudo apt install libze-intel-gpu1 libze1 intel-metrics-discovery intel-opencl-icd clinfo intel-gsc\n"
+              "  sudo apt install libze-dev intel-ocloc",
+}
+
+
 # Adding Intel's oneAPI repository (oneMKL) and NVIDIA's CUDA one on Fedora (cuBLAS), as tools/package/container.sh
 # does
 INTEL_REPO = {
@@ -1441,6 +1454,30 @@ def igc_version() -> str | None:
     return None
 
 
+def level_zero_build() -> int | None:
+    """The Level Zero driver's build number (libze_intel_gpu.so.1.14.37020 -> 37020; compute-runtime 26.05.37020),
+    None when the loader finds none or its file name carries no number.  The distributions' compute-runtime can be
+    older than Intel's: 26.22.38646.4 is where a kernel xe bug's fallout was worked around on the runtime side
+    (intel/compute-runtime #916; XeStrata #34, #15)."""
+    if WIN:
+        return None
+    try:
+        out = subprocess.run(["ldconfig", "-p"], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        if "libze_intel_gpu.so.1 " in line and " => " in line:
+            name = os.path.basename(os.path.realpath(line.split(" => ", 1)[1].strip()))
+            m = re.fullmatch(r"libze_intel_gpu\.so\.\d+\.\d+\.(\d+)", name)
+            return int(m.group(1)) if m else None
+    return None
+
+
+#: The first compute-runtime build with the Level Zero allocation fix of intel/compute-runtime #916 (26.22.38646.4):
+#: below it, a driver state can refuse device memory while the VRAM is free, and only a host reboot clears it.
+LEVEL_ZERO_FIXED_BUILD = 38646
+
+
 def igc_affected(version: str | None) -> bool:
     """IGC 2.27 to 2.30 miscompile some reads for Xe2 and later GPUs (2.24 and 2.32 on do not): the engine turns their
     GEP simplification off, which costs decode speed on short prompts (AGENTS.md, "Intel Graphics Compiler")."""
@@ -1454,11 +1491,60 @@ def igc_affected(version: str | None) -> bool:
     return major == 2 and 25 <= minor < 32
 
 
+def ubuntu_lts() -> str | None:
+    """Ubuntu 24.04 or 26.04 ("26.04"), the two LTS releases the graphics PPA serves; None elsewhere."""
+    if distro_id() != "ubuntu":
+        return None
+    try:
+        m = re.search(r"^VERSION_ID=\"?(\d+\.\d+)", Path("/etc/os-release").read_text(), re.M)
+    except OSError:
+        return None
+    return m.group(1) if m and m.group(1) in ("24.04", "26.04") else None
+
+
+def hwe_kernel(v: str) -> bool:
+    """Whether the HWE kernel of Ubuntu release `v` is installed (its meta package, linux-generic-hwe-26.04): the
+    kernel the graphics PPA's driver is meant to run on.  The GA kernel's xe driver is older: on 24.04 it has no code
+    for an Arc B-series, on 26.04 (7.0) it carries the xe bug the driver update only covers (XeStrata #34)."""
+    return pkg_installed(f"linux-generic-hwe-{v}")
+
+
+def graphics_repo() -> str | None:
+    """The lines that bring Intel's graphics PPA in (INTEL_GRAPHICS_REPO), when this distribution has one; without
+    the add-apt-repository line when it was added already."""
+    d = distro_family()
+    if d not in INTEL_GRAPHICS_REPO:
+        return None
+    if repo_added("kobuk-team/intel-graphics"):
+        return "\n".join(INTEL_GRAPHICS_REPO[d].split("\n")[1:])   # only the update and install lines
+    return INTEL_GRAPHICS_REPO[d]
+
+
+_g_driver_update_said = False
+
+
+def say_driver_update(lts: str) -> None:
+    """The commands that bring the driver up: the HWE kernel first on the GA one, then the graphics PPA.  Both the
+    IGC check and the Level Zero check send the user here, and when both fire - the usual case on Ubuntu 26.04,
+    whose IGC 2.28 and compute-runtime 26.05 are both old - they are said once, not twice."""
+    global _g_driver_update_said
+    if _g_driver_update_said:
+        return
+    _g_driver_update_said = True
+    if not hwe_kernel(lts):
+        say(f"  sudo apt install --install-recommends linux-generic-hwe-{lts}")
+    for line in (graphics_repo() or "").split("\n"):
+        if line.strip():
+            say(line)
+
+
 def check_igc(makers: set) -> None:
     """Says, without stopping, when an Intel GPU of Xe2 or later (the xe driver's graphics IP 20 or later, as the
     engine asks it: xe_gpu_from_xe2 in src/core/device.cpp) runs with a compiler the engine works around
     (igc_affected), and sends the user to Fedora 44, whose IGC is a fixed one, or to the Podman container (Fedora
-    44 inside)."""
+    44 inside).  Ubuntu 24.04/26.04 is sent to the graphics PPA too - with the HWE kernel straight to it, from the
+    GA kernel to the HWE kernel first (the PPA installs the driver with the IGC, and that driver is the one for the
+    HWE kernel)."""
     if WIN or "intel" not in makers:
         return
     v = igc_version()
@@ -1468,7 +1554,53 @@ def check_igc(makers: set) -> None:
         return
     warn(f"Intel's compiler (IGC {v}) has a bug XeStrata works around at the engine's start: the decode of short "
          "prompts is up to 10% slower. For full speed, use Fedora 44 (its IGC is 2.32 or later), or install "
-         "with Podman (Fedora 44 inside: README, Install).")
+         "with Podman (Fedora 44 inside: README, Install)")
+    lts = ubuntu_lts()
+    if lts:
+        if hwe_kernel(lts):
+            say("  or update the driver from the graphics PPA (its IGC is a fixed one):")
+        else:
+            say("  or move to the HWE kernel and update the driver from the graphics PPA (its IGC is a fixed one):")
+        say_driver_update(lts)
+
+
+def check_level_zero(makers: set, yes: bool = False, explicit: bool = False) -> None:
+    """When the Level Zero driver is older than the build that fixed it refusing device memory while the VRAM is
+    free (intel/compute-runtime #916; XeStrata #34 and #15: every allocation on the card can fail that way after a
+    GPU fault, and only a host reboot clears it).  On Ubuntu 24.04/26.04 with the HWE kernel the graphics PPA
+    brings the fixed driver, and the start is stopped until it is updated or the user asks to go on (confirm_risk,
+    --old-driver as the explicit consent); on the GA kernel, where the PPA's driver does not belong, the user is
+    sent to the HWE kernel and the PPA, or to Fedora 44, and the start goes on.  Elsewhere nothing is said: no
+    repository to point at."""
+    if WIN or "intel" not in makers:
+        return
+    build = level_zero_build()
+    if build is None or build >= LEVEL_ZERO_FIXED_BUILD:
+        return
+    lts = ubuntu_lts()
+    if lts and hwe_kernel(lts):
+        say_driver_update(lts)   # nothing when the IGC check, which fired first, already said the commands
+        confirm_risk(f"the Level Zero driver (build {build}) predates the fix for refusing device memory while "
+                     "the VRAM is free: the engine can fail to start, and only a host reboot clears the card "
+                     "(XeStrata #34). Update it from the graphics PPA (compute-runtime 26.22 or later; the "
+                     "commands above), then reboot:",
+                     explicit, yes,
+                     "not starting with a Level Zero driver that old: update it (the commands above), reboot, and "
+                     "run this again",
+                     "or, to start anyway, run this again with --old-driver",
+                     "  Start with this driver anyway?")
+    elif lts:
+        again = " - the commands above" if _g_driver_update_said else ""
+        warn(f"the Level Zero driver (build {build}) predates the fix for refusing device memory while the VRAM is "
+             "free (the engine can fail to start; only a host reboot clears the card), and the GA kernel's xe "
+             "driver is the older one: move to the HWE kernel and the graphics PPA, or use Fedora 44 / Podman "
+             f"(README, Install){again}")
+        say_driver_update(lts)
+    else:
+        warn(f"the Level Zero driver (build {build}) predates the fix for refusing device memory while the VRAM is "
+             "free: the engine can fail to start, and only a host reboot clears the card (XeStrata #34, "
+             "intel/compute-runtime #916). Update the driver (compute-runtime 26.22 or later), or use Fedora 44 / "
+             "Podman (their drivers are newer)")
 
 
 def windows_nvidia_libs() -> list:
@@ -1611,7 +1743,7 @@ def linux_nvidia_libs(makers: set, data: Path, names: list) -> None:
         + " ".join(shlex.quote(n) for n in names))
 
 
-def check_runtime(makers: set, gfx: set, data: Path) -> None:
+def check_runtime(makers: set, gfx: set, data: Path, yes: bool = False, explicit: bool = False) -> None:
     """Stops when the GPUs of `makers` lack their makers' packages, and says how to install them; names oneMKL and
     cuBLAS too when they are missing, without stopping (XeStrata's own kernels do their work).  Windows: the GPU
     makers' drivers bring what the engine runs on (Level Zero, the CUDA driver), the 7z the rest, and the launcher
@@ -1637,6 +1769,7 @@ def check_runtime(makers: set, gfx: set, data: Path) -> None:
                 say("  " + c)
         return
     check_igc(makers)
+    check_level_zero(makers, yes, explicit)
     linux_nvidia_libs(makers, data, (packaged_engine().get("runtime") or {}).get("nvidia_pip") or [])
     need, fast, repos = runtime_missing(makers)
     if not need and not fast:
@@ -5734,6 +5867,8 @@ def main() -> int:
                          "launcher's first screen)")
     ap.add_argument("--setup", action="store_true", help="install another model or change settings")
     ap.add_argument("--no-start", action="store_true", help="install only, do not start the model")
+    ap.add_argument("--old-driver", action="store_true",
+                    help="start although the Level Zero driver predates the fix setup stops on (see its message)")
     ap.add_argument("--update", action="store_true",
                     help="update the engine, Python packages and model settings as a start would, without starting "
                          "the model (update.sh runs it after a git pull)")
@@ -5982,7 +6117,7 @@ def main() -> int:
     makers = {x["vendor"] for x in chosen} | {gpu_info(i)["vendor"] for i in sel[1:]}
     amd_gfx = {x.get("gfx") for x in [*chosen, *(gpu_info(i) for i in sel[1:])] if x["vendor"] == "amd"}
     if PACKAGED:                                       # the GPU makers' packages the package only suggests
-        check_runtime(makers, amd_gfx, data)
+        check_runtime(makers, amd_gfx, data, a.yes, a.old_driver)
     elif not WIN and (majors := [v for t in cuda_toolkits() if (v := cuda_major(t))]):   # a contrib build: its CUDA
         linux_nvidia_libs(makers, data, nvidia_pip_names(max(majors)))
     if not WIN and (gpu["render"] is None or not os.access(gpu["render"], os.R_OK | os.W_OK)):

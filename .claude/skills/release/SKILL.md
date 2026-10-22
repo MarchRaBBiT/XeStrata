@@ -87,18 +87,22 @@ In short, for when it is not there:
 - What changed, as what now works or is faster, in concrete terms (numbers where measured), ranked, at most five items a group.
 - No preamble, recap or closing, no tangents; facts only, no plans or alternatives (the stage line excepted).
 
-Each section starts with the IGC warning below (the user's decision, 2026-10-21; AGENTS.md, "Intel Graphics Compiler"), then a line of the stage: 先行報: upstream との速さの比較は後で足す / Preliminary: the speed comparison with upstream follows.
-The warning stays while Ubuntu 26.04 or Debian 13 ships an IGC from 2.27 to 2.30; the user decides when it goes.
-It names Podman and Fedora 44 as the way out, no other distribution's.
+Each section starts with the warnings below (the user's decision, 2026-10-21; AGENTS.md, "Intel Graphics Compiler"), then a line of the stage: 先行報: upstream との速さの比較は後で足す / Preliminary: the speed comparison with upstream follows.
+The first paragraph is the IGC bug, the second the Level Zero driver's: they stay while Ubuntu 26.04 or Debian 13 ships an IGC from 2.27 to 2.30, and while Ubuntu 26.04 ships a compute-runtime older than 26.22; the user decides when they go.
+They name Podman, Fedora 44 and - on Ubuntu 24.04/26.04 with the HWE kernel - Intel's graphics PPA (xestrata --setup prints its commands) as the way out.
 
 ```markdown
 > [!WARNING]
-> **Intel Arc B-series, Lunar Lake and Panther Lake on Linux:** the Intel graphics compiler (IGC) 2.27 to 2.30, which Ubuntu 26.04 and Debian 13 ship, miscompiles some GPU code. XeStrata turns the affected optimization off by itself, at a cost of up to 10% in the decode of short prompts. For full speed, install with **Podman** (below; its image brings a fixed IGC), or use **Fedora 44**.
+> **Intel Arc B-series, Lunar Lake and Panther Lake on Linux:** the Intel graphics compiler (IGC) 2.27 to 2.30, which Ubuntu 26.04 and Debian 13 ship, miscompiles some GPU code. XeStrata turns the affected optimization off by itself, at a cost of up to 10% in the decode of short prompts. For full speed, install with **Podman** (below; its image brings a fixed IGC), use **Fedora 44**, or - on Ubuntu 24.04/26.04 with the HWE kernel - update the driver from Intel's graphics PPA: `xestrata --setup` prints the commands.
+>
+> **Every Intel GPU, a separate bug:** a compute-runtime older than 26.22 (Ubuntu 26.04 ships 26.05) can refuse device memory while the card's VRAM is free: the engine then fails to start, and only a reboot brings the card back. This release makes the engine retry the cache in pieces when the driver refuses the one big allocation, and start with what the card gives. The way out is the same: update the driver (26.22 or later), or use Fedora 44 / Podman. On Ubuntu 24.04/26.04 with the HWE kernel, `xestrata --setup` stops before starting and prints the PPA commands; `--old-driver` starts anyway.
 ```
 
 ```markdown
 > [!WARNING]
-> **Linux の Intel Arc B シリーズ・Lunar Lake・Panther Lake:** Ubuntu 26.04 と Debian 13 が入れる Intel のグラフィックスのコンパイラー（IGC）2.27〜2.30 は、GPU のコードの一部を誤ってコンパイルします。XeStrata は該当する最適化を自動で切るので動きますが、短い prompt の decode が最大 10% 遅くなります。本来の速さで使うには、**Podman** で入れる（下の手順。中の IGC は直った版です）か、**Fedora 44** を使ってください。
+> **Linux の Intel Arc B シリーズ・Lunar Lake・Panther Lake:** Ubuntu 26.04 と Debian 13 が入れる Intel のグラフィックスのコンパイラー（IGC）2.27〜2.30 は、GPU のコードの一部を誤ってコンパイルします。XeStrata は該当する最適化を自動で切るので動きますが、短い prompt の decode が最大 10% 遅くなります。本来の速さで使うには、**Podman** で入れる（下の手順。中の IGC は直った版です）、**Fedora 44** を使う、または Ubuntu 24.04/26.04 で HWE カーネルなら Intel の graphics PPA でドライバーを更新してください（`xestrata --setup` がコマンドを出します）。
+>
+> **すべての Intel GPU に、別の不具合:** 26.22 より古い compute-runtime（Ubuntu 26.04 は 26.05 を入れます）は、カードの VRAM に空きがあっても GPU メモリの確保を断ることがあります。エンジンは起動に失敗し、カードは再起動しないと戻りません。この版から、エンジンは一括の確保を断られたときに expert cache を小分けで取り直し、確保できた分だけで起動します。抜け道は同じで、ドライバーを 26.22 以降に更新するか、Fedora 44 / Podman を使ってください。Ubuntu 24.04/26.04 で HWE カーネルなら、`xestrata --setup` は起動の前に止まって PPA のコマンドを出します（`--old-driver` でそのまま起動できます）。
 ```
 
 Show the notes to the user.
