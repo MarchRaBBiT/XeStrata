@@ -1639,14 +1639,17 @@ namespace {
 // STRATA_PREFILL_TIMING=1: the prompt path's GPU time by phase.  Events are recorded on the compute stream in order;
 // the time between two consecutive marks is charged to the phase of the first, so a gap where the GPU waits (for the
 // host's expert grouping, or for an expert's copy) lands on the phase that was waiting.  Events are reused: the marks
-// are folded at every MoE layer's host sync, after which all of them have completed.
+// are folded at every MoE layer's host sync, after which all of them have completed.  The folding itself (a query per
+// mark, ~500 a layer at 32K tokens) is host time while the GPU is idle: it lands on 'host grouping' (2.7 s of a 32K
+// prompt on a B70, where the grouping is 25 ms) and the host line gives it apart.  The wait for the first chunk's PLE
+// rows (ple_land, read from the SSD beside layer 0) lands on layer 0's 'hc write'.
 enum PfPhase { kPfStart, kPfHc, kPfGdn, kPfQsa, kPfQsaIdx, kPfQsaSel, kPfQsaAttn, kPfRouter, kPfHostGroup, kPfGather,
                kPfWaitCopy, kPfDequant, kPfGemmGU, kPfGemmD, kPfCombine, kPfPle, kPfKvStage, kPfGdnConv, kPfGdnRec, kPfGdnOut,
-               kPfCount };
+               kPfHcWrite, kPfCount };
 const char* const kPfNames[kPfCount] = {"embed+steps", "hc read", "gdn", "qsa proj", "qsa indexer", "qsa select",
                                         "qsa attn", "router+shared", "host grouping", "gather", "wait copy", "dequant",
                                         "gemm gate/up", "gemm down", "combine", "ple", "kv stage", "gdn conv+gates",
-                                        "gdn recurrence", "gdn out proj"};
+                                        "gdn recurrence", "gdn out proj", "hc write"};
 struct PfTimer {
     bool on = env_on("STRATA_PREFILL_TIMING");
     std::vector<strata::gpu::Event*> ev;
@@ -1701,6 +1704,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
     } next_wait{next_};
     int hand_buf = 0;
     double host_sync_ms = 0, host_chunk_ms = 0, host_setup_ms = 0;   // STRATA_PREFILL_TIMING: the host's share
+    double host_route_ms = 0, host_fold_ms = 0, host_group_ms = 0;   // ...at each MoE layer: the routing's sync, the
+                                                                     // timer's own folding, the grouping
     strata::kernels::QsaShapes s = strata::kernels::qsa_real_shapes();
     s.n_head = g.n_head; s.n_head_kv = g.n_head_kv; s.head_dim = g.head_dim; s.idx_n_head = g.idx_q_heads;
     s.idx_dim = g.idx_key_dim;
@@ -2340,6 +2345,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     if (m.mixed_bf_lo) m.gemm.bf16(m.mixed_bf_lo, (const uint16_t*) wgi->data, m.sg, T, 1, N, 0, true);
                     // group the (token, k) pairs by expert on the host
                     pt.mark(kPfHostGroup, cs);
+                    const auto t_route = Clock::now();
                     m.ids_host.resize((size_t) T * K);
                     m.ids_host.from_device(m.ids, m.cs);
                     const strata::kernels::cpu::ExpertLayout& lay_c = strata::kernels::cpu::expert_layout();
@@ -2400,7 +2406,11 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         }
                     }
                     strata::gpu::stream_sync(m.cs);
+                    host_route_ms += ms_since(t_route);
+                    const auto t_fold = Clock::now();
                     pt.fold();
+                    host_fold_ms += ms_since(t_fold);
+                    const auto t_group = Clock::now();
                     if (m.cpu_pend) {   // auto: the last CPU-sharing layer's GPU time is final now
                         m.cpu_pend = false;
                         float g_ms = 0;
@@ -2746,6 +2756,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                                                 : nullptr;
                     const size_t mmq_gub = use_mmq ? mmq::matrix_bytes(mmq_gt, 1280, N) : 0;
                     const size_t mmq_db = use_mmq ? mmq::matrix_bytes(mmq_dt, N, 640) : 0;
+                    host_group_ms += ms_since(t_group);
                     pt.mark(kPfGather, cs);
                     if (use_mmq) {
                         // step 2b: the layer's activations as q8_1 rows in expert order, straight from `mixed`
@@ -3219,6 +3230,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                 // touches R in between (not the stage's last half, not before the PLE block of layer 1, not under a
                 // control vector)
                 const int64_t nl = half == 0 ? l : l + 1;
+                pt.mark(kPfHcWrite, cs);   // (after layer 0's: the wait for the PLE rows, ple_land)
                 // a steered layer's write, vector and next norm as one pass too (upstream 6448f0f7; the same bits);
                 // STRATA_CVEC_FUSE=0: gr_write, cvec_apply, then the next half's own norm
                 static const bool cvec_fuse = [] {
@@ -3386,7 +3398,9 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                      (long long) n, total, ms_since(t_start), stats_.ms_experts_host, line.c_str());
         std::fprintf(stderr, "strata prefill timing: host: chunk setup (PLE rows, the expert stream plan) %.0f ms, "
                              "waiting for each chunk %.0f ms, after each chunk (the draft layer, progress) %.0f ms, "
-                             "PLE %.0f ms\n", host_setup_ms, host_sync_ms, host_chunk_ms, stats_.ms_ple);
+                             "PLE %.0f ms; at each MoE layer: the routing's sync %.0f ms, folding these marks %.0f ms "
+                             "(the timing's own cost, charged to 'host grouping'), the grouping %.0f ms\n",
+                     host_setup_ms, host_sync_ms, host_chunk_ms, stats_.ms_ple, host_route_ms, host_fold_ms, host_group_ms);
     }
     if (std::getenv("STRATA_STATE_HASH_GDN") != nullptr) {   // debug: the GDN states as the prompt path leaves them
         strata::gpu::stream_sync(m.cs);
