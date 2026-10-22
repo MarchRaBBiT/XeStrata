@@ -4,6 +4,9 @@
 # podman compose run --rm xestrata --setup, then podman compose up -d (http://127.0.0.1:8095).  Intel GPUs as it is; AMD's add compose.amd.yaml, NVIDIA's
 # compose.nvidia.yaml (podman compose -f compose.yaml -f compose.nvidia.yaml ...).  docs/BUILD.md#podman
 name: xestrata
+# podman-compose: no pod (a pod and the user namespace below cannot go together)
+x-podman:
+  in_pod: false
 services:
   xestrata:
     build:
