@@ -12,6 +12,8 @@
 // A warp is a sub-group of 32.  CUDA used the __expf intrinsic here; this uses the precise exp.  Explicit fmaf calls
 // stay fused (sycl::fma), and the library's -ffp-contract=off leaves every other multiply-add as written.
 #include "strata/kernels/qsa_decode_attn.hpp"
+#include "strata/kernels/warp32.hpp"
+#include "strata/kernels/work_group.hpp"
 #include "strata/kernels/kv_q8.hpp"
 #include "strata/kernels/kv_q4.hpp"
 #include "strata/core/runtime.hpp"
@@ -153,8 +155,11 @@ sycl::event launch_chunk(sycl::queue& queue, const float* q_all, const QsaAttnPo
         sycl::local_accessor<float, 1> sp(sycl::range<1>((size_t) G * CHUNK), hd);       // scores
         sycl::local_accessor<sycl::float4, 1> spt(sycl::range<1>(CHUNK * GP / 4), hd);  // probabilities, cell-major
         sycl::local_accessor<long long, 1> srow(sycl::range<1>(CHUNK), hd);     // pool row of each cell
+        // two work-groups a compute unit (its local memory allows them): sized for one, the 256-dimension kernels took
+        // 145 VGPRs on gfx906, one wave a SIMD; for two, 128 and twice the waves (Flash-Next's 6.3K-token prompt,
+        // attention 2,654 -> 1,979 ms)
         hd.parallel_for(sycl::nd_range<3>({n_q, (size_t) n_kv_heads, (size_t) n_chunks * THREADS}, {1, 1, THREADS}),
-                        [=](sycl::nd_item<3> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                        [=](sycl::nd_item<3> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG_OCC(THREADS, 2)]] {
             const auto grp = it.get_group();
             const sycl::sub_group sg = it.get_sub_group();
             const size_t z = it.get_group(0);
@@ -168,7 +173,7 @@ sycl::event launch_chunk(sycl::queue& queue, const float* q_all, const QsaAttnPo
             const int n_ids = dense ? step[kStepNKv] : step[kStepWidth];
             const int chunk = (int) it.get_group(2), kvh = (int) it.get_group(1);
             const int t = (int) it.get_local_id(2);
-            const int lane = (int) sg.get_local_linear_id(), warp = (int) sg.get_group_linear_id();
+            const int lane = (int) warp32::lane(sg), warp = (int) warp32::index(sg);
             const int c0 = chunk * CHUNK;
             const int n_here = sycl::min(CHUNK, n_ids - c0);
             const int slot = kvh * n_chunks + chunk;

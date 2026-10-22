@@ -8,6 +8,8 @@
 // device's matrix_combinations, its sub-group sizes, the large register file mode) never launch them on such a GPU.
 #pragma once
 
+#include "strata/kernels/warp32.hpp"   // STRATA_HW_SUB_GROUP
+
 #if defined(__SYCL_DEVICE_ONLY__) && (defined(__NVPTX__) || defined(__AMDGCN__))
 #define STRATA_DEVICE_NOT_INTEL 1
 #else
@@ -24,5 +26,6 @@
 #endif
 
 // A kernel's required sub-group size SG, as the device compile takes it: the compilers for the other GPUs accept 32
-// only, and a kernel built for 16 is never launched on them (narrow_sub_group in dp4a_gemm.hpp picks 32 there).
-#define STRATA_SUB_GROUP(SG) (STRATA_DEVICE_NOT_INTEL ? 32 : (SG))
+// only, and a kernel built for 16 is never launched on them (narrow_sub_group in dp4a_gemm.hpp picks 32 there); a
+// wave64 GPU takes 64, two 32-lane warps a sub-group (strata/kernels/warp32.hpp).
+#define STRATA_SUB_GROUP(SG) (STRATA_DEVICE_NOT_INTEL ? STRATA_HW_SUB_GROUP(32) : (SG))

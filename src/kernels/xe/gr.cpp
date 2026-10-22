@@ -10,6 +10,7 @@
 // the same order.  The native kernels follow ggml-cuda at llama.cpp 3cf03257 (MIT License, Copyright (c) 2023-2026
 // The ggml authors, see third_party/main/ggml/LICENSE); CUDA compiled them with --use_fast_math, here the math is precise.
 #include "strata/kernels/gr.hpp"
+#include "strata/kernels/warp32.hpp"
 #include "strata/kernels/bf16_bits.hpp"
 #include "strata/kernels/bf16_gemv.hpp"
 #include "strata/kernels/native_gr_norm.hpp"
@@ -51,7 +52,7 @@ inline float sigmoid_f(float x) { return 1.0f / (1.0f + sycl::exp(-x)); }
 /// CUDA's shuffle-down tree then __shfl(v, 0): lane 0's butterfly value, broadcast.
 inline float warp_sumf(const sycl::sub_group& sg, float v) {
     for (int off = 16; off > 0; off >>= 1) v += sycl::permute_group_by_xor(sg, v, off);
-    return sycl::group_broadcast(sg, v, 0);
+    return warp32::bcast(sg, v, 0);
 }
 
 /// The FP32 work-group sum, broadcast to every work-item (see block_sumf in the CUDA file for the leading barrier).
@@ -60,7 +61,7 @@ inline float block_sumf(const sycl::nd_item<1>& it, float v, const sycl::local_a
     const sycl::sub_group sg = it.get_sub_group();
     sycl::group_barrier(g);
     const int tid = (int) it.get_local_id(0);
-    const int lane = (int) sg.get_local_linear_id(), warp = (int) sg.get_group_linear_id();
+    const int lane = (int) warp32::lane(sg), warp = (int) warp32::index(sg);
     v = warp_sumf(sg, v);
     if (lane == 0) scratch[warp] = v;
     sycl::group_barrier(g);
@@ -78,7 +79,7 @@ void launch_norm(sycl::queue& q, const float* R, const float* w_norm, float eps,
     q.submit([&](sycl::handler& h) {
         sycl::local_accessor<float, 1> scratch(sycl::range<1>(16), h);
         h.parallel_for(sycl::nd_range<1>((size_t) hc * THREADS, THREADS),
-                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const size_t c = it.get_group(0);
             const int tid = (int) it.get_local_id(0);
             const float* Rc = R + c * n_embd;
@@ -107,10 +108,10 @@ void launch_down(sycl::queue& q, const Activation* xq, const uint16_t* w_down, i
     q.submit([&](sycl::handler& h) {
         sycl::local_accessor<float, 1> part(sycl::range<1>(WARPS), h);
         h.parallel_for(sycl::nd_range<1>((size_t) hc_lr * THREADS, THREADS),
-                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int k = (int) it.get_group(0);
-            const int lane = (int) sg.get_local_linear_id(), warp = (int) sg.get_group_linear_id();
+            const int lane = (int) warp32::lane(sg), warp = (int) warp32::index(sg);
             const int nw = WARPS;
             const uint16_t* row = w_down + (size_t) k * hc_dim;
             float acc = 0.0f;
@@ -133,11 +134,11 @@ template <typename Activation>
 void launch_gate(sycl::queue& q, const Activation* lq, const uint16_t* w_up, const float* xn, int hc_dim, int hc_lr,
                  float* gated) {
     const size_t groups = (size_t) ((hc_dim + WARPS - 1) / WARPS);
-    q.parallel_for(sycl::nd_range<1>(groups * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+    q.parallel_for(sycl::nd_range<1>(groups * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
         const sycl::sub_group sg = it.get_sub_group();
-        const int i = (int) it.get_group(0) * WARPS + (int) sg.get_group_linear_id();
+        const int i = (int) it.get_group(0) * WARPS + (int) warp32::index(sg);
         if (i >= hc_dim) return;
-        const int lane = (int) sg.get_local_linear_id();
+        const int lane = (int) warp32::lane(sg);
         const uint16_t* row = w_up + (size_t) i * hc_lr;
         float acc = 0.0f;
         for (int k = lane; k < hc_lr; k += 32) acc += activation_f32(lq[k]) * f32_from_bf16(row[k]);
@@ -149,11 +150,11 @@ void launch_gate(sycl::queue& q, const Activation* lq, const uint16_t* w_up, con
 /// `inject[c] = bf16(xn) @ w_inject[c]`, one sub-group per stream, lanes striding hc_dim.
 template <typename Activation>
 void launch_inject(sycl::queue& q, const Activation* xq, const uint16_t* w_inject, int hc_dim, int hc, float* inject) {
-    q.parallel_for(sycl::nd_range<1>((size_t) 32 * hc, (size_t) 32 * hc), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+    q.parallel_for(sycl::nd_range<1>((size_t) 32 * hc, (size_t) 32 * hc), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
         const sycl::sub_group sg = it.get_sub_group();
-        const int c = (int) sg.get_group_linear_id();
+        const int c = (int) warp32::index(sg);
         if (c >= hc) return;
-        const int lane = (int) sg.get_local_linear_id();
+        const int lane = (int) warp32::lane(sg);
         const uint16_t* row = w_inject + (size_t) c * hc_dim;
         float acc = 0.0f;
         for (int i = lane; i < hc_dim; i += 32) acc += activation_f32(xq[i]) * f32_from_bf16(row[i]);
@@ -180,7 +181,7 @@ void launch_weighted_rms_norm(sycl::queue& q, const float* input, const float* g
     q.submit([&](sycl::handler& h) {
         sycl::local_accessor<float, 1> sums(sycl::range<1>(32), h);
         h.parallel_for(sycl::nd_range<1>((size_t) n_rows * BlockSize, BlockSize),
-                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int tid = (int) it.get_local_id(0);
             const size_t row_offset = it.get_group(0) * (size_t) n_cols;

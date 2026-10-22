@@ -10,6 +10,7 @@
 // CUDA's fast-math powf, cosf, sinf and rsqrtf are the precise pow, cos, sin and SYCL's rsqrt here.  The explicit
 // round-to-nearest adds are plain adds (the library does not contract); SCALE's zero-bias fma stays an fma.
 #include "strata/kernels/native_qsa_indexer.hpp"
+#include "strata/kernels/warp32.hpp"
 #include "strata/kernels/f16_bits.hpp"
 #include "strata/kernels/mrope.hpp"
 #include "strata/kernels/rope_scaling.hpp"
@@ -157,7 +158,7 @@ void native_qsa_indexer_append_steps(const float* raw, const int32_t* relative_p
     queue_for(stream).submit([&](sycl::handler& h) {
         sycl::local_accessor<float, 1> values(sycl::range<1>(D), h);
         sycl::local_accessor<float, 1> partials(sycl::range<1>(32), h);
-        h.parallel_for(sycl::nd_range<1>(THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        h.parallel_for(sycl::nd_range<1>(THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             append_cells(it, &values[0], &partials[0], raw, relative_pos_device, pos_stride, n_steps, pos_base, gamma,
                          epsilon, tail, dead, pooled, block_pos, mc, theta_scale, mtab, scaled, ka, tab);
         });
@@ -195,7 +196,7 @@ void native_qsa_indexer_append_steps_layers(const float* raw0, int64_t raw_strid
         // one work-group a layer; each first restores its tail from the window's snapshot (the per-layer commit's
         // copy_from_mapped), then makes that layer's appends
         h.parallel_for(sycl::nd_range<1>((size_t) n_layers * THREADS, THREADS),
-                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const int i = (int) it.get_group(0);
             float* tail = L.tail[i];
             if (L.tail_src[i] != nullptr) {
@@ -239,7 +240,7 @@ void native_qsa_indexer_append_batch(const float* raw, int64_t n, int64_t p0, in
         q.submit([&](sycl::handler& h) {
             sycl::local_accessor<float, 1> values(sycl::range<1>(D), h);
             sycl::local_accessor<float, 1> partials(sycl::range<1>(32), h);
-            h.parallel_for(sycl::nd_range<1>(THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+            h.parallel_for(sycl::nd_range<1>(THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
                 const int d = int(it.get_local_id(0));
                 float mean = 0.0f;
                 if (d < D) {
@@ -267,7 +268,7 @@ void native_qsa_indexer_append_batch(const float* raw, int64_t n, int64_t p0, in
             sycl::local_accessor<float, 1> values(sycl::range<1>(D), h);
             sycl::local_accessor<float, 1> partials(sycl::range<1>(32), h);
             h.parallel_for(sycl::nd_range<1>(size_t(hi - first + 1) * THREADS, THREADS),
-                           [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                           [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
                 const int64_t bl = first + int64_t(it.get_group(0));
                 const int d = int(it.get_local_id(0));
                 float mean = 0.0f;

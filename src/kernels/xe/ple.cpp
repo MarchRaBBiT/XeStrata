@@ -8,6 +8,7 @@
 // gate's sqrt and sigmoid are f32.  Work shapes are the CUDA kernels'; the double block sum's shuffle-down tree is an
 // xor butterfly whose lane 0 adds in the same order.  The opt-in native paths are unchanged in structure.
 #include "strata/kernels/ple.hpp"
+#include "strata/kernels/warp32.hpp"
 #include "strata/kernels/bf16_gemv.hpp"
 #include "strata/kernels/f16_bits.hpp"
 #include "strata/kernels/ngram.hpp"
@@ -74,7 +75,7 @@ template <typename D>
 void gnorm_t(sycl::queue& q, const float* x, const float* w, float* y, int n_embd, float eps, int hc) {
     q.submit([&](sycl::handler& h) {
         sycl::local_accessor<D, 1> scratch(sycl::range<1>(8), h);
-        h.parallel_for(sycl::nd_range<1>((size_t) hc * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        h.parallel_for(sycl::nd_range<1>((size_t) hc * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const int c = (int) it.get_group(0), tid = (int) it.get_local_id(0);
             const float* xc = x + (size_t) c * n_embd;
             const float* wc = w + (size_t) c * n_embd;
@@ -113,7 +114,7 @@ void gate_t(sycl::queue& q, const float* key, const float* query, float* gate, i
     const float inv_sqrt_n = 1.0f / std::sqrt((float) n_embd);
     q.submit([&](sycl::handler& h) {
         sycl::local_accessor<D, 1> scr(sycl::range<1>(8), h);
-        h.parallel_for(sycl::nd_range<1>((size_t) hc * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        h.parallel_for(sycl::nd_range<1>((size_t) hc * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const int c = (int) it.get_group(0), tid = (int) it.get_local_id(0);
             const float* kc = key + (size_t) c * n_embd;
             const float* qc = query + (size_t) c * n_embd;

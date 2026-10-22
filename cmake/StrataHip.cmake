@@ -3,7 +3,9 @@
 # cmake/StrataHip.cmake - the AMD architectures (intel/llvm's HIP target) and ROCm's device libraries.
 #
 # ROCm is free software, so the AMD code is built in the free and contrib modes alike.  The engine's kernels are
-# written for wave32 GPUs with integer dot instructions: RDNA2 (gfx103x) and later.
+# written for wave32 GPUs with integer dot instructions: RDNA2 (gfx103x) and later.  gfx906 (Radeon VII, Instinct
+# MI50 / MI60), a wave64 GPU with the dot instructions, runs them with two 32-lane warps a sub-group
+# (include/strata/kernels/warp32.hpp).
 
 include(${CMAKE_CURRENT_LIST_DIR}/StrataCuda.cmake)   # strata_sycl_compiles
 
@@ -36,10 +38,10 @@ function(strata_hip_detect out)
   set(${out} "${archs}" PARENT_SCOPE)
 endfunction()
 
-# Whether the engine's kernels run on `arch`: RDNA2 and later (RDNA1 lacks the dot instructions, GCN and CDNA are
-# wave64).
+# Whether the engine's kernels run on `arch`: RDNA2 and later, and gfx906 (wave64, two warps a sub-group).  RDNA1
+# and the other GCN GPUs lack the dot instructions; CDNA is not tried.
 function(strata_hip_supported arch out)
-  if(arch MATCHES "^gfx(103[0-9a-f]|11[0-9a-f][0-9a-f]|12[0-9a-f][0-9a-f])$")
+  if(arch MATCHES "^gfx(906|103[0-9a-f]|11[0-9a-f][0-9a-f]|12[0-9a-f][0-9a-f])$")
     set(${out} ON PARENT_SCOPE)
   else()
     set(${out} OFF PARENT_SCOPE)
@@ -207,8 +209,8 @@ function(strata_hip_choose archs targets_out opts_out)
   foreach(arch IN LISTS archs)
     strata_hip_supported(${arch} ok)
     if(NOT ok)
-      message(FATAL_ERROR "STRATA_HIP_ARCHS: ${arch} is not an RDNA2 or later AMD GPU (gfx103x, gfx11xx, gfx12xx); "
-                          "set the others with -DSTRATA_HIP_ARCHS=, or none with -DSTRATA_HIP_ARCHS=\"\"")
+      message(FATAL_ERROR "STRATA_HIP_ARCHS: ${arch} is not gfx906 or an RDNA2 or later AMD GPU (gfx103x, gfx11xx, "
+                          "gfx12xx); set the others with -DSTRATA_HIP_ARCHS=, or none with -DSTRATA_HIP_ARCHS=\"\"")
     endif()
     list(APPEND targets amd_gpu_${arch})
   endforeach()
@@ -264,4 +266,28 @@ function(strata_hip_cxx out)
     endif()
   endforeach()
   set(${out} "" PARENT_SCOPE)
+endfunction()
+
+# Whether `arch` is a wave64 GPU (gfx9).  The distributions' rocBLAS builds no longer carry gfx906's kernels, so its
+# dense products go to rocBLAS only where the installed one has them (STRATA_HIP_WAVE64_BLAS, CMakeLists.txt).
+function(strata_hip_wave64 arch out)
+  if(arch MATCHES "^gfx9")
+    set(${out} ON PARENT_SCOPE)
+  else()
+    set(${out} OFF PARENT_SCOPE)
+  endif()
+endfunction()
+
+# Whether the installed rocBLAS has kernels for `arch`: its library folder's file names, or the folder per architecture
+# that ROCm 7.14's builds keep them in (library/gfx906/).
+function(strata_hip_rocblas_has arch out)
+  file(GLOB files /usr/lib64/rocblas/library/* /usr/lib/*/rocblas/*/library/* /opt/rocm/lib/rocblas/library/*)
+  set(${out} OFF PARENT_SCOPE)
+  foreach(file_path IN LISTS files)
+    get_filename_component(name "${file_path}" NAME)
+    if(name MATCHES "(^|[^0-9a-z])${arch}([^0-9a-f]|$)")
+      set(${out} ON PARENT_SCOPE)
+      return()
+    endif()
+  endforeach()
 endfunction()

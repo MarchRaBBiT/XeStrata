@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 MistVVK and the XeStrata contributors
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# XeStrata gfx906 (Radeon VII / MI50) development image: the community ROCm 7.14 image that still ships gfx906
+# libraries, with the tools to build intel/llvm (tools/intel_llvm_build.py) and the engine.  Local use only.
+FROM docker.io/mixa3607/rocm-gfx906:7.14-complete
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        cmake ninja-build build-essential git python3 python3-venv python3-numpy python3-jinja2 python3-regex \
+        python3-yaml python3-tqdm python3-requests python3-pil python3-psutil \
+        lld opencl-headers zlib1g-dev libzstd-dev libhwloc-dev libblosc2-dev libvulkan-dev glslc pkg-config ca-certificates \
+    && rm -rf /var/lib/apt/lists/*

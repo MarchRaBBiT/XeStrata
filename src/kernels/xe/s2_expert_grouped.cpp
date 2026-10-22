@@ -11,6 +11,8 @@
 // every hit where CUDA placed it.  Work-items past the last row keep computing (on row 0) and do not write, because
 // a sub-group permute needs every lane.
 #include "strata/kernels/s2_expert_grouped.hpp"
+#include "strata/kernels/warp32.hpp"
+#include "strata/kernels/work_group.hpp"
 #include "strata/kernels/verify_kernels.hpp"
 #include "strata/kernels/quantize_act.hpp"
 #include "strata/kernels/f16_bits.hpp"
@@ -87,15 +89,15 @@ sycl::event gu_launch(sycl::queue& q, const uint8_t* blob_base, const int32_t* s
     const long long total = (long long) n_hits * 2LL * FF;
     const int warps = THREADS / WARP;
     const size_t groups = (size_t) ((total + warps - 1) / warps);
-    return q.parallel_for(sycl::nd_range<1>(groups * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+    return q.parallel_for(sycl::nd_range<1>(groups * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
         const sycl::sub_group sg = it.get_sub_group();
-        const long long slot = (long long) it.get_group(0) * warps + (long long) sg.get_group_linear_id();
+        const long long slot = (long long) it.get_group(0) * warps + (long long) warp32::index(sg);
         if (slot >= total) return;   // uniform over the sub-group
         const long long rows_per_hit = 2LL * FF;
         const int h = (int) (slot / rows_per_hit);
         if (d_count != nullptr && h >= *d_count) return;   // token graph: capacity layout, device count
         const int i = (int) (slot % rows_per_hit);
-        const int lane = (int) sg.get_local_linear_id();
+        const int lane = (int) warp32::lane(sg);
         const uint8_t* blob = blob_base + (size_t) slot_index[h] * (size_t) blob_bytes;
         const uint8_t* xq = x_q8_0;
         const float* xs = x_scales;
@@ -128,11 +130,11 @@ sycl::event swiglu_launch(sycl::queue& q, float* gate_up, long long n_pairs) {
 sycl::event swiglu_q8_launch(sycl::queue& q, float* gate_up, long long n_pairs, uint8_t* blocks, float* scales) {
     const long long n_blocks = n_pairs / 32;
     const size_t groups = (size_t) ((n_blocks + 7) / 8);
-    return q.parallel_for(sycl::nd_range<1>(groups * 256, 256), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+    return q.parallel_for(sycl::nd_range<1>(groups * 256, 256), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
         const sycl::sub_group sg = it.get_sub_group();
-        const long long b = (long long) it.get_group(0) * 8 + (long long) sg.get_group_linear_id();
+        const long long b = (long long) it.get_group(0) * 8 + (long long) warp32::index(sg);
         if (b >= n_blocks) return;   // uniform over the sub-group
-        const int lane = (int) sg.get_local_linear_id();
+        const int lane = (int) warp32::lane(sg);
         const long long i = b * 32 + lane;
         const float g = gate_up[i];
         const float u = gate_up[n_pairs + i];
@@ -163,14 +165,14 @@ sycl::event down_launch(sycl::queue& q, const uint8_t* blob_base, const int32_t*
     const long long total = (long long) n_hits * H;
     const int warps = THREADS / WARP;
     const size_t groups = (size_t) ((total + warps - 1) / warps);
-    return q.parallel_for(sycl::nd_range<1>(groups * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+    return q.parallel_for(sycl::nd_range<1>(groups * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
         const sycl::sub_group sg = it.get_sub_group();
-        const long long row = (long long) it.get_group(0) * warps + (long long) sg.get_group_linear_id();
+        const long long row = (long long) it.get_group(0) * warps + (long long) warp32::index(sg);
         if (row >= total) return;
         const int h = (int) (row / H);
         if (d_count != nullptr && h >= *d_count) return;
         const int r = (int) (row % H);
-        const int lane = (int) sg.get_local_linear_id();
+        const int lane = (int) warp32::lane(sg);
         const uint8_t* blob = blob_base + (size_t) slot_index[h] * (size_t) blob_bytes;
         const uint8_t* xb = h_q8_0 + (size_t) h * (size_t) (FF / 32) * 34;
         const float acc = row_dot_s2_q8(blob + O_D_CODES + (size_t) r * ROW_D, blob + O_D_SCALES + (size_t) r * SC_D * 2,
@@ -215,7 +217,7 @@ sycl::event cpu_order_projection(sycl::queue& q, const uint8_t* blob_base, const
     const int rows = n_hits * rows_per_hit;
     const int rows_per_group = THREADS / 8;
     const size_t groups = (size_t) ((rows + rows_per_group - 1) / rows_per_group);
-    return q.parallel_for(sycl::nd_range<1>(groups * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+    return q.parallel_for(sycl::nd_range<1>(groups * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, THREADS)]] {
         const sycl::sub_group sg = it.get_sub_group();
         const int t = (int) it.get_local_id(0);
         const int row_any = (int) it.get_group(0) * rows_per_group + t / 8;
@@ -301,17 +303,17 @@ void moe_hit_grouped_s2(const uint8_t* blob_base, const int32_t* slot_index, con
 void moe_hit_select(const int32_t* ids, const int32_t* res_row, int k, int n_expert, int32_t* slot, int32_t* dst,
                     int32_t* count, void* stream) {
     if (k < 1 || k > 32) fail("moe_hit_select: k must be 1..32");
-    const auto e = Q(stream).parallel_for(sycl::nd_range<1>(32, 32), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+    const auto e = Q(stream).parallel_for(sycl::nd_range<1>(32, 32), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
         const sycl::sub_group sg = it.get_sub_group();
-        const int lane = (int) sg.get_local_linear_id();
+        const int lane = (int) warp32::lane(sg);
         int s = -1;
         if (lane < k) {
             const int ex = ids[lane];
             if (ex >= 0 && ex < n_expert) s = res_row[ex];
         }
         const int flag = s >= 0 ? 1 : 0;
-        const int at = sycl::exclusive_scan_over_group(sg, flag, sycl::plus<int>());
-        const int total = sycl::reduce_over_group(sg, flag, sycl::plus<int>());
+        const int at = warp32::exclusive_scan_plus(sg, flag);
+        const int total = warp32::reduce(sg, flag, sycl::plus<int>());
         if (s >= 0) { slot[at] = s; dst[at] = lane; }
         if (lane == 0) *count = total;
     });
@@ -328,7 +330,7 @@ void moe_hit_grouped_s2_dev(const uint8_t* blob_base, const int32_t* slot_index,
 void moe_hit_select_multi(const int32_t* ids, const int32_t* res_row, int n, int n_expert, int32_t* slot, int32_t* dst,
                           int32_t* count, void* stream) {
     if (n < 1 || n > 128) fail("moe_hit_select_multi: n must be 1..128");
-    const auto e = Q(stream).parallel_for(sycl::nd_range<1>(128, 128), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+    const auto e = Q(stream).parallel_for(sycl::nd_range<1>(128, 128), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
         const int i = (int) it.get_local_id(0);
         int s = -1;
         if (i < n) {
@@ -415,7 +417,7 @@ void moe_grouped_s2(const unsigned long long* grp_ptr, const int32_t* grp_start,
         sycl::local_accessor<int, 1> xs_q(sycl::range<1>(GMAX * (H / 4)), hd);   // the entries' int8 activations as words
         sycl::local_accessor<float, 1> xs_d(sycl::range<1>(GMAX * (H / 32)), hd);
         hd.parallel_for(sycl::nd_range<2>({(size_t) cap_groups, (size_t) (2 * FF / GU_ROWS) * 256}, {1, 256}),
-                        [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                        [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int g = (int) it.get_group(0);
             if (g >= *n_groups) return;   // uniform
@@ -479,7 +481,7 @@ void moe_grouped_s2(const unsigned long long* grp_ptr, const int32_t* grp_start,
         sycl::local_accessor<int, 1> hs_q(sycl::range<1>(GMAX * (FF / 4)), hd);
         sycl::local_accessor<float, 1> hs_d(sycl::range<1>(GMAX * (FF / 32)), hd);
         hd.parallel_for(sycl::nd_range<2>({(size_t) cap_groups, (size_t) (H / D_ROWS) * 256}, {1, 256}),
-                        [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                        [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int g = (int) it.get_group(0);
             if (g >= *n_groups) return;

@@ -11,6 +11,8 @@
 // the next chunk after its own sub-group read it, so a sub-group barrier separates the two (CUDA relied on the warp
 // running in step there).
 #include "strata/kernels/native_flash_attn.hpp"
+#include "strata/kernels/warp32.hpp"
+#include "strata/kernels/work_group.hpp"
 #include "strata/kernels/f16_bits.hpp"
 #include "strata/core/runtime.hpp"
 #define STRATA_DEVICE_ARCH_TAG_TU xe_native_flash_attn
@@ -76,7 +78,7 @@ void native_flash_attn_short_step(const float* q, const uint16_t* k, const uint1
         sycl::local_accessor<float, 1> tile(sycl::range<1>(4 * 4 * 256), h);
         sycl::local_accessor<float, 1> max_shared(sycl::range<1>(32), h);
         sycl::local_accessor<float, 1> sum_shared(sycl::range<1>(32), h);
-        h.parallel_for(sycl::nd_range<1>(24 * 128, 128), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        h.parallel_for(sycl::nd_range<1>(24 * 128, 128), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, 128)]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int tid = int(it.get_local_id(0)), lane = tid % 32, warp = tid / 32;
             const int head = int(it.get_group(0)), kv = head / 12;

@@ -16,6 +16,7 @@
 // file; in the default 128 registers they spilled), 14.2 (a fragment's rows contiguous) and 13.6 (16-byte stores).
 // DP4a takes 20.  Loading the next step into registers while multiplying, to store it after, spilled (91-103 ms).
 #include "mma_gemm.hpp"
+#include "strata/kernels/warp32.hpp"
 #include "amd_wmma.hpp"
 #include "strata/kernels/matrix_report.hpp"
 #include "device_target.hpp"
@@ -242,7 +243,7 @@ struct Kernel {
             const E* w = W + (bounds ? ex * w_stride : 0);
             float* y = Y + (bounds ? row0 * ldy : ex * T * ldy);
             const auto sg = it.get_sub_group();
-            const int sgid = (int) sg.get_group_linear_id(), lane = (int) sg.get_local_linear_id();
+            const int sgid = (int) warp32::index(sg), lane = (int) warp32::lane(sg);
             const int lid = (int) it.get_local_id(0);
             const int ms = sgid / NSGN * SGM * TM, ns = sgid % NSGN * SGN * TN;
             const auto ap = as.template get_multi_ptr<sycl::access::decorated::no>();
@@ -301,7 +302,7 @@ struct Kernel {
             const E* w = W + (bounds ? ex * w_stride : 0);
             float* y = Y + (bounds ? row0 * ldy : ex * T * ldy);
             const auto sg = it.get_sub_group();
-            const int sgid = (int) sg.get_group_linear_id(), lane = (int) sg.get_local_linear_id();
+            const int sgid = (int) warp32::index(sg), lane = (int) warp32::lane(sg);
             const int lid = (int) it.get_local_id(0);
             const int ms = sgid / NSGN * SGM * TM, ns = sgid % NSGN * SGN * TN;   // the sub-group's tile
             const auto ap = as.template get_multi_ptr<sycl::access::decorated::no>();

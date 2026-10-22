@@ -9,6 +9,7 @@
 // Copyright (c) 2023-2026 The ggml authors, see third_party/main/ggml/LICENSE.  CUDA compiled it with --use_fast_math;
 // here pow, cos and sin are the precise SYCL functions.
 #include "strata/kernels/rope.hpp"
+#include "strata/kernels/warp32.hpp"
 #include "strata/kernels/native_rope.hpp"
 #include "strata/kernels/mrope.hpp"
 #include "strata/core/on_device.hpp"
@@ -229,7 +230,7 @@ void native_qsa_rms_norm_rope(const float* x, int in_stride, const float* gamma,
     queue_for(stream).submit([&](sycl::handler& h) {
         sycl::local_accessor<float, 1> sums(sycl::range<1>(32), h);
         h.parallel_for(sycl::nd_range<1>((size_t) rows * BlockSize, BlockSize),
-                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(32)]] {
+                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(32))]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int tid = (int) it.get_local_id(0);
             const size_t row = it.get_group(0);

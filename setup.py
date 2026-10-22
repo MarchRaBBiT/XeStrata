@@ -793,8 +793,10 @@ def nvidia_smi() -> dict:
 
 
 # The AMD GPUs the engine's kernels run on, as cmake/StrataHip.cmake checks them: RDNA2 and later (wave32 and the
-# integer dot instructions)
-AMD_ARCH = re.compile(r"gfx(103[0-9a-f]|11[0-9a-f]{2}|12[0-9a-f]{2})")
+# integer dot instructions), and gfx906 (wave64, two 32-lane warps a sub-group)
+AMD_ARCH = re.compile(r"gfx(906|103[0-9a-f]|11[0-9a-f]{2}|12[0-9a-f]{2})")
+# The wave64 ones among them, whose dense matrix products take XeStrata's own kernels instead of rocBLAS
+AMD_WAVE64 = re.compile(r"gfx9[0-9a-f]+")
 
 
 def kfd_nodes() -> dict:
@@ -1304,12 +1306,12 @@ def gpu_problem(g, together=False):
         if not gfx:
             return "the kernel's KFD (amdgpu's compute part, /dev/kfd) does not list it"
         if not AMD_ARCH.fullmatch(gfx):
-            return f"{gfx}: the engine needs an RDNA2 or later AMD GPU (gfx103x, gfx11xx, gfx12xx)"
+            return f"{gfx}: the engine needs gfx906 or an RDNA2 or later AMD GPU (gfx103x, gfx11xx, gfx12xx)"
         if PACKAGED:
             meta = packaged_engine()
             if gfx not in meta.get("hip_archs", []):
                 return f"{meta.get('package', 'this package')} has no code for {gfx}: " + amd_elsewhere()
-        elif (have := rocblas_archs()) is not None and gfx not in have:
+        elif not AMD_WAVE64.fullmatch(gfx) and (have := rocblas_archs()) is not None and gfx not in have:
             return (f"this distribution's rocBLAS, which the engine's dense matrix products run in, has no code for "
                     f"{gfx}: " + amd_elsewhere())
     return None

@@ -32,6 +32,8 @@
 // SOFTWARE.
 //
 #include "strata/kernels/canon_math.hpp"
+#include "strata/kernels/warp32.hpp"
+#include "strata/kernels/work_group.hpp"
 #include "strata/kernels/iq_kernels.hpp"
 #include "strata/core/per_device.hpp"
 #include "strata/core/runtime.hpp"
@@ -937,11 +939,11 @@ sycl::event launch_mmvq_n(sycl::queue& q, const uint8_t* w, size_t row_bytes, co
                           int n_out) {
     const size_t groups = (size_t) ((n_out + 3) / 4);
     return q.parallel_for(sycl::nd_range<1>(groups * 4 * kWarp, 4 * kWarp),
-                          [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(kWarp)]] {
+                          [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(kWarp)), STRATA_MAX_WG(1, 1, 4 * kWarp)]] {
         const sycl::sub_group sg = it.get_sub_group();
-        const int row = (int) it.get_group(0) * 4 + (int) sg.get_group_linear_id();
+        const int row = (int) it.get_group(0) * 4 + (int) warp32::index(sg);
         if (row >= n_out) return;
-        const int lane = (int) sg.get_local_linear_id();
+        const int lane = (int) warp32::lane(sg);
         const int nb = n_in / Fmt<TY>::qk;
         float s[NC];
         row_dot_multi<TY, NC>(sg, w + (size_t) row * row_bytes, x, (size_t) (n_in / 32), nb, lane, s);
@@ -1002,9 +1004,9 @@ sycl::event launch_native_gu(sycl::queue& q, size_t cap_groups, const unsigned l
     const int row_lo = part == 1 ? (int) L.n_ff : 0, row_hi = part == 0 ? (int) L.n_ff : (int) (2 * L.n_ff);
     const size_t xgroups = (size_t) ((row_hi - row_lo + (int64_t) GU_ROWS * RPW - 1) / ((int64_t) GU_ROWS * RPW));
     return q.parallel_for(sycl::nd_range<2>({cap_groups, xgroups * GU_ROWS * kWarp}, {1, GU_ROWS * kWarp}),
-                          [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(kWarp)]] {
+                          [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(kWarp)), STRATA_MAX_WG(1, 1, GU_ROWS * kWarp)]] {
         const sycl::sub_group sg = it.get_sub_group();
-        const int warp = (int) sg.get_group_linear_id(), lane = (int) sg.get_local_linear_id();
+        const int warp = (int) warp32::index(sg), lane = (int) warp32::lane(sg);
         const int row0 = row_lo + ((int) it.get_group(1) * GU_ROWS + warp) * RPW;
         if (row0 >= row_hi) return;                                          // the whole sub-group
         const int row = row0 + lane / LPR, seg_lane = lane % LPR;
@@ -1037,9 +1039,9 @@ sycl::event launch_native_down(sycl::queue& q, size_t cap_groups, const unsigned
     constexpr int RPW = kWarp / LPR;
     const size_t xgroups = (size_t) ((L.n_embd + (int64_t) 8 * RPW - 1) / ((int64_t) 8 * RPW));
     return q.parallel_for(sycl::nd_range<2>({cap_groups, xgroups * 8 * kWarp}, {1, 8 * kWarp}),
-                          [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(kWarp)]] {
+                          [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(kWarp))]] {
         const sycl::sub_group sg = it.get_sub_group();
-        const int warp = (int) sg.get_group_linear_id(), lane = (int) sg.get_local_linear_id();
+        const int warp = (int) warp32::index(sg), lane = (int) warp32::lane(sg);
         const int r0 = ((int) it.get_group(1) * 8 + warp) * RPW;
         if (r0 >= L.n_embd) return;                                          // the whole sub-group
         const int r = r0 + lane / LPR, seg_lane = lane % LPR;
@@ -1085,12 +1087,12 @@ sycl::event launch_native_gu_fused(sycl::queue& q, size_t cap_groups, const unsi
         sycl::local_accessor<float, 1> res(sycl::range<1>((size_t) kEntriesPass * kM8Rows), h);
         sycl::local_accessor<int, 1> sx(sycl::range<1>((size_t) kEntriesPass * xb * 9), h);   // 36-byte blocks
         h.parallel_for(sycl::nd_range<2>({cap_groups, (size_t) (L.n_ff / 32) * WG}, {1, WG}),
-                       [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(kWarp)]] {
+                       [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(kWarp))]] {
             const int g = (int) it.get_group(0);
             if (g >= *n_groups) return;   // the whole work-group
             const sycl::sub_group sg = it.get_sub_group();
             const int tid = (int) it.get_local_id(1);
-            const int warp = (int) sg.get_group_linear_id(), lane = (int) sg.get_local_linear_id();
+            const int warp = (int) warp32::index(sg), lane = (int) warp32::lane(sg);
             const int seg_lane = lane % LPR;
             [[maybe_unused]] const GT* grid = nullptr;   // IQ4_XS: none
             if constexpr (NG > 0) {
@@ -1149,12 +1151,12 @@ sycl::event launch_native_down_lds(sycl::queue& q, size_t cap_groups, const unsi
     return q.submit([&](sycl::handler& h) {
         sycl::local_accessor<int, 1> sh(sycl::range<1>((size_t) kEntriesPass * hb * 9), h);
         h.parallel_for(sycl::nd_range<2>({cap_groups, (size_t) ((L.n_embd + kM8Rows - 1) / kM8Rows) * WG}, {1, WG}),
-                       [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(kWarp)]] {
+                       [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(kWarp))]] {
             const int g = (int) it.get_group(0);
             if (g >= *n_groups) return;
             const sycl::sub_group sg = it.get_sub_group();
             const int tid = (int) it.get_local_id(1);
-            const int warp = (int) sg.get_group_linear_id(), lane = (int) sg.get_local_linear_id();
+            const int warp = (int) warp32::index(sg), lane = (int) warp32::lane(sg);
             const int seg_lane = lane % LPR;
             const auto* shb = reinterpret_cast<const block_q8_1*>(sh.template get_multi_ptr<sycl::access::decorated::no>().get());
             const uint8_t* blob = (const uint8_t*) grp_ptr[g];
@@ -1208,7 +1210,7 @@ size_t local_mem_bytes(sycl::queue& q) {
 // experts' activations: the CPU's rows of an expert quantize alike).
 sycl::event launch_quantize_q8_1_canon(sycl::queue& q, const float* x, block_q8_1* y, long long n) {
     const size_t total = (size_t) ((n + 255) / 256) * 256;
-    return q.parallel_for(sycl::nd_range<1>(total, 256), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(kWarp)]] {
+    return q.parallel_for(sycl::nd_range<1>(total, 256), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(kWarp))]] {
         const long long i = (long long) it.get_global_linear_id();
         if (i >= n) return;
         const sycl::sub_group sg = it.get_sub_group();
@@ -1757,7 +1759,7 @@ struct IqGemmKernel {
         const int64_t ex = g / (tiles_m * nN), r = g % (tiles_m * nN), tm = r / nN, tn = r % nN;
         const int64_t row0 = bounds[ex], rows = bounds[ex + 1] - row0;
         if (tm * WM >= rows) return;   // the whole work-group: the expert has fewer rows than the launch allows for
-        const int sgid = (int) sg.get_group_linear_id();
+        const int sgid = (int) warp32::index(sg);
         const int64_t m0 = tm * WM + (int64_t) (sgid / NSG_N) * G_MS, wn0 = tn * WN;
         const int nl = (sgid % NSG_N) * G_NS;   // this sub-group's first column in the tile
         // filled by index: a range-for over the 2-D array left all but the first column unfilled (they kept what an
@@ -1855,7 +1857,7 @@ void quantize_q8_1_rows(const float* x, int64_t n_rows, int64_t n_cols, void* y,
         const long long n8 = n / 8;
         const size_t total = (size_t) ((n8 + 255) / 256) * 256;
         sync_if_needed(stream, queue_for(stream).parallel_for(sycl::nd_range<1>(total, 256),
-                              [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(kWarp)]] {
+                              [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(kWarp))]] {
             const long long j = (long long) it.get_global_linear_id();   // values 8j .. 8j + 7
             const bool in = j < n8;
             const sycl::sub_group sg = it.get_sub_group();
@@ -1865,7 +1867,7 @@ void quantize_q8_1_rows(const float* x, int64_t n_rows, int64_t n_cols, void* y,
                 a = sycl::fmax(a, sycl::fabs(v[q]));
                 sum += v[q];
             }
-            const float amax = sycl::reduce_over_group(sg, a, sycl::maximum<float>());   // 32 lanes: 256 values
+            const float amax = warp32::reduce(sg, a, sycl::maximum<float>());   // 32 lanes: 256 values
             sum += sycl::permute_group_by_xor(sg, sum, 1);
             sum += sycl::permute_group_by_xor(sg, sum, 2);
             if (!in) return;
@@ -2120,7 +2122,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
         // when it went through memory, then launch_quantize_q8_1_canon's body (a sub-group is one block of one entry)
         const int64_t n_ff = L.n_ff;
         q.parallel_for(sycl::nd_range<1>((size_t) ((nh + 255) / 256) * 256, 256),
-                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(kWarp)]] {
+                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(kWarp))]] {
             const long long i = (long long) it.get_global_linear_id();
             if (i >= nh) return;
             const long long e = i / n_ff;
@@ -2175,7 +2177,7 @@ inline void bf16_dot_multi(const sycl::sub_group& sg, const uint32_t* w, const f
         for (int j = 0; j < kEntriesPass; ++j)
             if (j < n) s[j] += w0 * xs[j][2 * i] + w1 * xs[j][2 * i + 1];
     }
-    for (int j = 0; j < kEntriesPass; ++j) s[j] = sycl::reduce_over_group(sg, s[j], sycl::plus<float>());
+    for (int j = 0; j < kEntriesPass; ++j) s[j] = warp32::reduce(sg, s[j], sycl::plus<float>());
 }
 }  // namespace
 
@@ -2195,10 +2197,10 @@ void native_expert_grouped_bf16(const NativeExpertLayout& L, const unsigned long
     constexpr int kRows = 8;   // rows (sub-groups) a work-group
     // gate/up: row r of the gate, then of the up, against each entry's token row
     q.parallel_for(sycl::nd_range<2>({cg, (size_t) ((2 * FF + kRows - 1) / kRows) * kRows * kWarp}, {1, (size_t) kRows * kWarp}),
-                   [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(kWarp)]] {
+                   [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(kWarp))]] {
         const sycl::sub_group sg = it.get_sub_group();
-        const int64_t row = (int64_t) it.get_group(1) * kRows + (int64_t) sg.get_group_linear_id();
-        const int lane = (int) sg.get_local_linear_id();
+        const int64_t row = (int64_t) it.get_group(1) * kRows + (int64_t) warp32::index(sg);
+        const int lane = (int) warp32::lane(sg);
         if (row >= 2 * FF) return;   // the whole sub-group
         const bool is_up = row >= FF;
         const int64_t r = is_up ? row - FF : row;
@@ -2227,10 +2229,10 @@ void native_expert_grouped_bf16(const NativeExpertLayout& L, const unsigned long
     // down: row r of the output for each entry, written to row ent_dst[e]
     const sycl::event e = q.parallel_for(
         sycl::nd_range<2>({cg, (size_t) ((N + kRows - 1) / kRows) * kRows * kWarp}, {1, (size_t) kRows * kWarp}),
-        [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(kWarp)]] {
+        [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(kWarp))]] {
         const sycl::sub_group sg = it.get_sub_group();
-        const int64_t r = (int64_t) it.get_group(1) * kRows + (int64_t) sg.get_group_linear_id();
-        const int lane = (int) sg.get_local_linear_id();
+        const int64_t r = (int64_t) it.get_group(1) * kRows + (int64_t) warp32::index(sg);
+        const int lane = (int) warp32::lane(sg);
         if (r >= N) return;
         for (int g = (int) it.get_group(0); g < *n_groups; g += (int) it.get_group_range(0)) {
             const auto* wr = (const uint32_t*) ((const uint8_t*) grp_ptr[g] + L.down_off + (size_t) r * L.d_row);

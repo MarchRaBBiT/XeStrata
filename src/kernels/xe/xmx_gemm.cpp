@@ -10,6 +10,7 @@
 // from its rows, as fast as the VNNI-packed layout the XMX engines take natively (143-153 TFLOP/s against 142-147 for
 // the wide products), while the dequantizers write row-major twice as fast as packed (the 2026-10-02-xmx-gemm record).
 #include "strata/kernels/xmx_gemm.hpp"
+#include "strata/kernels/warp32.hpp"
 #include "strata/core/runtime.hpp"
 #include "strata/core/per_device.hpp"
 #include "dp4a_gemm.hpp"
@@ -152,7 +153,7 @@ struct GemmKernel {
         const int64_t strip = g / (GM * nN), r = g % (GM * nN);
         const int64_t gm = std::min<int64_t>(GM, nM - strip * GM);
         const int64_t tm = strip * GM + r % gm, tn = r / gm;
-        tile_any<E, WM, WN, PD, ACC>(sg, (int) sg.get_group_linear_id(), X, W, Y, T, N, K, ldy, tm * WM, tn * WN);
+        tile_any<E, WM, WN, PD, ACC>(sg, (int) warp32::index(sg), X, W, Y, T, N, K, ldy, tm * WM, tn * WN);
 #endif
     }
     STRATA_XMX_PROPERTIES
@@ -174,7 +175,7 @@ struct GroupedKernel {
         const int64_t ex = g / (tiles_m * nN), r = g % (tiles_m * nN), tm = r / nN, tn = r % nN;
         const int64_t row0 = bounds[ex], rows = bounds[ex + 1] - row0;
         if (tm * WM >= rows) return;   // the expert has fewer rows than the launch allows for
-        tile_any<sycl::half, WM, WN, PD>(sg, (int) sg.get_group_linear_id(), X + row0 * K, W + ex * w_stride,
+        tile_any<sycl::half, WM, WN, PD>(sg, (int) warp32::index(sg), X + row0 * K, W + ex * w_stride,
                                          Y + row0 * N, rows, N, K, N, tm * WM, tn * WN);
 #endif
     }
@@ -363,7 +364,7 @@ sycl::event rows_kernel(sycl::queue& q, bool half, const uint16_t* X, const uint
         sycl::nd_range<2>({(size_t) nb, (size_t) T * SG}, {1, SG}), [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_SUB_GROUP(SG))]] {
             const auto sg = it.get_sub_group();
             const int64_t r = (int64_t) it.get_group(1), n0 = (int64_t) it.get_group(0) * NB;
-            const int lane = (int) sg.get_local_linear_id();
+            const int lane = (int) warp32::lane(sg);
             const auto val = [half](uint16_t b) {
                 return half ? (float) sycl::bit_cast<sycl::half>(b) : sycl::bit_cast<float>((uint32_t) b << 16);
             };
@@ -388,7 +389,7 @@ sycl::event rows_kernel(sycl::queue& q, bool half, const uint16_t* X, const uint
             }
             for (int n = 0; n < NB; ++n) {
                 if (n0 + n >= N) break;
-                const float s = sycl::reduce_over_group(sg, acc[n], sycl::plus<float>());
+                const float s = warp32::reduce(sg, acc[n], sycl::plus<float>());
                 if (lane == 0) Y[r * ldy + n0 + n] = accumulate ? Y[r * ldy + n0 + n] + s : s;
             }
         });

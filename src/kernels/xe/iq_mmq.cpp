@@ -22,6 +22,7 @@
 //
 // In a source file of its own, so its kernels are in a device image apart from the Intel-only ones.
 #include "strata/kernels/iq_mmq.hpp"
+#include "strata/kernels/warp32.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 #include "strata/kernels/matrix_report.hpp"
 #include "device_target.hpp"
@@ -39,8 +40,16 @@
 #include <sycl/ext/intel/experimental/grf_size_properties.hpp>
 
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace strata::kernels {
 namespace {
@@ -507,12 +516,17 @@ struct Kernel {
     sycl::local_accessor<uint8_t, 1> lm;
 
     void dp4a_body(sycl::nd_item<1> it) const {
-        constexpr int lanes = NSG * SG, RSTEP = lanes / WN, RPT = WM / RSTEP;
+        // each work-item CPL outputs (columns CG apart, so that neighbouring work-items store neighbouring outputs)
+        // down RPT of the rows (RSTEP apart): a row's activations, read from local memory once, feed CPL products.
+        // One output a work-item read a row's 32 bytes for each 8 dp4a, and local memory's bandwidth bound the loop
+        // (gfx906: 12% of its dp4a rate).  Each output's sums are taken in the same order as before: the same bits.
+        constexpr int lanes = NSG * SG, CPL = 8, CG = WN / CPL, RSTEP = lanes / CG, RPT = WM / RSTEP;
+        static_assert(WN % CPL == 0 && lanes % CG == 0 && WM % RSTEP == 0, "the DP4A work-item's outputs");
         const int64_t g = (int64_t) it.get_group(0), per = tiles_m * tiles_n, e = g / per, r = g % per;
         const int64_t m0 = r % tiles_m * WM, n0 = r / tiles_m * WN;
         const int64_t row0 = bounds[e], rows = bounds[e + 1] - row0;
         if (m0 >= rows) return;   // the whole work-group: this expert has fewer rows than the launch
-        const int lid = (int) it.get_local_id(0), n = lid % WN, rbase = lid / WN;
+        const int lid = (int) it.get_local_id(0), cg = lid % CG, rbase = lid / CG;
         const uint8_t* wx = wtab != nullptr ? wtab[e] + woff : w + (size_t) e * expert_bytes;
         const auto base = lm.template get_multi_ptr<sycl::access::decorated::no>();
         int8_t* al = local_as<int8_t>(base + A_OFF).get();
@@ -521,8 +535,9 @@ struct Kernel {
         [[maybe_unused]] float* xul = local_as<float>(base + XU_OFF).get();
         [[maybe_unused]] float* wml = local_as<float>(base + WM_OFF).get();
         float* wsl = local_as<float>(base + WS_OFF).get();
-        float acc[RPT];
-        for (int i = 0; i < RPT; ++i) acc[i] = 0.0f;
+        float acc[RPT][CPL];
+        for (int i = 0; i < RPT; ++i)
+            for (int c = 0; c < CPL; ++c) acc[i][c] = 0.0f;
         const int64_t kb = K / 32;   // activation scales a row
         for (int64_t k0 = 0; k0 < K; k0 += KC) {
             sycl::group_barrier(it.get_group());   // the last step's tiles are read
@@ -553,24 +568,39 @@ struct Kernel {
             }
             sycl::group_barrier(it.get_group());
             for (int b = 0; b < NB; ++b) {
-                int wv[8];   // this work-item's output's block, read once for its rows
-                const int* wp = reinterpret_cast<const int*>(bl + static_cast<ptrdiff_t>(n) * LDB + static_cast<ptrdiff_t>(b) * 32);
-                for (int i = 0; i < 8; ++i) wv[i] = wp[i];
-                const float ws0 = wsl[(2 * b) * WN + n], ws1 = wsl[(2 * b + 1) * WN + n];
+                int wv[CPL][8];   // this work-item's outputs' blocks, read once for its rows
+                float ws0[CPL], ws1[CPL];
+                [[maybe_unused]] float wmn[CPL];
+                for (int c = 0; c < CPL; ++c) {
+                    const int n = cg + c * CG;
+                    const int* wp = reinterpret_cast<const int*>(bl + static_cast<ptrdiff_t>(n) * LDB + static_cast<ptrdiff_t>(b) * 32);
+                    for (int i = 0; i < 8; ++i) wv[c][i] = wp[i];
+                    ws0[c] = wsl[(2 * b) * WN + n];
+                    ws1[c] = wsl[(2 * b + 1) * WN + n];
+                    if constexpr (MIN) wmn[c] = wml[b * WN + n];
+                }
                 for (int i = 0; i < RPT; ++i) {
                     const int rr = rbase + i * RSTEP;
                     const int* ap = reinterpret_cast<const int*>(al + static_cast<ptrdiff_t>(rr) * LDA + static_cast<ptrdiff_t>(b) * 32);
-                    int s0 = 0, s1 = 0;
-                    for (int j = 0; j < 4; ++j) s0 = xe::dp4a(ap[j], wv[j], s0);
-                    for (int j = 4; j < 8; ++j) s1 = xe::dp4a(ap[j], wv[j], s1);
-                    acc[i] += xsl[b * WM + rr] * (ws0 * (float) s0 + ws1 * (float) s1);
-                    if constexpr (MIN) acc[i] -= wml[b * WN + n] * xul[b * WM + rr];
+                    int av[8];
+                    for (int j = 0; j < 8; ++j) av[j] = ap[j];
+                    const float xr = xsl[b * WM + rr];
+                    [[maybe_unused]] float xu_r = 0.0f;
+                    if constexpr (MIN) xu_r = xul[b * WM + rr];
+                    for (int c = 0; c < CPL; ++c) {
+                        int s0 = 0, s1 = 0;
+                        for (int j = 0; j < 4; ++j) s0 = xe::dp4a(av[j], wv[c][j], s0);
+                        for (int j = 4; j < 8; ++j) s1 = xe::dp4a(av[j], wv[c][j], s1);
+                        acc[i][c] += xr * (ws0[c] * (float) s0 + ws1[c] * (float) s1);
+                        if constexpr (MIN) acc[i][c] -= wmn[c] * xu_r;
+                    }
                 }
             }
         }
         for (int i = 0; i < RPT; ++i) {
             const int64_t row = m0 + rbase + (int64_t) i * RSTEP;
-            if (row < rows) dst[(int64_t) ids[row0 + row] * ld_dst + n0 + n] = acc[i];
+            if (row < rows)
+                for (int c = 0; c < CPL; ++c) dst[(int64_t) ids[row0 + row] * ld_dst + n0 + cg + c * CG] = acc[i][c];
         }
     }
 
@@ -591,8 +621,8 @@ struct Kernel {
         const int64_t row0 = bounds[e], rows = bounds[e + 1] - row0;
         if (m0 >= rows) return;   // the whole work-group: this expert has fewer rows than the launch
         const auto sg = it.get_sub_group();
-        const int sgid = (int) sg.get_group_linear_id(), lid = (int) it.get_local_id(0);
-        const int lane = (int) sg.get_local_linear_id();
+        const int sgid = (int) warp32::index(sg), lid = (int) it.get_local_id(0);
+        const int lane = (int) warp32::lane(sg);
         constexpr int lanes = NSG * SG;
         const int rs = sgid / NT * TPS * IM, cs = sgid % NT * IN;   // the sub-group's first row and column in the tile
         const uint8_t* wx = wtab != nullptr ? wtab[e] + woff : w + (size_t) e * expert_bytes;
@@ -702,8 +732,8 @@ struct Kernel {
             const int64_t row0 = bounds[e], rows = bounds[e + 1] - row0;
             if (m0 >= rows) return;   // the whole work-group: this expert has fewer rows than the launch
             const auto sg = it.get_sub_group();
-            const int sgid = (int) sg.get_group_linear_id(), lid = (int) it.get_local_id(0);
-            const int lane = (int) sg.get_local_linear_id();
+            const int sgid = (int) warp32::index(sg), lid = (int) it.get_local_id(0);
+            const int lane = (int) warp32::lane(sg);
             constexpr int lanes = NSG * SG;
             const int ms = sgid / NSGN * SGM * TM, ns = sgid % NSGN * SGN * TN;
             const uint8_t* wx = wtab != nullptr ? wtab[e] + woff : w + (size_t) e * expert_bytes;
@@ -822,8 +852,8 @@ struct Kernel {
             const int64_t row0 = bounds[e], rows = bounds[e + 1] - row0;
             if (m0 >= rows) return;   // the whole work-group: this expert has fewer rows than the launch
             const auto sg = it.get_sub_group();
-            const int sgid = (int) sg.get_group_linear_id(), lid = (int) it.get_local_id(0);
-            const int lane = (int) sg.get_local_linear_id(), lo = lane & 15, hi = lane >> 4;
+            const int sgid = (int) warp32::index(sg), lid = (int) it.get_local_id(0);
+            const int lane = (int) warp32::lane(sg), lo = lane & 15, hi = lane >> 4;
             constexpr int lanes = NSG * SG;
             const int ms = sgid / NSGN * SGM * TM, ns = sgid % NSGN * SGN * TN;
             const uint8_t* wx = wtab != nullptr ? wtab[e] + woff : w + (size_t) e * expert_bytes;
@@ -933,11 +963,14 @@ struct Kernel {
     auto get(syclex::properties_tag) const {
         // Intel's XMX bodies in the large register file: in the default one their sums and tiles spilled, 3.1x slower
         // (B70, llm-jp-4.1's experts, 256 rows an expert: 6,464 against 2,070 us)
-        if constexpr (DP4A) return syclex::properties{};   // no sub-group operations: the device's own size
+        // and the work-group's size, the bound the device compile sizes the registers by (strata/kernels/work_group.hpp)
+        constexpr int WG = NSG * SG;
+        if constexpr (DP4A)   // no sub-group operations: the device's own size
+            return syclex::properties{syclex::max_work_group_size<WG>};
         else if constexpr (IS != 0)
             return syclex::properties{syclex::sub_group_size<STRATA_SUB_GROUP(ISG)>,
-                                      sycl::ext::intel::experimental::grf_size<256>};
-        else return syclex::properties{syclex::sub_group_size<STRATA_SUB_GROUP(ISG)>};
+                                      sycl::ext::intel::experimental::grf_size<256>, syclex::max_work_group_size<WG>};
+        else return syclex::properties{syclex::sub_group_size<STRATA_SUB_GROUP(ISG)>, syclex::max_work_group_size<WG>};
     }
 };
 
@@ -978,7 +1011,7 @@ struct IntelLayoutCheck {
         int bad = 0, i = 0;
         mx::joint_matrix_apply(sg, a, [&](int32_t& v) { bad |= v != i * N + lid; ++i; });
         bad |= i != 8;
-        bad = sycl::reduce_over_group(sg, bad, sycl::bit_or<int>());
+        bad = warp32::reduce(sg, bad, sycl::bit_or<int>());
         if (lid == 0) *out = bad ? 0 : 1;
 #else
         (void) it;
@@ -1072,6 +1105,109 @@ bool takes_work_group(sycl::queue& q) {
     });
 }
 
+// DP4A (no matrix engines): from what average row count an expert (a group's rows over its experts) the 64-row tile
+// beats the 32-row one, for this type and shape on this device, timed once: 8 experts of synthetic blocks (any bits
+// decode alike) with their rows spread from half to one and a half times the average, at averages 48 to 384.  Each
+// expert's last tile is partly empty, half a tile on average, against the weights decoded once a tile, and which
+// weighs more depends on the type and the GPU: on gfx906 Flash-Next IQ2_XS's 6.3K-token prompt (124 rows an expert on
+// average) took its gate/up and down products 13% faster on the 32-row tile, Qwen3.6 UD-Q4_K_XL's (197) its experts
+// 25% faster on the 64-row one.  INT64_MAX: the 32-row tile at every size.  STRATA_MMQ_DP4A_TILE64_FROM=N fixes it.
+template<int TY, bool TAIL>
+int64_t time_dp4a_tile64_from(sycl::queue& q, int64_t w_rows, int64_t w_cols) {
+    constexpr int G = 8;
+    constexpr int64_t MEANS[] = {48, 96, 160, 256, 384};
+    constexpr int64_t RMAX = 384 * 3 / 2 * G;
+    const size_t row_bytes = (size_t) (w_cols / Dec<TY>::QK) * (size_t) Dec<TY>::BSZ, eb = row_bytes * (size_t) w_rows;
+    const size_t xq_bytes = (size_t) RMAX * (size_t) w_cols + 2 * (size_t) RMAX * (size_t) (w_cols / 32) * 4;
+    auto* w = sycl::malloc_device<uint8_t>((size_t) G * eb, q);
+    auto* xq = sycl::malloc_device<uint8_t>(xq_bytes, q);
+    auto* bounds = sycl::malloc_device<int32_t>(G + 1, q);
+    auto* ids = sycl::malloc_device<int32_t>((size_t) RMAX, q);
+    auto* dst = sycl::malloc_device<float>((size_t) RMAX * (size_t) w_rows, q);
+    int64_t from = 160;   // where nothing could be timed: between the two measured above
+    if (w && xq && bounds && ids && dst) {
+        try {
+            q.memset(w, 0x11, (size_t) G * eb);
+            q.memset(xq, 0, xq_bytes);
+            std::vector<int32_t> iota((size_t) RMAX);
+            for (int64_t i = 0; i < RMAX; ++i) iota[(size_t) i] = (int32_t) i;
+            q.memcpy(ids, iota.data(), iota.size() * 4).wait();
+            auto time_us = [&q](auto&& run) {
+                run();
+                q.wait();
+                double best = 1e30;
+                for (int t = 0; t < 3; ++t) {
+                    const auto t0 = std::chrono::steady_clock::now();
+                    for (int i = 0; i < 5; ++i) run();
+                    q.wait();
+                    best = std::min(best, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / 5);
+                }
+                return best;
+            };
+            from = INT64_MAX;
+            int64_t won32 = 0;
+            std::string said;
+            for (const int64_t m : MEANS) {
+                std::vector<int32_t> hb(G + 1, 0);
+                int64_t maxr = 0;
+                for (int e = 0; e < G; ++e) {
+                    const int64_t r = std::max<int64_t>(1, std::llround((double) m * (0.5 + (double) e / (G - 1))));
+                    hb[(size_t) e + 1] = hb[(size_t) e] + (int32_t) r;
+                    maxr = std::max(maxr, r);
+                }
+                q.memcpy(bounds, hb.data(), hb.size() * 4).wait();
+                const double t32 = time_us([&] {
+                    launch<TY, 2, 1, true, TAIL, 0>(q, w, nullptr, 0, eb, w_rows, w_cols, G, xq, RMAX, bounds, maxr, ids,
+                                                    dst, w_rows);
+                });
+                const double t64 = time_us([&] {
+                    launch<TY, 2, 2, true, TAIL, 0>(q, w, nullptr, 0, eb, w_rows, w_cols, G, xq, RMAX, bounds, maxr, ids,
+                                                    dst, w_rows);
+                });
+                char buf[48];
+                std::snprintf(buf, sizeof buf, "%s%lld: %.0f/%.0f", said.empty() ? "" : ", ", (long long) m, t32, t64);
+                said += buf;
+                if (t64 < t32) {
+                    from = won32 == 0 ? 32 : (int64_t) std::llround(std::sqrt((double) won32 * (double) m));
+                    break;
+                }
+                won32 = m;
+            }
+            if (from == INT64_MAX)
+                std::fprintf(stderr, "strata: the DP4A expert tile (type %d, %lld x %lld): 32 rows at every size (us 32/64 "
+                                     "rows at an expert's average rows %s)\n", TY, (long long) w_rows, (long long) w_cols,
+                             said.c_str());
+            else
+                std::fprintf(stderr, "strata: the DP4A expert tile (type %d, %lld x %lld): 64 rows from %lld rows an expert "
+                                     "on average (us 32/64 rows at %s)\n", TY, (long long) w_rows, (long long) w_cols,
+                             (long long) from, said.c_str());
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "strata: timing the DP4A expert tile: %s; 64 rows from 160 rows an expert\n", e.what());
+            from = 160;
+        }
+    }
+    for (void* p : {(void*) w, (void*) xq, (void*) bounds, (void*) ids, (void*) dst})
+        if (p != nullptr) sycl::free(p, q);
+    return from;
+}
+
+template<int TY, bool TAIL>
+int64_t dp4a_tile64_from(sycl::queue& q, int64_t w_rows, int64_t w_cols) {
+    static const int64_t fixed = [] {
+        const char* v = std::getenv("STRATA_MMQ_DP4A_TILE64_FROM");
+        return v != nullptr ? std::strtoll(v, nullptr, 10) : -1;
+    }();
+    if (fixed >= 0) return fixed;
+    static std::mutex mutex;
+    static std::unordered_map<sycl::device, std::map<std::pair<int64_t, int64_t>, int64_t>> per_device;
+    std::lock_guard<std::mutex> lock(mutex);
+    auto& per_shape = per_device[q.get_device()];
+    const auto key = std::make_pair(w_rows, w_cols);
+    auto it = per_shape.find(key);
+    if (it == per_shape.end()) it = per_shape.emplace(key, time_dp4a_tile64_from<TY, TAIL>(q, w_rows, w_cols)).first;
+    return it->second;
+}
+
 template<int TY>
 sycl::event by_rows(sycl::queue& q, const void* w, const uint8_t* const* wtab, size_t woff, size_t expert_bytes,
                     int64_t w_rows, int64_t w_cols, int n, const void* xq, int64_t total_rows, const int32_t* bounds,
@@ -1092,9 +1228,20 @@ sycl::event by_rows(sycl::queue& q, const void* w, const uint8_t* const* wtab, s
     // dp4a where the matrix form does not run (iq_mmq_grouped is called where one of the two does); the K-tail form
     // only for a K that is no multiple of the step, so that the others keep their loads unguarded
     const bool tail = w_cols % KC != 0;
+    // DP4A (no matrix engines): the 16-row tile up to 16 rows, then the 32-row one below the average this type's and
+    // shape's 64-row tile was timed to win from (dp4a_tile64_from), the 64-row one from there
     if (!iq_mmq_usable(q)) {
-        if (tail) STRATA_MMQ_ROWS(true, true, 0);
-        STRATA_MMQ_ROWS(true, false, 0);
+        if (max_rows <= 16) {
+            if (tail) return STRATA_MMQ_LAUNCH(1, 1, true, true, 0);
+            return STRATA_MMQ_LAUNCH(1, 1, true, false, 0);
+        }
+        const int64_t from = tail ? dp4a_tile64_from<TY, true>(q, w_rows, w_cols) : dp4a_tile64_from<TY, false>(q, w_rows, w_cols);
+        if (mean_rows < from) {
+            if (tail) return STRATA_MMQ_LAUNCH(2, 1, true, true, 0);
+            return STRATA_MMQ_LAUNCH(2, 1, true, false, 0);
+        }
+        if (tail) return STRATA_MMQ_LAUNCH(2, 2, true, true, 0);
+        return STRATA_MMQ_LAUNCH(2, 2, true, false, 0);
     }
     // Intel's XMX: the 32-row tile's work-group (128 lanes) decodes the step's weights at half the 64-row one's rate,
     // and took longer for 32 rows than the 64-row tile for 64 on the B70; so 16 rows, else 64.  Where the experts
@@ -1166,7 +1313,7 @@ struct LayoutCheck {
             int bad = 0, n = 0;
             mx::joint_matrix_apply(sg, b, a, [&](float& f, int32_t& v) { bad |= (int) f != v; ++n; });
             bad |= n != NE;
-            bad = sycl::reduce_over_group(sg, bad, sycl::bit_or<int>());
+            bad = warp32::reduce(sg, bad, sycl::bit_or<int>());
             if (lid == 0) *out = bad ? 0 : 1;
 #endif
         }

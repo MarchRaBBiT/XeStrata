@@ -7,6 +7,7 @@
 // native_router follows ggml-cuda's topk-moe at llama.cpp 3cf03257; MIT License, Copyright (c) 2023-2026 The ggml
 // authors, see third_party/main/ggml/LICENSE.  CUDA compiled it with --use_fast_math; here exp is the precise function.
 #include "strata/kernels/router_top10.hpp"
+#include "strata/kernels/warp32.hpp"
 #include "strata/kernels/native_router.hpp"
 #include "strata/core/runtime.hpp"
 #include "device_caps.hpp"
@@ -65,23 +66,23 @@ sycl::event router_top10_launch(sycl::queue& q, const float* logits, int n_token
         sycl::local_accessor<int, 1> s_rid(sycl::range<1>(RT_MAX_THREADS / WARP), h);
         sycl::local_accessor<D, 1> s_sum(sycl::range<1>(1), h);
         h.parallel_for(sycl::nd_range<1>((size_t) n_tokens * threads, threads),
-                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const auto g = it.get_group();
             const sycl::sub_group sg = it.get_sub_group();
             const int t = (int) it.get_group(0);
             const int tid = (int) it.get_local_id(0), nt = threads;
-            const int warp = (int) sg.get_group_linear_id(), lane = (int) sg.get_local_linear_id();
+            const int warp = (int) warp32::index(sg), lane = (int) warp32::lane(sg);
             const float* l = logits + (size_t) t * n_expert;
 
             // ---- softmax over ALL experts, for stability: the max (an exact, order-independent tree)
             float mx = -INFINITY;
             for (int x = tid; x < n_expert; x += nt) mx = sycl::fmax(mx, l[x]);
-            mx = sycl::reduce_over_group(sg, mx, sycl::maximum<float>());
+            mx = warp32::reduce(sg, mx, sycl::maximum<float>());
             if (lane == 0) s_red[warp] = mx;
             sycl::group_barrier(g);
             if (warp == 0) {
                 float v = lane < nw ? s_red[lane] : -INFINITY;
-                v = sycl::reduce_over_group(sg, v, sycl::maximum<float>());
+                v = warp32::reduce(sg, v, sycl::maximum<float>());
                 if (lane == 0) s_red[0] = v;
             }
             sycl::group_barrier(g);
@@ -170,13 +171,13 @@ bool native_router_enabled() { return native_enabled.load(std::memory_order_rela
 namespace {
 // One sub-group per token: the pinned kernel's 32 x 8 block has only its first warp active.
 void launch_native_router(sycl::queue& q, const float* logits_all, int32_t* ids_all, float* weights_all, int n_tok) {
-    q.parallel_for(sycl::nd_range<1>((size_t) n_tok * WARP, WARP), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+    q.parallel_for(sycl::nd_range<1>((size_t) n_tok * WARP, WARP), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
         const sycl::sub_group sg = it.get_sub_group();
         const size_t tok = it.get_group(0);
         const float* logits = logits_all + tok * 512;
         int32_t* ids = ids_all + tok * 10;
         float* weights = weights_all + tok * 10;
-        const int lane = (int) sg.get_local_linear_id();
+        const int lane = (int) warp32::lane(sg);
         float values[16];
         for (int i = 0; i < 16; ++i) values[i] = logits[lane + i * 32];
         float maximum = -INFINITY;
@@ -237,13 +238,13 @@ void route_prior_top10(const float* logits, const int32_t* res_layer, float lamb
     if (n_tok <= 0) return;
     if (!stream || res_layer == nullptr) throw std::invalid_argument("route-prior requires a stream and the residency row");
     queue_for(stream, true).parallel_for(sycl::nd_range<1>((size_t) n_tok * WARP, WARP), [=](sycl::nd_item<1> it)
-                                         [[sycl::reqd_sub_group_size(WARP)]] {
+                                         [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
         const sycl::sub_group sg = it.get_sub_group();
         const size_t tok = it.get_group(0);
         const float* lg = logits + tok * 512;
         int32_t* id = ids + tok * 10;
         float* w = weights + tok * 10;
-        const int lane = (int) sg.get_local_linear_id();
+        const int lane = (int) warp32::lane(sg);
         float p[16], s[16];
         float mx = -INFINITY;
         for (int i = 0; i < 16; ++i) { p[i] = lg[lane + 32 * i]; mx = sycl::fmax(mx, p[i]); }
@@ -293,9 +294,9 @@ void native_route_resident(const float* logits, int32_t* ids, float* weights, co
     }();
     if (!serial_env) {
         queue_for(stream, true).parallel_for(
-            sycl::nd_range<1>((size_t) n_tok * WARP, WARP), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+            sycl::nd_range<1>((size_t) n_tok * WARP, WARP), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
                 const sycl::sub_group sg = it.get_sub_group();
-                const int lane = (int) sg.get_local_linear_id();
+                const int lane = (int) warp32::lane(sg);
                 const size_t t = it.get_group_linear_id();
                 const float* l = logits + t * 512;
                 int32_t* idp = ids + t * 10;

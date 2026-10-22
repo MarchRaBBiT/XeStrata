@@ -5,6 +5,7 @@
 // convolution, and the norms around it.  Work-group shapes are the CUDA kernels'; a warp is a sub-group of 32, and
 // lane 0 of its xor butterfly adds in the order of CUDA's shuffle-down tree.
 #include "strata/kernels/gdn.hpp"
+#include "strata/kernels/warp32.hpp"
 #include "strata/core/runtime.hpp"
 #include "device_caps.hpp"
 #define STRATA_DEVICE_ARCH_TAG_TU xe_gdn
@@ -119,13 +120,13 @@ namespace {
 template <typename D>
 sycl::event gdn_l2_norm_t(sycl::queue& q, float* x, int64_t rows, int ncols, float eps) {
     return q.parallel_for(sycl::nd_range<1>((size_t) rows * WARP, WARP),
-                          [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                          [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
         const sycl::sub_group sg = it.get_sub_group();
         float* p = x + it.get_group(0) * (size_t) ncols;
         const int t = (int) it.get_local_id(0);
         D acc = 0;
         for (int i = t; i < ncols; i += WARP) acc += (D) p[i] * (D) p[i];
-        const D ssum = sycl::group_broadcast(sg, warp_sum(sg, acc), 0);
+        const D ssum = warp32::bcast(sg, warp_sum(sg, acc), 0);
         const float inv = (float) ((D) 1 / sycl::sqrt(ssum + (D) eps));
         for (int i = t; i < ncols; i += WARP) p[i] *= inv;
     });
@@ -134,7 +135,7 @@ template <typename D>
 sycl::event gdn_out_norm_t(sycl::queue& q, const float* o, const float* z, const float* ssm_norm, float* y,
                            int64_t h_v, int Si, float eps, bool silu) {
     return q.parallel_for(sycl::nd_range<1>((size_t) h_v * WARP, WARP),
-                          [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                          [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
         const sycl::sub_group sg = it.get_sub_group();
         const size_t h = it.get_group(0);
         const float* po = o + h * Si;
@@ -143,7 +144,7 @@ sycl::event gdn_out_norm_t(sycl::queue& q, const float* o, const float* z, const
         const int t = (int) it.get_local_id(0);
         D acc = 0;
         for (int i = t; i < Si; i += WARP) acc += (D) po[i] * (D) po[i];
-        const D ssum = sycl::group_broadcast(sg, warp_sum(sg, acc), 0);
+        const D ssum = warp32::bcast(sg, warp_sum(sg, acc), 0);
         const float inv = (float) ((D) 1 / sycl::sqrt(ssum / (D) Si + (D) eps));
         for (int i = t; i < Si; i += WARP) {
             const float gz = sigmoid_f(pz[i]);

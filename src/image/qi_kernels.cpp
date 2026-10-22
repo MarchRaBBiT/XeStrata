@@ -3,6 +3,7 @@
 // src/image/qi_kernels.cpp - see include/strata/image/qi_kernels.hpp.
 
 #include "strata/image/qi_kernels.hpp"
+#include "strata/kernels/warp32.hpp"
 
 #include "strata/core/runtime.hpp"
 #include "strata/kernels/f16_bits.hpp"

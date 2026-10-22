@@ -9,6 +9,8 @@
 // Warp sums are xor butterflies.  Lane 0 of a butterfly adds the same partial sums in the same order as CUDA's
 // shuffle-down tree, so the row results of the warp-per-row kernel are those of the CUDA kernel.
 #include "strata/kernels/bf16_gemv.hpp"
+#include "strata/kernels/warp32.hpp"
+#include "strata/kernels/work_group.hpp"
 #include "strata/kernels/bf16_bits.hpp"
 #include "strata/core/runtime.hpp"
 #include "strata/core/per_device.hpp"
@@ -63,11 +65,11 @@ sycl::event launch_warp(sycl::queue& q, const uint16_t* x, const uint16_t* w, fl
     const int warps = THREADS / WARP;
     const size_t groups = (size_t) ((n_out + warps - 1) / warps);
     return q.parallel_for(sycl::nd_range<1>(groups * THREADS, THREADS),
-                          [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                          [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
         const sycl::sub_group sg = it.get_sub_group();
-        const int64_t o = (int64_t) it.get_group(0) * warps + (int64_t) sg.get_group_linear_id();
+        const int64_t o = (int64_t) it.get_group(0) * warps + (int64_t) warp32::index(sg);
         if (o >= n_out) return;
-        const int lane = (int) sg.get_local_linear_id();
+        const int lane = (int) warp32::lane(sg);
         const uint16_t* row = w + o * n_in;
         float acc = 0.0f;
         for (int64_t i = lane; i < n_in; i += WARP) acc += f32_from_bf16(x[i]) * f32_from_bf16(row[i]);
@@ -95,7 +97,7 @@ sycl::event launch_mmvf(sycl::queue& q, const float* x, int64_t ldx, const W* w,
     return q.submit([&](sycl::handler& h) {
         sycl::local_accessor<float, 1> partials(sycl::range<1>(NT * 32), h);
         h.parallel_for(sycl::nd_range<1>((size_t) (n_out + (aux.w ? 1 : 0)) * BLOCK_SIZE, BLOCK_SIZE),
-                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int t = (int) it.get_local_id(0);
             const size_t rowi = it.get_group(0);
@@ -158,7 +160,7 @@ sycl::event launch_mmvf_rows(sycl::queue& q, const float* x, int64_t ldx, const 
     return q.submit([&](sycl::handler& h) {
         sycl::local_accessor<float, 1> partials(sycl::range<1>((size_t) RPB * NT * 32), h);
         h.parallel_for(sycl::nd_range<1>((size_t) ((n_out + RPB - 1) / RPB) * BLOCK_SIZE, BLOCK_SIZE),
-                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, BLOCK_SIZE)]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int t = (int) it.get_local_id(0);
             const int64_t o0 = (int64_t) it.get_group(0) * RPB;

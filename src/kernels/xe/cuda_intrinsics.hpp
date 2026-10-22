@@ -30,8 +30,8 @@ inline int dp4a(int a, int b, int c) {
     return r;
 #elif defined(__SYCL_DEVICE_ONLY__) && (defined(__GFX11__) || defined(__GFX12__))
     return __builtin_amdgcn_sudot4(true, a, true, b, c, false);   // v_dot4_i32_iu8, both operands signed, no clamp
-#elif defined(__SYCL_DEVICE_ONLY__) && defined(__GFX10__)
-    return __builtin_amdgcn_sdot4(a, b, c, false);                // RDNA2's v_dot4_i32_i8 (gfx103x), no clamp
+#elif defined(__SYCL_DEVICE_ONLY__) && (defined(__GFX10__) || defined(__gfx906__))
+    return __builtin_amdgcn_sdot4(a, b, c, false);                // v_dot4_i32_i8 (RDNA2's gfx103x, gfx906), no clamp
 #elif defined(__SYCL_DEVICE_ONLY__) && !defined(__NVPTX__) && !defined(__AMDGCN__)
     return c + __spirv_SDotKHR(a, b, 0);
 #else

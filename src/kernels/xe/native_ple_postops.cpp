@@ -8,6 +8,7 @@
 // CUDA's explicit round-to-nearest operations are plain operations here, since the library does not contract; the
 // fma with a zero addend (ggml SCALE's zero bias) stays an fma.  expf and sqrtf are the precise ones.
 #include "strata/kernels/native_ple_postops.hpp"
+#include "strata/kernels/warp32.hpp"
 #include "strata/kernels/native_gr_norm.hpp"
 #include "strata/kernels/ngram.hpp"
 #include "strata/kernels/f16_bits.hpp"
@@ -45,7 +46,7 @@ sycl::queue& queue_for(void* stream) {
 void gate(sycl::queue& q, const float* key, const float* query, float* g, int rows, float scale) {
     q.submit([&](sycl::handler& h) {
         sycl::local_accessor<float, 1> partials(sycl::range<1>(32), h);
-        h.parallel_for(sycl::nd_range<1>((size_t) rows * 512, 512), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        h.parallel_for(sycl::nd_range<1>((size_t) rows * 512, 512), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int tid = (int) it.get_local_id(0);
             const size_t row = it.get_group(0);
@@ -82,7 +83,7 @@ void rms_rep_launch(sycl::queue& q, const float* input, const float* gamma, floa
     q.submit([&](sycl::handler& h) {
         sycl::local_accessor<float, 1> sums(sycl::range<1>(32), h);
         h.parallel_for(sycl::nd_range<1>((size_t) rows * BlockSize, BlockSize),
-                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int tid = (int) it.get_local_id(0);
             const size_t row_offset = it.get_group(0) * N;

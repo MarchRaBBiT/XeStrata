@@ -8,6 +8,7 @@
 // The (value, index) argmax reductions are xor butterflies.  Their comparison is a total order (larger value, then
 // smaller index), and lane 0 of a butterfly combines the same lanes in the same order as CUDA's shuffle-down tree.
 #include "strata/kernels/sampler.hpp"
+#include "strata/kernels/warp32.hpp"
 #include "strata/core/runtime.hpp"
 #include "strata/core/coupled_draft.hpp"
 #include "device_caps.hpp"
@@ -230,7 +231,7 @@ sycl::event sample_launch(sycl::queue& q, const float* logits, int n_tokens, int
         sycl::local_accessor<int, 1> sel_ids(sycl::range<1>(KMAX), h);
         sycl::local_accessor<float, 1> sel_logit(sycl::range<1>(KMAX), h);
         h.parallel_for(sycl::nd_range<1>((size_t) n_tokens * THREADS, THREADS),
-                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const int t = (int) it.get_group(0);
             const int tid = (int) it.get_local_id(0);
             const float* l = logits + (size_t) t * n_vocab;
@@ -317,7 +318,7 @@ sycl::event split_stage1(sycl::queue& q, const float* logits, int n_tokens, int 
         sycl::local_accessor<float, 1> sv(sycl::range<1>(SPLIT_T / WARP), h);
         sycl::local_accessor<int, 1> si(sycl::range<1>(SPLIT_T / WARP + 1), h);
         h.parallel_for(sycl::nd_range<2>({(size_t) n_tokens, (size_t) nb * SPLIT_T}, {1, (size_t) SPLIT_T}),
-                       [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                       [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const int t = (int) it.get_group(0), j = (int) it.get_group(1), tid = (int) it.get_local_id(1);
             const int base = j * SPLIT_BL, n = sycl::min(SPLIT_BL, n_vocab - base);
             const float* l = logits + (size_t) t * n_vocab;
@@ -387,7 +388,7 @@ sycl::event split_stage2(sycl::queue& q, int n_tokens, int n_vocab, SamplerParam
         sycl::local_accessor<int, 1> sel_ids(sycl::range<1>(KMAX), h);
         sycl::local_accessor<float, 1> sel_logit(sycl::range<1>(KMAX), h);
         h.parallel_for(sycl::nd_range<2>({(size_t) n_tokens, (size_t) SPLIT_T}, {1, (size_t) SPLIT_T}),
-                       [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                       [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const int t = (int) it.get_group(0), tid = (int) it.get_local_id(1);
             for (int c = tid; c < m; c += SPLIT_T) {
                 const int id = li[(size_t) t * m + c];

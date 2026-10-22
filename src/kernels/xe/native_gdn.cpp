@@ -9,6 +9,8 @@
 //
 // CUDA compiled this with --use_fast_math to match ggml-cuda; the Xe version uses the precise exp and sqrt.
 #include "strata/kernels/native_gdn.hpp"
+#include "strata/kernels/warp32.hpp"
+#include "strata/kernels/work_group.hpp"
 #include "strata/core/runtime.hpp"
 #define STRATA_DEVICE_ARCH_TAG_TU xe_native_gdn
 #include "strata/kernels/device_arch_tag.hpp"
@@ -71,11 +73,11 @@ void native_gdn_step(float* state, const float* q, const float* k, const float* 
     const float scale = 1.0f / sycl::sqrt(float(S));
     const int h_k = int(shape.h_k), h_v = int(shape.h_v);
     queue.parallel_for(sycl::nd_range<2>({size_t(h_v), size_t(S) * WARP}, {1, size_t(COLS) * WARP}),
-                       [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                       [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
         const sycl::sub_group sg = it.get_sub_group();
         const int head = int(it.get_group(0));
-        const int lane = int(sg.get_local_linear_id());
-        const int col = int(it.get_group(1)) * COLS + int(sg.get_group_linear_id());
+        const int lane = int(warp32::lane(sg));
+        const int col = int(it.get_group(1)) * COLS + int(warp32::index(sg));
         const int q_head = head % h_k;
         float s_shard[4], k_reg[4], q_reg[4];
         for (int r = 0; r < 4; ++r) {
@@ -122,7 +124,7 @@ void native_gdn_step_rows(float* state, const float* h, int64_t h_stride, const 
     queue.submit([&](sycl::handler& cgh) {
         sycl::local_accessor<float, 1> part(sycl::range<1>(size_t(RG) * WARP), cgh);
         cgh.parallel_for(sycl::nd_range<2>({size_t(h_v), size_t(S / WARP) * RG * WARP}, {1, size_t(RG) * WARP}),
-                         [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                         [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, RG * WARP)]] {
             const int head = int(it.get_group(0));
             const int lane = int(it.get_local_id(1)) % WARP, rg = int(it.get_local_id(1)) / WARP;
             const int col = int(it.get_group(1)) * WARP + lane;

@@ -7,6 +7,7 @@
 // The host pools are read and written by kernels (the resolve copy here, the KV appends), so on Xe they must be host
 // USM: memory registered only for device copies is not addressable from a kernel.  A warp is a sub-group of 32.
 #include "strata/kernels/kv_stream.hpp"
+#include "strata/kernels/warp32.hpp"
 #include "strata/kernels/kv_q4.hpp"
 #include "strata/kernels/kv_q8.hpp"
 #include "strata/core/runtime.hpp"
@@ -80,12 +81,12 @@ using local_atomic = sycl::atomic_ref<T, sycl::memory_order::relaxed, sycl::memo
 template <int NW>
 inline int block_scan(const sycl::nd_item<1>& it, int v, const sycl::local_accessor<int, 1>& warp_sums, int& total) {
     const sycl::sub_group sg = it.get_sub_group();
-    const int lane = (int) sg.get_local_linear_id(), w = (int) sg.get_group_linear_id();
-    const int x = sycl::inclusive_scan_over_group(sg, v, sycl::plus<int>());
+    const int lane = (int) warp32::lane(sg), w = (int) warp32::index(sg);
+    const int x = warp32::inclusive_scan(sg, v, sycl::plus<int>());
     if (lane == WARP - 1) warp_sums[w] = x;
     sycl::group_barrier(it.get_group());
     if (w == 0) {
-        const int y = sycl::inclusive_scan_over_group(sg, lane < NW ? (int) warp_sums[lane] : 0, sycl::plus<int>());
+        const int y = warp32::inclusive_scan(sg, lane < NW ? (int) warp_sums[lane] : 0, sycl::plus<int>());
         if (lane < NW) warp_sums[lane] = y;
     }
     sycl::group_barrier(it.get_group());
@@ -131,7 +132,7 @@ void resolve_launch(sycl::queue& queue, const KvStreamMap mm, const int32_t* ids
     queue.submit([&](sycl::handler& hd) {
         sycl::local_accessor<int, 1> sh(sycl::range<1>(3), hd);          // s_nmiss, s_lookups, s_cut
         sycl::local_accessor<int, 1> warp_sums(sycl::range<1>(32), hd);
-        hd.parallel_for(sycl::nd_range<1>(RT, RT), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        hd.parallel_for(sycl::nd_range<1>(RT, RT), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const auto grp = it.get_group();
             const int tid = (int) it.get_local_id(0);
             local_atomic<int> s_nmiss(sh[0]), s_lookups(sh[1]);

@@ -7,6 +7,8 @@
 // Work-group shapes, explicit fmaf chains and summation orders are the CUDA kernels'.  CUDA's __expf and rsqrtf
 // become the precise exp and SYCL's rsqrt.
 #include "strata/kernels/fused_gdn.hpp"
+#include "strata/kernels/warp32.hpp"
+#include "strata/kernels/work_group.hpp"
 #include "strata/kernels/gdn.hpp"
 #include "strata/core/runtime.hpp"
 #define STRATA_DEVICE_ARCH_TAG_TU xe_fused_gdn
@@ -46,7 +48,7 @@ void fused_gdn_conv_l2(float* history, const float* qkv, const float* conv_w, fl
     auto& q = queue_for(stream, "fused_gdn_conv_l2");
     const auto e = q.submit([&](sycl::handler& hd) {
         sycl::local_accessor<float, 1> part(sycl::range<1>(S / WARP), hd);
-        hd.parallel_for(sycl::nd_range<1>((size_t) channels, S), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        hd.parallel_for(sycl::nd_range<1>((size_t) channels, S), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int tid = (int) it.get_local_id(0);
             const int c = (int) it.get_global_id(0);
@@ -76,10 +78,10 @@ void fused_gdn_ab(const float* x, const uint16_t* w_alpha, const uint16_t* w_bet
     auto& q = queue_for(stream, "fused_gdn_ab");
     const int n = n_embd;
     const size_t groups = (size_t) ((2 * h_v + 7) / 8);
-    const auto e = q.parallel_for(sycl::nd_range<1>(groups * 256, 256), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+    const auto e = q.parallel_for(sycl::nd_range<1>(groups * 256, 256), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
         const sycl::sub_group sg = it.get_sub_group();
-        const int row = (int) it.get_group(0) * 8 + (int) sg.get_group_linear_id();
-        const int lane = (int) sg.get_local_linear_id();
+        const int row = (int) it.get_group(0) * 8 + (int) warp32::index(sg);
+        const int lane = (int) warp32::lane(sg);
         if (row >= 2 * h_v) return;   // uniform over the sub-group
         const bool is_beta = row >= h_v;
         const int r = is_beta ? row - h_v : row;
@@ -121,7 +123,7 @@ void fused_gdn_step_norm(float* state, const float* q, const float* k, const flo
         sycl::local_accessor<float, 1> wsum(sycl::range<1>(S * RG / WARP), hd);
         const bool silu = gdn_silu_gate();   // the closing norm's gate (gdn.hpp)
         // one work-group per head; work-item tid = rg * 128 + col, as CUDA's (col, rg) block linearises
-        hd.parallel_for(sycl::nd_range<1>((size_t) h_v * S * RG, S * RG), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        hd.parallel_for(sycl::nd_range<1>((size_t) h_v * S * RG, S * RG), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, S * RG)]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int head = (int) it.get_group(0);
             const int tid = (int) it.get_local_id(0);

@@ -8,6 +8,7 @@
 // separately rounded, which CUDA spelled with __dadd_rn/__dmul_rn.  A warp is a sub-group of 32.  The CUDA entry
 // points exited on a bad argument; these throw core::DeviceError.
 #include "strata/kernels/qsa.hpp"
+#include "strata/kernels/warp32.hpp"
 #define STRATA_DEVICE_ARCH_TAG_TU xe_qsa
 #include "strata/kernels/device_arch_tag.hpp"
 
@@ -180,13 +181,13 @@ void qsa_index_step(const float* pooled, const float* q_idx, const float* bias, 
         return queue.submit([&](sycl::handler& hd) {
             sycl::local_accessor<D, 1> s_dot(sycl::range<1>(32), hd);
             hd.parallel_for(sycl::nd_range<1>((size_t) max_blocks * threads, threads),
-                            [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                            [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
                 const long long n_bid = (long long) step[kStepNBid];
                 const long long n_kv = (long long) step[kStepNKv];
                 const long long b = (long long) it.get_group(0);
                 if (b > n_bid) return;                       // uniform across the group
                 const sycl::sub_group sg = it.get_sub_group();
-                const int wid = (int) sg.get_group_linear_id(), lane = (int) sg.get_local_linear_id();
+                const int wid = (int) warp32::index(sg), lane = (int) warp32::lane(sg);
                 if (wid == 0) s_dot[lane] = (D) 0;             // the first work-item reads all idx_n_head entries
                 sycl::group_barrier(it.get_group());
                 D acc = (D) 0;
@@ -362,7 +363,7 @@ void qsa_attend_step(const float* q, const uint16_t* k_scratch, const uint16_t* 
     const auto e = queue.submit([&](sycl::handler& hd) {
         sycl::local_accessor<float, 1> s_w(sycl::range<1>((size_t) max_ids + 32), hd);
         hd.parallel_for(sycl::nd_range<1>((size_t) n_head * head_dim, head_dim),
-                        [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                        [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const auto g = it.get_group();
             const sycl::sub_group sg = it.get_sub_group();
             const long long n_ids = (long long) step[kStepWidth];
@@ -376,7 +377,7 @@ void qsa_attend_step(const float* q, const uint16_t* k_scratch, const uint16_t* 
             }
             const int kv = h / (n_head / n_head_kv);       // ops.cpp L8729: iv2 = iq2 / rv2, NOT h % n_head_kv
             const float scale = 1.0f / sycl::sqrt((float) head_dim);
-            const int lane = (int) sg.get_local_linear_id(), wid = (int) sg.get_group_linear_id();
+            const int lane = (int) warp32::lane(sg), wid = (int) warp32::index(sg);
             const int nwarp = (bdim + WARP - 1) / WARP;
             auto red = [&](int i) -> float& { return s_w[i]; };
             auto w = [&](long long j) -> float& { return s_w[32 + j]; };

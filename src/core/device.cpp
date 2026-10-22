@@ -55,14 +55,16 @@ bool engine_backend(const sycl::device& d) {
 // is listed whenever the runtime has the backend, also by a build without that target (STRATA_CUDA_ARCHS).
 struct ProbeKernel;
 
-// Why a GPU cannot run the engine, from what it reports (empty: it can).  The kernels take 32-wide sub-groups, FP16
-// and device and host USM; nothing is chosen by device ID or name (AGENTS.md).
+// Why a GPU cannot run the engine, from what it reports (empty: it can).  The kernels take 32-wide sub-groups (or
+// 64-wide ones, two 32-lane warps each: strata/kernels/warp32.hpp), FP16 and device and host USM; nothing is chosen
+// by device ID or name (AGENTS.md).  Whether this build has the code for the GPU, the probe kernel says.
 std::string unusable(const sycl::device& d) {
     if (!d.has(sycl::aspect::usm_device_allocations) || !d.has(sycl::aspect::usm_host_allocations))
         return "no device and host USM";
     if (!d.has(sycl::aspect::fp16)) return "no FP16";
     const auto sg = d.get_info<sycl::info::device::sub_group_sizes>();
-    if (std::find(sg.begin(), sg.end(), size_t(32)) == sg.end()) return "no 32-wide sub-groups";
+    const auto lists = [&sg](size_t n) { return std::find(sg.begin(), sg.end(), n) != sg.end(); };
+    if (!lists(32) && !lists(64)) return "no 32- or 64-wide sub-groups";
     try {
         const sycl::context ctx(d);
         (void) sycl::get_kernel_bundle<sycl::bundle_state::executable>(ctx, {d},

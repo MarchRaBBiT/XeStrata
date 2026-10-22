@@ -6,6 +6,7 @@
 // One work-group of 64 (two sub-groups of 32) per (head, group, K or V), as in the CUDA kernel.  Each value is
 // quantized against the STORED (fp16-rounded) scale, and __float2int_rn's round-half-to-even is sycl::rint's.
 #include "strata/kernels/kv_q8.hpp"
+#include "strata/kernels/warp32.hpp"
 #include "strata/kernels/f16_bits.hpp"
 #include "strata/core/runtime.hpp"
 #define STRATA_DEVICE_ARCH_TAG_TU xe_kv_q8
@@ -46,7 +47,7 @@ void kv_append_q8_steps(int8_t* k_q, int8_t* v_q, uint16_t* k_scale, uint16_t* v
         sycl::local_accessor<float, 1> warp_max(sycl::range<1>(2), hd);
         hd.parallel_for(sycl::nd_range<3>({(size_t) n_tok * planes, (size_t) groups, (size_t) kv_heads * KV_Q8_GROUP},
                                           {1, 1, KV_Q8_GROUP}),
-                        [=](sycl::nd_item<3> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                        [=](sycl::nd_item<3> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const int j = (int) it.get_group(0) / planes;
             const long long pos = (long long) step[(long long) j * step_stride + kStepPos];
             const int h = (int) it.get_group(2), g = (int) it.get_group(1), t = (int) it.get_local_id(2);

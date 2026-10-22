@@ -4,6 +4,7 @@
 // src/kernels/xe/kv_q4.cpp - the Xe port of Strata's src/kernels/cuda/kv_q4.cu: Q4_0 KV storage after a 256-point Walsh-Hadamard
 // rotation.  One sub-group of 32 per Q4_0 block or Hadamard row, as in the CUDA kernels.
 #include "strata/kernels/kv_q4.hpp"
+#include "strata/kernels/warp32.hpp"
 #include "strata/kernels/f16_bits.hpp"
 #include "strata/kernels/kv_stream.hpp"
 #include "strata/core/runtime.hpp"
@@ -61,7 +62,7 @@ void fwht256_cuda(const float* src, float* dst, int64_t n_rows, void* stream) {
     const size_t groups = (size_t) ((n_rows + rows_per_group - 1) / rows_per_group);
     const float scale = 1.0f / 16.0f;
     const auto e = queue_for(stream).parallel_for(sycl::nd_range<2>({groups * rows_per_group, WARP}, {rows_per_group, WARP}),
-                                                  [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                                                  [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
         constexpr int N = 256;
         constexpr int el_w = N / WARP;   // 8
         const int64_t r = (int64_t) it.get_global_id(0);
@@ -107,7 +108,7 @@ void kv_append_q4_steps(uint8_t* k_q4, uint8_t* v_q4, const int32_t* page_table,
     const auto e = queue_for(stream).parallel_for(
         sycl::nd_range<3>({(size_t) n_steps * planes, (size_t) (head_dim / QK4_0), (size_t) kv_heads * WARP},
                           {1, 1, WARP}),
-        [=](sycl::nd_item<3> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        [=](sycl::nd_item<3> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const int j = (int) it.get_group(0) / planes;
             const long long pos = (long long) step[(long long) j * step_stride + kStepPos];
             const int h = (int) it.get_group(2), b = (int) it.get_group(1), t = (int) it.get_local_id(2);
@@ -142,7 +143,7 @@ void kv_append_q4(uint8_t* k_q4, uint8_t* v_q4, const int32_t* page_table, int64
     for (int is_v_grid = 0; is_v_grid < 2; ++is_v_grid) {
         e = q.parallel_for(
             sycl::nd_range<3>({(size_t) T, (size_t) kv_heads, (size_t) (head_dim / QK4_0) * WARP}, {1, 1, WARP}),
-            [=](sycl::nd_item<3> it) [[sycl::reqd_sub_group_size(WARP)]] {
+            [=](sycl::nd_item<3> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
                 const long long t = (long long) it.get_group(0);
                 const long long pos = pos0 + t;
                 const int h = (int) it.get_group(1), b = (int) it.get_group(2), th = (int) it.get_local_id(2);

@@ -7,6 +7,8 @@
 // Work-group shapes and reduction orders are the CUDA kernels'; a warp is a sub-group of 32.  CUDA's __expf and
 // rsqrtf become the precise exp and SYCL's rsqrt; explicit fmaf calls stay fused.
 #include "strata/kernels/fused_gr.hpp"
+#include "strata/kernels/warp32.hpp"
+#include "strata/kernels/work_group.hpp"
 #include "strata/kernels/bf16_bits.hpp"
 #include "strata/kernels/verify_kernels.hpp"
 #include "strata/kernels/native_mmvq.hpp"
@@ -100,7 +102,7 @@ template<class XnStore, class RsStore>
 inline void norm_step(const sycl::nd_item<1>& it, const FusedGrArgs& a, float* xn, const sycl::local_accessor<float, 1>& part,
                       const sycl::local_accessor<float, 1>& s_rs, XnStore, RsStore write_rs) {
     const sycl::sub_group sg = it.get_sub_group();
-    const int t = (int) it.get_local_id(0), lane = (int) sg.get_local_linear_id(), warp = (int) sg.get_group_linear_id();
+    const int t = (int) it.get_local_id(0), lane = (int) warp32::lane(sg), warp = (int) warp32::index(sg);
     float gw[HC];
     for (int c = 0; c < HC; ++c) gw[c] = a.apply ? 2.0f * sigmoidf_(a.inj_prev[c] / (float) HC) : 0.0f;
     float ss[HC] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -188,10 +190,10 @@ sycl::event gr_up_q8(sycl::queue& q, const GrMulti& m, const float* part, const 
         sycl::local_accessor<float, 1> g(sycl::range<1>((size_t) kFusedGrMaxT * HC * COLS), h);
         sycl::local_accessor<float, 1> mx(sycl::range<1>((size_t) kFusedGrMaxT * COLS), h);
         const TokArgs tok(h);
-        h.parallel_for(sycl::nd_range<1>((size_t) (N / COLS) * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        h.parallel_for(sycl::nd_range<1>((size_t) (N / COLS) * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             tok.stage(m, it);
             const sycl::sub_group sg = it.get_sub_group();
-            const int t = (int) it.get_local_id(0), lane = (int) sg.get_local_linear_id(), warp = (int) sg.get_group_linear_id();
+            const int t = (int) it.get_local_id(0), lane = (int) warp32::lane(sg), warp = (int) warp32::index(sg);
             const int grp = (int) it.get_group(0);
             const int d0 = grp * COLS;
             if (t < T * HC) {
@@ -310,11 +312,11 @@ sycl::event gr_read_q8(sycl::queue& q, const GrMulti& m, float* part, unsigned l
         sycl::local_accessor<float, 1> red(sycl::range<1>((size_t) WARPS * kFusedGrMaxT), h);
         const TokArgs tok(h);
         h.parallel_for(sycl::nd_range<2>(sycl::range<2>((size_t) (Q8_RG + 1) * THREADS, Q8_NKC), sycl::range<2>(THREADS, 1)),
-                       [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                       [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, THREADS, 1)]] {
             tok.stage(m, it);
             const sycl::sub_group sg = it.get_sub_group();
-            const int t = (int) it.get_local_id(0), lane = (int) sg.get_local_linear_id();
-            const int warp = (int) sg.get_group_linear_id();
+            const int t = (int) it.get_local_id(0), lane = (int) warp32::lane(sg);
+            const int warp = (int) warp32::index(sg);
             const int rg = (int) it.get_group(0), kc = (int) it.get_group(1), c = kc / Q8_CPS;
             const bool inj = rg == Q8_RG;   // the inject rows, the pack's BF16 (the GGUF's are F32 holding BF16)
             const int nrows = inj ? ((m.a[0].w_inject != nullptr && warp < HC) ? 1 : 0) : Q8_RPW;
@@ -416,7 +418,7 @@ sycl::event gr_up_fast(sycl::queue& q, const GrMulti& m) {
         sycl::local_accessor<sycl::float4, 1> lo(sycl::range<1>(kFusedGrMaxT * LR / 4), h);
         sycl::local_accessor<float, 1> g(sycl::range<1>(kFusedGrMaxT * HC * UPM_COLS), h);
         const TokArgs tok(h);
-        h.parallel_for(sycl::nd_range<1>((size_t) UPM_BLOCKS * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        h.parallel_for(sycl::nd_range<1>((size_t) UPM_BLOCKS * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, THREADS)]] {
             tok.stage(m, it);
             const sycl::sub_group sg = it.get_sub_group();
             const int t = (int) it.get_local_id(0), j = t & 7, grp = t >> 3;
@@ -540,12 +542,12 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
             sycl::local_accessor<float, 1> part(sycl::range<1>(WARPS), h);
             sycl::local_accessor<float, 1> s_rs(sycl::range<1>(1), h);
             const TokArgs tok(h);
-            h.parallel_for(sycl::nd_range<1>((size_t) n_tok * HC * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+            h.parallel_for(sycl::nd_range<1>((size_t) n_tok * HC * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, THREADS)]] {
                 tok.stage(m, it);
                 const sycl::sub_group sg = it.get_sub_group();
                 const int k = (int) it.get_group(0) / HC, c = (int) it.get_group(0) % HC;
-                const int t = (int) it.get_local_id(0), lane = (int) sg.get_local_linear_id();
-                const int warp = (int) sg.get_group_linear_id();
+                const int t = (int) it.get_local_id(0), lane = (int) warp32::lane(sg);
+                const int warp = (int) warp32::index(sg);
                 const auto& a = tok(m, k);
                 float* xn = m.xn + (size_t) k * D;
                 const float gw = a.apply ? 2.0f * sigmoidf_(a.inj_prev[c] / (float) HC) : 0.0f;
@@ -587,11 +589,11 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
             sycl::local_accessor<float, 1> part(sycl::range<1>((size_t) WARPS * HC), h);
             sycl::local_accessor<float, 1> s_rs(sycl::range<1>(HC), h);
             const TokArgs tok(h);
-            h.parallel_for(sycl::nd_range<1>((size_t) n_tok * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+            h.parallel_for(sycl::nd_range<1>((size_t) n_tok * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, THREADS)]] {
                 tok.stage(m, it);
                 const sycl::sub_group sg = it.get_sub_group();
-                const int t = (int) it.get_local_id(0), lane = (int) sg.get_local_linear_id();
-                const int warp = (int) sg.get_group_linear_id();
+                const int t = (int) it.get_local_id(0), lane = (int) warp32::lane(sg);
+                const int warp = (int) warp32::index(sg);
                 const size_t k = it.get_group(0);
                 const auto& a = tok(m, (int) k);
                 float* xn = m.xn + k * D;
@@ -646,7 +648,7 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
             sycl::local_accessor<float, 1> part(sycl::range<1>((size_t) WARPS * HC), h);
             sycl::local_accessor<float, 1> s_rs(sycl::range<1>(HC), h);
             const TokArgs tok(h);
-            h.parallel_for(sycl::nd_range<1>((size_t) n_tok * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+            h.parallel_for(sycl::nd_range<1>((size_t) n_tok * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
                 tok.stage(m, it);
                 const size_t k = it.get_group(0);
                 const auto& ak = tok(m, (int) k);
@@ -664,10 +666,10 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
         const TokArgs tok(h);
         h.parallel_for(sycl::nd_range<2>(sycl::range<2>((size_t) (DOWN_BLOCKS + 1) * THREADS, (size_t) n_tok),
                                          sycl::range<2>(THREADS, 1)),
-                       [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                       [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             tok.stage(m, it);
             const sycl::sub_group sg = it.get_sub_group();
-            const int lane = (int) sg.get_local_linear_id(), warp = (int) sg.get_group_linear_id();
+            const int lane = (int) warp32::lane(sg), warp = (int) warp32::index(sg);
             const int k = (int) it.get_group(1);
             const bool inject_block = (int) it.get_group(0) == DOWN_BLOCKS;
             const int row = inject_block ? warp : (int) it.get_group(0) * WARPS + warp;
@@ -702,10 +704,10 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
         sycl::local_accessor<sycl::float4, 1> lo(sycl::range<1>(kFusedGrMaxT * LR / 4), h);
         sycl::local_accessor<float, 1> g(sycl::range<1>(kFusedGrMaxT * HC * UPM_COLS), h);
         const TokArgs tok(h);
-        h.parallel_for(sycl::nd_range<1>((size_t) UPM_BLOCKS * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        h.parallel_for(sycl::nd_range<1>((size_t) UPM_BLOCKS * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             tok.stage(m, it);
             const sycl::sub_group sg = it.get_sub_group();
-            const int t = (int) it.get_local_id(0), lane = (int) sg.get_local_linear_id(), warp = (int) sg.get_group_linear_id();
+            const int t = (int) it.get_local_id(0), lane = (int) warp32::lane(sg), warp = (int) warp32::index(sg);
             const int T = m.T;
             const int d0 = (int) it.get_group(0) * UPM_COLS;
             for (int k = 0; k < T; ++k) {   // one choice of m.a[k] a token, not one an element (see tok)
@@ -771,10 +773,10 @@ void fused_gr_quantize_q8_0(const uint16_t* src, uint8_t* dst, int64_t nb, void*
     if (nb <= 0) return;
     // one sub-group a block: lane i takes value i, the block's max |x| by a butterfly
     queue_for(stream).parallel_for(sycl::nd_range<1>((size_t) nb * WARP, WARP),
-                                   [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                                   [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
         const sycl::sub_group sg = it.get_sub_group();
         const int64_t b = (int64_t) it.get_group(0);
-        const int i = (int) sg.get_local_linear_id();
+        const int i = (int) warp32::lane(sg);
         const float x = sycl::bit_cast<float>((uint32_t) src[b * 32 + i] << 16);
         float amax = sycl::fabs(x);
         for (int o = 16; o > 0; o >>= 1) amax = sycl::fmax(amax, sycl::permute_group_by_xor(sg, amax, o));
@@ -871,9 +873,9 @@ void fused_gr_read(const FusedGrArgs& a, void* stream) {
         sycl::local_accessor<float, 1> xn(sycl::range<1>(D), h);
         sycl::local_accessor<float, 1> part(sycl::range<1>(WARPS * HC), h);
         sycl::local_accessor<float, 1> s_rs(sycl::range<1>(HC), h);
-        h.parallel_for(sycl::nd_range<1>((size_t) (DOWN_BLOCKS + 1) * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        h.parallel_for(sycl::nd_range<1>((size_t) (DOWN_BLOCKS + 1) * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const sycl::sub_group sg = it.get_sub_group();
-            const int lane = (int) sg.get_local_linear_id(), warp = (int) sg.get_group_linear_id();
+            const int lane = (int) warp32::lane(sg), warp = (int) warp32::index(sg);
             const bool first = it.get_group(0) == 0;
             float* xnp = &xn[0];
             norm_step(it, args, xnp, part, s_rs, 0, [&](int t, float v) { if (first) args.rs[t] = v; });
@@ -902,9 +904,9 @@ void fused_gr_read(const FusedGrArgs& a, void* stream) {
     const auto e = q.submit([&](sycl::handler& h) {
         sycl::local_accessor<float, 1> lo(sycl::range<1>(LR), h);
         sycl::local_accessor<float, 1> g(sycl::range<1>(HC * UP_COLS), h);
-        h.parallel_for(sycl::nd_range<1>((size_t) UP_BLOCKS * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        h.parallel_for(sycl::nd_range<1>((size_t) UP_BLOCKS * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const sycl::sub_group sg = it.get_sub_group();
-            const int t = (int) it.get_local_id(0), lane = (int) sg.get_local_linear_id(), warp = (int) sg.get_group_linear_id();
+            const int t = (int) it.get_local_id(0), lane = (int) warp32::lane(sg), warp = (int) warp32::index(sg);
             const int d0 = (int) it.get_group(0) * UP_COLS;
             for (int k = t; k < LR; k += THREADS) lo[k] = args.lo[k];
             sycl::group_barrier(it.get_group());

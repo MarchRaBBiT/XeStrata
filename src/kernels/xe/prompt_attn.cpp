@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // src/kernels/xe/prompt_attn.cpp - see include/strata/kernels/prompt_attn.hpp.
 #include "strata/kernels/prompt_attn.hpp"
+#include "strata/kernels/warp32.hpp"
 #include "strata/core/runtime.hpp"
 #include "device_target.hpp"
 #include "amd_wmma.hpp"
@@ -44,6 +45,11 @@ struct Kernel {
     float scale;
     sycl::local_accessor<float, 1> qs, sc, mrow, lrow, arow;
     sycl::local_accessor<uint16_t, 1> ks, vs;
+    // its work-group's size (1 x NT) as the bound the device compile sizes the registers by
+    // (strata/kernels/work_group.hpp)
+    auto get(sycl::ext::oneapi::experimental::properties_tag) const {
+        return sycl::ext::oneapi::experimental::properties{sycl::ext::oneapi::experimental::max_work_group_size<1, NT>};
+    }
 
     void operator()(sycl::nd_item<2> it) const {
         constexpr float NEG = -std::numeric_limits<float>::infinity();

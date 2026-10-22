@@ -9,6 +9,7 @@
 // precise division and exp.  The scalar gate's warp sums are xor butterflies whose lane 0 adds in the order of
 // CUDA's shuffle-down tree and is then broadcast, as CUDA broadcast lane 0.
 #include "strata/kernels/shared_expert.hpp"
+#include "strata/kernels/warp32.hpp"
 #include "strata/kernels/bf16_gemv.hpp"
 #include "strata/kernels/bf16_bits.hpp"
 #include "strata/kernels/quantize_act.hpp"
@@ -62,7 +63,7 @@ void native_swiglu(sycl::queue& q, const float* gate, const float* up, float* ou
 template <typename D>
 inline D warp_sum_d(const sycl::sub_group& sg, D v) {
     for (int off = 16; off > 0; off >>= 1) v += sycl::permute_group_by_xor(sg, v, off);
-    return sycl::group_broadcast(sg, v, 0);
+    return warp32::bcast(sg, v, 0);
 }
 
 // sigmoid(dot(x, w)) over BF16 operands, accumulated in double (float without FP64): one work-group of 256, then a
@@ -73,7 +74,7 @@ void scalar_gate_t(sycl::queue& q, const uint16_t* x_bf16, const uint16_t* w_bf1
     q.submit([&](sycl::handler& h) {
         sycl::local_accessor<D, 1> scratch(sycl::range<1>(GATE_THREADS / WARP), h);
         h.parallel_for(sycl::nd_range<1>(GATE_THREADS, GATE_THREADS),
-                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int tid = (int) it.get_local_id(0);
             D acc = 0;

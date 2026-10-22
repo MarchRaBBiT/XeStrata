@@ -10,6 +10,8 @@
 // that barrier on the CUDA side; here every work-item reaches the barrier first, since a SYCL barrier that some
 // work-items of the group never reach is undefined.
 #include "strata/kernels/s_gemv.hpp"
+#include "strata/kernels/warp32.hpp"
+#include "strata/kernels/work_group.hpp"
 #include "strata/kernels/f16_bits.hpp"
 #include "strata/core/runtime.hpp"
 #define STRATA_DEVICE_ARCH_TAG_TU xe_s_gemv
@@ -185,14 +187,14 @@ sycl::event launch_q8_split(sycl::queue& q, const uint8_t* x, const uint8_t* cod
     return q.submit([&](sycl::handler& h) {
         sycl::local_accessor<signed char, 1> tbl(sycl::range<1>(16), h);
         h.parallel_for(sycl::nd_range<1>(groups * THREADS, THREADS),
-                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, THREADS)]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int tid = (int) it.get_local_id(0);
             signed char* t = &tbl[0];
             stage_codebook(it, t, tid);
-            const long long o = (long long) it.get_group(0) * WARPS + (long long) sg.get_group_linear_id();
+            const long long o = (long long) it.get_group(0) * WARPS + (long long) warp32::index(sg);
             if (o >= n_out) return;   // uniform over the sub-group
-            const int lane = (int) sg.get_local_linear_id();
+            const int lane = (int) warp32::lane(sg);
             constexpr int PER_BYTE = 8 / CODE_BITS;
             const long long n_groups = n_in >> group_shift;
             const uint8_t* c = codes + o * (n_in / PER_BYTE);

@@ -17,6 +17,7 @@
 //     softmax's correction and the change of V scale, then adds the chunk's p.v.
 // Not bitwise equal to `qsa_decode_attn_batch`; qsa_prompt_attn_parity bounds the difference.
 #include "strata/kernels/qsa_prompt_attn.hpp"
+#include "strata/kernels/warp32.hpp"
 #include "strata/kernels/f16_bits.hpp"
 #include "strata/kernels/kv_q4.hpp"
 #include "strata/kernels/kv_q8.hpp"
@@ -137,8 +138,8 @@ struct PromptAttn {
         const auto grp = it.get_group();
         const auto sg = it.get_sub_group();
         const int64_t qi = (int64_t) it.get_group(0), kvh = (int64_t) it.get_group(1);
-        const int t = (int) it.get_local_id(1), s = (int) sg.get_group_linear_id();
-        const int lane = (int) sg.get_local_linear_id();
+        const int t = (int) it.get_local_id(1), s = (int) warp32::index(sg);
+        const int lane = (int) warp32::lane(sg);
         const int g = s / 2, mt = s % 2;   // this sub-group's dim group and row tile
         const int64_t n_head = n_kv * G;
         const float* qp = qv + qi * n_head * HD + kvh * G * HD;
@@ -322,7 +323,7 @@ struct PromptAttn {
                 float vmax = 0.0f;
                 for (int c = lane; c < CH; c += SGS)
                     for (int vp = 0; vp < VPG; ++vp) vmax = sycl::fmax(vmax, sycl::fabs(vs[c][g * VPG + vp]));
-                vmax = sycl::reduce_over_group(sg, vmax, sycl::maximum<float>());
+                vmax = warp32::reduce(sg, vmax, sycl::maximum<float>());
                 // the output so far into the new units when the largest V scale grows
                 const float vdown = sycl::fmax(vmax * (1.0f / PSCALE), unit);
                 const float ratio = vdown > unit && unit > 0.0f ? unit / vdown : 1.0f;
@@ -510,8 +511,8 @@ struct PromptAttnMma {
         const auto grp = it.get_group();
         const auto sg = it.get_sub_group();
         const int64_t qi = (int64_t) it.get_group(0), kvh = (int64_t) it.get_group(1);
-        const int t = (int) it.get_local_id(1), g = (int) sg.get_group_linear_id();
-        const int lane = (int) sg.get_local_linear_id();
+        const int t = (int) it.get_local_id(1), g = (int) warp32::index(sg);
+        const int lane = (int) warp32::lane(sg);
         const int64_t n_head = n_kv * G;
         const float* qp = qv + qi * n_head * HD + kvh * G * HD;
         float* out = attn + qi * n_head * HD + kvh * G * HD;
@@ -662,7 +663,7 @@ struct PromptAttnMma {
                     float vm = 0.0f;
                     if (lane < CH)
                         for (int vp = 0; vp < VPG; ++vp) vm = sycl::fmax(vm, sycl::fabs(vs[lane * VS + g * VPG + vp]));
-                    vm = sycl::reduce_over_group(sg, vm, sycl::maximum<float>());
+                    vm = warp32::reduce(sg, vm, sycl::maximum<float>());
                     unit = vm * (1.0f / PSCALE);
                     vup = vm > 0.0f ? PSCALE / vm : 0.0f;
                 }
@@ -868,7 +869,7 @@ struct PromptAttnPtx {
             #pragma unroll
             for (int j = 0; j < 4; ++j) {
                 const int idx = lane + 32 * j, cell = idx >> 2, pc = idx & 3;
-                const long long rr = sycl::select_from_group(sg, r, cell);
+                const long long rr = warp32::shfl(sg, r, cell);
                 const bool ok = rr >= 0;
                 const size_t off = ok ? (size_t) rr * HD + (size_t) dim0 + (size_t) pc * 16 : 0;
                 pv2::cp_async16((int8_t*) &S.kv[st][warp][0][0][0] + swz(cell, pc * 16), p.k_q + off, ok);

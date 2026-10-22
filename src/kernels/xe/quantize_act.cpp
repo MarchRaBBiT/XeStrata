@@ -7,6 +7,7 @@
 // The library compiles with -ffp-contract=off, which keeps Q8_K's `iscale * x` the separately rounded multiply that
 // CUDA's __fmul_rn spells.
 #include "strata/kernels/quantize_act.hpp"
+#include "strata/kernels/warp32.hpp"
 #include "strata/kernels/f16_bits.hpp"
 #include "strata/core/runtime.hpp"
 #include "device_caps.hpp"
@@ -91,11 +92,11 @@ void quantize_q8_0_scaled(const float* x, uint8_t* blocks, float* scales, int64_
     const int64_t n_blocks = n / QK8_0;
     const size_t groups = (size_t) ((n_blocks + 7) / 8);
     const auto e = queue_for(stream).parallel_for(sycl::nd_range<1>(groups * 256, 256),
-                                                  [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(32)]] {
+                                                  [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(32))]] {
         const sycl::sub_group sg = it.get_sub_group();
-        const int64_t b = (int64_t) it.get_group(0) * 8 + (int64_t) sg.get_group_linear_id();
+        const int64_t b = (int64_t) it.get_group(0) * 8 + (int64_t) warp32::index(sg);
         if (b >= n_blocks) return;   // uniform over the sub-group
-        const int lane = (int) sg.get_local_linear_id();
+        const int lane = (int) warp32::lane(sg);
         const float xv = x[b * QK8_0 + lane];
         uint8_t* out = blocks + b * 34;
         float amax = sycl::fabs(xv);

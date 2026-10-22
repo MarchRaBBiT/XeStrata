@@ -10,6 +10,8 @@
 // The top-k's integer prefix sums use SYCL group scans: integer sums are exact in any order, so the ids are the
 // CUDA kernels' ids.
 #include "strata/kernels/qsa_select.hpp"
+#include "strata/kernels/warp32.hpp"
+#include "strata/kernels/work_group.hpp"
 #include "strata/core/runtime.hpp"
 #include "device_caps.hpp"
 #define STRATA_DEVICE_ARCH_TAG_TU xe_qsa_select
@@ -152,14 +154,14 @@ sycl::event launch_topk_wide(sycl::queue& q, const float* scores, const int32_t*
         sycl::local_accessor<int, 1> s_gt(sycl::range<1>(TK_T / WARP), h);
         sycl::local_accessor<int, 1> s_eq(sycl::range<1>(TK_T / WARP), h);
         sycl::local_accessor<int, 1> s_digit_above(sycl::range<1>(2), h);
-        h.parallel_for(sycl::nd_range<1>(size_t(nq) * TK_T, TK_T), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        h.parallel_for(sycl::nd_range<1>(size_t(nq) * TK_T, TK_T), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const auto grp = it.get_group();
             const sycl::sub_group sg = it.get_sub_group();
             const int64_t qi = int64_t(it.get_group(0));
             const int32_t* st = steps + qi * kStepCount;
             const int64_t n_kv = st[kStepNKv], n_bid = st[kStepNBid], width = st[kStepWidth];
             int32_t* out = ids + qi * cap;
-            const int t = int(it.get_local_id(0)), lane = int(sg.get_local_linear_id()), warp = int(sg.get_group_linear_id());
+            const int t = int(it.get_local_id(0)), lane = int(warp32::lane(sg)), warp = int(warp32::index(sg));
             if (n_kv <= width) {
                 for (int64_t j = t; j < n_kv; j += TK_T) out[j] = int32_t(j);
                 return;
@@ -203,8 +205,8 @@ sycl::event launch_topk_wide(sycl::queue& q, const float* scores, const int32_t*
                 if (k > thr) gt += w;
                 else if (k == thr) eq += w;
             }
-            gt = sycl::reduce_over_group(sg, gt, sycl::plus<int>());
-            eq = sycl::reduce_over_group(sg, eq, sycl::plus<int>());
+            gt = warp32::reduce(sg, gt, sycl::plus<int>());
+            eq = warp32::reduce(sg, eq, sycl::plus<int>());
             if (lane == 0) { s_gt[warp] = gt; s_eq[warp] = eq; }
             sycl::group_barrier(grp);
             if (t == 0) {   // per sub-group: the selected cells and the tied cells before it
@@ -225,16 +227,16 @@ sycl::event launch_topk_wide(sycl::queue& q, const float* scores, const int32_t*
                 const int w = b < nb ? weight(b) : 0;
                 const uint32_t k = w ? order_key(sc[b]) : 0u;
                 const int my_gt = (w && k > thr) ? w : 0, my_eq = (w && k == thr) ? w : 0;
-                if (!sycl::any_of_group(sg, (my_gt | my_eq) != 0)) continue;   // a row without a selected block
-                const int pe = sycl::inclusive_scan_over_group(sg, my_eq, sycl::plus<int>());   // tied cells up to this lane
+                if (!warp32::any(sg, (my_gt | my_eq) != 0)) continue;   // a row without a selected block
+                const int pe = warp32::inclusive_scan(sg, my_eq, sycl::plus<int>());   // tied cells up to this lane
                 const int left = eq_budget - (run_eq + pe - my_eq);
                 const int take = left < 0 ? 0 : (left > my_eq ? my_eq : left);
                 const int my_sel = my_gt + take;
-                const int ps = sycl::inclusive_scan_over_group(sg, my_sel, sycl::plus<int>());
+                const int ps = warp32::inclusive_scan(sg, my_sel, sycl::plus<int>());
                 int32_t* dst = out + run_sel + ps - my_sel;
                 for (int c = 0; c < my_sel; ++c) dst[c] = int32_t(b * R + c);
-                run_eq += sycl::group_broadcast(sg, pe, WARP - 1);
-                run_sel += sycl::group_broadcast(sg, ps, WARP - 1);
+                run_eq += warp32::bcast(sg, pe, WARP - 1);
+                run_sel += warp32::bcast(sg, ps, WARP - 1);
             }
         });
     });
@@ -252,14 +254,14 @@ void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
     const size_t gx = size_t((reach + SCORE_WARPS - 1) / SCORE_WARPS);
     const auto e = queue_for(stream).parallel_for(
         sycl::nd_range<2>({size_t(nq), gx * SCORE_WARPS * WARP}, {1, SCORE_WARPS * WARP}),
-        [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int64_t qi = int64_t(it.get_group(0));
             const int32_t* st = steps + qi * kStepCount;
             const int64_t n_kv = st[kStepNKv], n_bid = st[kStepNBid];
-            const int64_t b = int64_t(it.get_group(1)) * SCORE_WARPS + int64_t(sg.get_group_linear_id());
+            const int64_t b = int64_t(it.get_group(1)) * SCORE_WARPS + int64_t(warp32::index(sg));
             if (b > n_bid || b >= max_blocks) return;   // uniform over the sub-group
-            const int lane = int(sg.get_local_linear_id());
+            const int lane = int(warp32::lane(sg));
             const float* key = (b == n_bid) ? dead : pooled + b * IDX_DIM;
             const float* kp = key + lane * 4;
             const float* q = q_idx + qi * IDX_HEADS * IDX_DIM + lane * 4;
@@ -287,12 +289,12 @@ void qsa_block_scores_rows(const float* pooled, const float* dead, const float* 
     const size_t gx = size_t((max_blocks + SCORE_WARPS - 1) / SCORE_WARPS);
     const auto e = queue_for(stream).parallel_for(
         sycl::nd_range<1>(gx * (size_t) (SCORE_WARPS * WARP), (size_t) (SCORE_WARPS * WARP)),
-        [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const sycl::sub_group sg = it.get_sub_group();
-            const int64_t b = int64_t(it.get_group(0)) * SCORE_WARPS + int64_t(sg.get_group_linear_id());
+            const int64_t b = int64_t(it.get_group(0)) * SCORE_WARPS + int64_t(warp32::index(sg));
             const int64_t top = steps[(nq - 1) * kStepCount + kStepNBid];   // the last row's: the largest
             if (b > top || b >= max_blocks) return;   // uniform over the sub-group
-            const int lane = int(sg.get_local_linear_id());
+            const int lane = int(warp32::lane(sg));
             const bool hi16 = (lane & 16) != 0, hi8 = (lane & 8) != 0;
             const float* kpool = pooled + b * IDX_DIM + (ptrdiff_t) lane * 4;
             float k0 = 0.0f, k1 = 0.0f, k2 = 0.0f, k3 = 0.0f;
@@ -321,8 +323,8 @@ void qsa_block_scores_rows(const float* pooled, const float* dead, const float* 
                 const float s2 = sycl::permute_group_by_xor(sg, hi8 ? a0 : a1, 8);
                 float c = (hi8 ? a1 : a0) + s2;   // head (hi16 ? 2 : 0) + (hi8 ? 1 : 0)
                 for (int o = 4; o > 0; o >>= 1) c += sycl::permute_group_by_xor(sg, c, o);
-                const float e1 = sycl::select_from_group(sg, c, 8), e2 = sycl::select_from_group(sg, c, 16),
-                            e3 = sycl::select_from_group(sg, c, 24);
+                const float e1 = warp32::shfl(sg, c, 8), e2 = warp32::shfl(sg, c, 16),
+                            e3 = warp32::shfl(sg, c, 24);
                 if (lane == 0) {
                     float score = 0.0f;
                     score += c > 0.0f ? c : 0.0f;
@@ -350,7 +352,7 @@ sycl::event block_scores_simt(sycl::queue& q, const float* pooled, const float* 
     return q.submit([&](sycl::handler& h) {
         sycl::local_accessor<float, 1> qs(sycl::range<1>((size_t) SM_KC * SM_QS), h);
         sycl::local_accessor<float, 1> ks(sycl::range<1>((size_t) SM_KC * SM_KS), h);
-        h.parallel_for(sycl::nd_range<2>({gq, gb * 256}, {1, 256}), [=](sycl::nd_item<2> it) {
+        h.parallel_for(sycl::nd_range<2>({gq, gb * 256}, {1, 256}), [=](sycl::nd_item<2> it) [[STRATA_MAX_WG(1, 1, 256)]] {
             const int64_t q0 = (int64_t) it.get_group(0) * SM_QT, b0 = (int64_t) it.get_group(1) * SM_NB;
             const int64_t qlast = (q0 + SM_QT < nq ? q0 + SM_QT : nq) - 1;
             if (b0 >= steps[qlast * kStepCount + kStepNBid]) return;   // n_bid rises with the position: the whole group
@@ -404,13 +406,13 @@ sycl::event block_scores_simt(sycl::queue& q, const float* pooled, const float* 
 // the tail block (b == n_bid, the dead key) of every query, as the warp kernel computes it
 sycl::event block_scores_tail(sycl::queue& q, const float* dead, const float* q_idx, const int32_t* steps, int64_t nq,
                               int64_t max_blocks, float* scores) {
-    return q.parallel_for(sycl::nd_range<1>((size_t) nq * WARP, WARP), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+    return q.parallel_for(sycl::nd_range<1>((size_t) nq * WARP, WARP), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
         const sycl::sub_group sg = it.get_sub_group();
         const int64_t qi = int64_t(it.get_group(0));
         const int32_t* st = steps + qi * kStepCount;
         const int64_t n_kv = st[kStepNKv], b = st[kStepNBid];
         if (b >= max_blocks) return;
-        const int lane = int(sg.get_local_linear_id());
+        const int lane = int(warp32::lane(sg));
         const float* kp = dead + (ptrdiff_t) lane * 4;
         const float* qv = q_idx + qi * IDX_HEADS * IDX_DIM + (ptrdiff_t) lane * 4;
         float score = 0.0f;

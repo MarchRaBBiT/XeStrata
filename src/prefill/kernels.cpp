@@ -6,6 +6,8 @@
 // is linearised the way CUDA numbers its threads (x fastest).  __expf, rsqrtf, powf, cosf, sinf and log1pf are the
 // precise SYCL functions.
 #include "strata/prefill/kernels.hpp"
+#include "strata/kernels/warp32.hpp"
+#include "strata/kernels/work_group.hpp"
 #include "strata/kernels/cvec.hpp"
 #include "strata/kernels/f16_bits.hpp"
 #include "strata/kernels/mrope.hpp"
@@ -79,11 +81,11 @@ constexpr int CB = 32, NCB = S / CB;
 
 template <int REG>
 void route_launch(sycl::queue& q, const float* logits, int32_t* ids, float* wout, int64_t T) {
-    q.parallel_for(sycl::nd_range<1>((size_t) ((T + 7) / 8) * 256, 256), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+    q.parallel_for(sycl::nd_range<1>((size_t) ((T + 7) / 8) * 256, 256), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
         const sycl::sub_group sg = it.get_sub_group();
-        const int64_t t = (int64_t) it.get_group(0) * 8 + (int64_t) sg.get_group_linear_id();
+        const int64_t t = (int64_t) it.get_group(0) * 8 + (int64_t) kernels::warp32::index(sg);
         if (t >= T) return;   // uniform over the sub-group
-        const int lane = (int) sg.get_local_linear_id();
+        const int lane = (int) kernels::warp32::lane(sg);
         const float* lg = logits + t * (REG * 32);
         float v[REG];
         for (int i = 0; i < REG; ++i) v[i] = lg[lane + i * 32];
@@ -163,7 +165,7 @@ void kv_append(const float* K, const float* V, int64_t T, int64_t pos0, const in
     Q(stream).submit([&](sycl::handler& h) {
         sycl::local_accessor<float, 1> wm(sycl::range<1>(2), h);
         sycl::local_accessor<uint32_t, 1> lane(sycl::range<1>(64), h);   // the group's 64 values, for the wide stores
-        h.parallel_for(sycl::nd_range<3>({(size_t) T, 2, 8 * 64}, {1, 1, 64}), [=](sycl::nd_item<3> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        h.parallel_for(sycl::nd_range<3>({(size_t) T, 2, 8 * 64}, {1, 1, 64}), [=](sycl::nd_item<3> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int64_t t = (int64_t) it.get_group(0);
             const int kvh = (int) it.get_group(1), z = (int) it.get_group(2), g = z >> 1;
@@ -277,7 +279,7 @@ void gr_norm_rs(const float* R, const float* w, float eps, float* rs_out, uint16
                 uint16_t* xn16_lo) {
     Q(stream).submit([&](sycl::handler& h) {
         sycl::local_accessor<float, 1> sh(sycl::range<1>(32), h);
-        h.parallel_for(sycl::nd_range<1>((size_t) (T * HC) * 256, 256), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        h.parallel_for(sycl::nd_range<1>((size_t) (T * HC) * 256, 256), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const int64_t row = (int64_t) it.get_group(0);   // t * 4 + c
             const int c = (int) (row % HC);
             const int tid = (int) it.get_local_id(0);
@@ -323,7 +325,7 @@ void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_l
     constexpr int PER = (N + 255) / 256;
     Q(stream).submit([&](sycl::handler& h) {
         sycl::local_accessor<float, 1> sh(sycl::range<1>(32), h);
-        h.parallel_for(sycl::nd_range<1>((size_t) (T * HC) * 256, 256), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        h.parallel_for(sycl::nd_range<1>((size_t) (T * HC) * 256, 256), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const int64_t row = (int64_t) it.get_group(0);   // t * 4 + c
             const int64_t t = row / HC;
             const int c = (int) (row % HC);
@@ -364,7 +366,7 @@ void gr_write_cvec_norm_rs(float* R, const float* bo, const float* inj, int64_t 
     Q(stream).submit([&](sycl::handler& h) {
         sycl::local_accessor<float, 1> sh(sycl::range<1>(32), h);
         sycl::local_accessor<float, 1> part(sycl::range<1>(256 / WARP), h);
-        h.parallel_for(sycl::nd_range<1>((size_t) (T * HC) * 256, 256), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        h.parallel_for(sycl::nd_range<1>((size_t) (T * HC) * 256, 256), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int64_t row = (int64_t) it.get_group(0);   // t * 4 + c
             const int64_t t = row / HC;
@@ -502,7 +504,7 @@ struct Gdn {
                 // same v * rsqrt(ss + eps) on the stored value)
                 q.submit([&](sycl::handler& hd) {
                     sycl::local_accessor<float, 1> part(sycl::range<1>((size_t) 4 * CONV_TILE), hd);
-                    hd.parallel_for(sycl::nd_range<2>({tiles, (size_t) C}, {1, (size_t) S}), [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                    hd.parallel_for(sycl::nd_range<2>({tiles, (size_t) C}, {1, (size_t) S}), [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
                         const sycl::sub_group sg = it.get_sub_group();
                         const int c = (int) it.get_global_id(1), tid = (int) it.get_local_id(1);
                         const int64_t t0 = (int64_t) it.get_group(0) * CONV_TILE;
@@ -570,7 +572,7 @@ struct Gdn {
         // the L2 norm of the 32 q/k heads per token, 128 work-items each
         q.submit([&](sycl::handler& hd) {
             sycl::local_accessor<float, 1> part(sycl::range<1>(4), hd);
-            hd.parallel_for(sycl::nd_range<2>({(size_t) T, (size_t) 2 * HK * S}, {1, S}), [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(WARP)]] {
+            hd.parallel_for(sycl::nd_range<2>({(size_t) T, (size_t) 2 * HK * S}, {1, S}), [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
                 const sycl::sub_group sg = it.get_sub_group();
                 const int64_t t = (int64_t) it.get_group(0);
                 const int head = (int) it.get_group(1), tid = (int) it.get_local_id(1);
@@ -601,7 +603,7 @@ struct Gdn {
         static constexpr int QR = S / 4;    // the D-2 kernel's rows per row group
         void operator()(sycl::nd_item<1> it) const {
             const sycl::sub_group sg = it.get_sub_group();
-            const int lane = (int) sg.get_local_linear_id();
+            const int lane = (int) kernels::warp32::lane(sg);
             const int gcol = (int) it.get_global_id(0), head = gcol / S, col = gcol % S, qh = head % HK;
             const size_t rs = (size_t) HV * S;
             float* base = state + (size_t) head * S + col;
@@ -636,19 +638,19 @@ struct Gdn {
     #pragma unroll
                     for (int k = 0; k < 4; ++k) {
                         const int r = k * QR + i;
-                        a[k] = sycl::fma(s[r], sycl::select_from_group(sg, ck[r / SG], r % SG), a[k]);
+                        a[k] = sycl::fma(s[r], kernels::warp32::shfl(sg, ck[r / SG], r % SG), a[k]);
                     }
                 const float delta = (cv - g * (a[0] + a[1] + a[2] + a[3])) * cbt;
     #pragma unroll
                 for (int r = 0; r < S; ++r)
-                    s[r] = sycl::fma(g, s[r], sycl::select_from_group(sg, ck[r / SG], r % SG) * delta);
+                    s[r] = sycl::fma(g, s[r], kernels::warp32::shfl(sg, ck[r / SG], r % SG) * delta);
                 float o[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     #pragma unroll
                 for (int i = 0; i < QR; ++i)
     #pragma unroll
                     for (int k = 0; k < 4; ++k) {
                         const int r = k * QR + i;
-                        o[k] = sycl::fma(s[r], sycl::select_from_group(sg, cq[r / SG], r % SG), o[k]);
+                        o[k] = sycl::fma(s[r], kernels::warp32::shfl(sg, cq[r / SG], r % SG), o[k]);
                     }
                 y[t * HV * S + (int64_t) head * S + col] = (o[0] + o[1] + o[2] + o[3]) * sycl::rsqrt((float) S);
             }
@@ -676,6 +678,10 @@ struct Gdn {
         float* y;
         int64_t T;
         sycl::local_accessor<float, 1> sq, sk, sv, sgb, rkv, ro;   // [2][TB][S] x2, [2][TB][VPK][CB], [2][2][TB][VPK], ...
+        // its work-group's size as the bound the device compile sizes the registers by (strata/kernels/work_group.hpp)
+        auto get(sycl::ext::oneapi::experimental::properties_tag) const {
+            return sycl::ext::oneapi::experimental::properties{sycl::ext::oneapi::experimental::max_work_group_size<NT>};
+        }
 
         void operator()(sycl::nd_item<1> it) const {
             const int qh = (int) it.get_group(0) / NCB, cb = (int) it.get_group(0) % NCB;
@@ -831,7 +837,7 @@ struct Gdn {
             q.submit([&](sycl::handler& hd) {
                 sycl::local_accessor<float, 1> sk(sycl::range<1>(S), hd), sq(sycl::range<1>(S), hd),
                     red(sycl::range<1>((size_t) RG * S), hd), wsum(sycl::range<1>(16), hd);
-                hd.parallel_for(sycl::nd_range<1>((size_t) HV * S * RG, (size_t) S * RG), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                hd.parallel_for(sycl::nd_range<1>((size_t) HV * S * RG, (size_t) S * RG), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, S * RG)]] {
                     const sycl::sub_group sg = it.get_sub_group();
                     const int head = (int) it.get_group(0), tid = (int) it.get_local_id(0), col = tid % S, rg = tid / S;
                     const int qh = head % HK;
@@ -891,7 +897,7 @@ struct Gdn {
             q.submit([&](sycl::handler& hd) {
             sycl::local_accessor<float, 1> sk(sycl::range<1>(S), hd), sq(sycl::range<1>(S), hd),
                 red(sycl::range<1>((size_t) RG * CB), hd);
-            hd.parallel_for(sycl::nd_range<1>((size_t) HV * NCB * CB * RG, (size_t) CB * RG), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+            hd.parallel_for(sycl::nd_range<1>((size_t) HV * NCB * CB * RG, (size_t) CB * RG), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, CB * RG)]] {
                 const int head = (int) it.get_group(0) / NCB, cb = (int) it.get_group(0) % NCB;
                 const int tid = (int) it.get_local_id(0), c = tid % CB, rg = tid / CB, col = cb * CB + c;
                 const int qh = head % HK;
@@ -986,7 +992,7 @@ struct Gdn {
         }
         q.submit([&](sycl::handler& hd) {
             sycl::local_accessor<float, 1> wsum(sycl::range<1>(4), hd);
-            hd.parallel_for(sycl::nd_range<2>({(size_t) T, (size_t) HV * S}, {1, S}), [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(WARP)]] {
+            hd.parallel_for(sycl::nd_range<2>({(size_t) T, (size_t) HV * S}, {1, S}), [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, S)]] {
                 const sycl::sub_group sg = it.get_sub_group();
                 const int64_t t = (int64_t) it.get_group(0);
                 const int head = (int) it.get_group(1), col = (int) it.get_local_id(1);
@@ -1096,7 +1102,7 @@ void rms_rows(float* x, const float* w, int64_t rows, int64_t cols, int64_t ld, 
     if (rows <= 0) return;
     Q(stream).submit([&](sycl::handler& h) {
         sycl::local_accessor<float, 1> sh(sycl::range<1>(32), h);
-        h.parallel_for(sycl::nd_range<1>((size_t) rows * 256, 256), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        h.parallel_for(sycl::nd_range<1>((size_t) rows * 256, 256), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             float* r = x + (int64_t) it.get_group(0) * ld;
             const int tid = (int) it.get_local_id(0);
             float ss = 0.0f;

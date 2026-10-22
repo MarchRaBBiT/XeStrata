@@ -8,6 +8,7 @@
 // all made the RTX 4070 read the B70's and time out at its first steered layer).  The gate is fused_gr's, with the
 // precise exp.
 #include "strata/kernels/cvec.hpp"
+#include "strata/kernels/warp32.hpp"
 #include "strata/core/on_device.hpp"
 #include "strata/core/runtime.hpp"
 #define STRATA_DEVICE_ARCH_TAG_TU xe_cvec
@@ -141,7 +142,7 @@ void cvec_apply(float* R, int64_t layer, int64_t T, int64_t r_ld, const float* b
         sycl::local_accessor<float, 1> part(sycl::range<1>(THREADS / WARP), h);
         // one work-group per (stream, token): the pending write, then h . v over the stream, then the update
         h.parallel_for(sycl::nd_range<2>({(size_t) T, (size_t) hc * THREADS}, {1, THREADS}),
-                       [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                       [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int c = (int) it.get_group(1);
             const int64_t t = (int64_t) it.get_group(0);

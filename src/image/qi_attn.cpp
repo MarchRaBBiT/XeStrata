@@ -16,6 +16,7 @@
 // 16 x 16 x 16 on 32).  A GPU without matrix engines, or STRATA_NO_XMX=1, takes qi_attention_plain.
 
 #include "strata/image/qi_kernels.hpp"
+#include "strata/kernels/warp32.hpp"
 
 #include "strata/core/per_device.hpp"
 #include "strata/core/runtime.hpp"
@@ -140,7 +141,7 @@ struct AttnKernel {
                          size_t off) {
 #if STRATA_AMD_WMMA
         if constexpr (P == 3) {
-            const int lo = (int) (sg.get_local_linear_id() & 15), hi = (int) (sg.get_local_linear_id() >> 4);
+            const int lo = (int) (kernels::warp32::lane(sg) & 15), hi = (int) (kernels::warp32::lane(sg) >> 4);
             for (int e = 0; e < 8; ++e) c.v[e] = st[off + (size_t) w::row_of(hi, e) * D + lo];
             return;
         }
@@ -164,7 +165,7 @@ struct AttnKernel {
         } else {
         constexpr float TAU = 8.0f;   // a row's reference moves only when a score passes it by more: p <= e^8
         sycl::sub_group sg = it.get_sub_group();
-        const int g = (int) sg.get_group_linear_id(), lane = (int) sg.get_local_linear_id();
+        const int g = (int) kernels::warp32::index(sg), lane = (int) kernels::warp32::lane(sg);
         const int nsg = (int) (it.get_local_range(1) / SG);
         const int64_t h = (int64_t) it.get_group(0), my0 = ((int64_t) it.get_group(1) * nsg + g) * TM;
         if (my0 >= T) return;
@@ -212,14 +213,14 @@ struct AttnKernel {
             const float m_old = rows[roff + r];
             const bool move = mx_ > m_old + TAU || (m_old == -INFINITY && mx_ > -INFINITY);
             const float m_new = move ? mx_ : m_old;
-            if (sycl::any_of_group(sg, move)) {
+            if (kernels::warp32::any(sg, move)) {
                 // the rows whose reference moved scale their output and sum by exp(m_old - m_new), through local
                 // memory: the accumulators' layout is the vendor's
                 const float corr = move && m_old > -INFINITY ? sycl::exp(m_old - m_new) : 1.0f;
                 sycl::group_barrier(sg);
                 if (part == 0) rows[roff + TM + r] *= corr;
                 float f[TM];
-                for (int i = 0; i < TM; ++i) f[i] = sycl::select_from_group(sg, corr, (size_t) i * L);
+                for (int i = 0; i < TM; ++i) f[i] = kernels::warp32::shfl(sg, corr, (size_t) i * L);
                 for (int nt = 0; nt < NT; ++nt) Ops::store(sg, o[nt], at(st, soff + (size_t) nt * TN), D);
                 sycl::group_barrier(sg);
                 for (int e = lane; e < TM * D; e += SG) st[soff + e] *= f[e / D];
