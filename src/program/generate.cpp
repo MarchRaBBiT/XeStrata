@@ -12865,8 +12865,12 @@ int main(int argc, char** argv) {
             p += a + 1;
             const double round_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
             total_ms += round_ms;
-            if (timed_round && chain_n == 0) policy.observe(from_sfx, T, a, sfx_match, round_ms);
-            else if (timed_round) policy.observe_chain(T_mtp, chain_n, a, cm, round_ms);
+            // A round that captured its window's graph is not the window's cost: on the RX 9060 XT (Gyro-M, 1K) the
+            // first 3-token round priced T3 above T4, and the 5- and 6-token windows, scaled from it, were never tried
+            // (upstream took them 12 times)
+            const bool timed = timed_round && !ver.captured_last();
+            if (timed && chain_n == 0) policy.observe(from_sfx, T, a, sfx_match, round_ms);
+            else if (timed) policy.observe_chain(T_mtp, chain_n, a, cm, round_ms);
             if (rounds % 64 == 0)
                 std::fprintf(stderr, "strata generate: position %lld, %lld tokens, %lld rounds\n", (long long) p,
                              (long long) produced.size(), (long long) rounds);

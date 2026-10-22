@@ -1656,6 +1656,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         return false;
     }
     const bool res = res_graph_ && all_resident();
+    captured_last_ = res ? exec_res_[T] == nullptr : exec_[T] == nullptr && segs_[T].empty();
     if (!(res ? capture_res(T, err) : capture(T, err)) || !capture_commit(err)) return false;
     VDBG("captured; staging\n");
     const Clock::time_point t0 = Clock::now();

@@ -152,6 +152,8 @@ public:
     /// One window: `tokens[0..T)` at positions pos0.., the pool served per layer; `out[t]` = argmax after token t.
     /// The PLE rows are gathered here from `ss.ple_prev` and the tokens.  Captures the T-token graph on first use.
     bool run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool, void* user, int32_t* out, std::string& err);
+    /// Whether the last run() captured its window's graph: that round's time is mostly the capture's, not the window's
+    bool captured_last() const { return captured_last_; }
     /// The head's raw logits for the first `rows` tokens of the last window (the last stage's head):
     /// `rows` x n_vocab floats into `host`.  For --dump-logits; call after `run`, before the next window.
     bool read_logits(int rows, float* host, std::string& err) const;
@@ -467,6 +469,7 @@ private:
     strata::gpu::Stream fetch_side_ = nullptr;   ///< STRATA_FETCH_BRANCH: the PCIe share's fetch beside the VRAM hits
     bool fetch_branch_ = false;
     strata::gpu::Graph* exec_[9] = {};
+    bool captured_last_ = false;
     strata::gpu::Graph* commit_exec_ = nullptr;
     // A device whose running kernels do not see the host's writes (doorbell_visible: the UHD 770) runs a window as
     // segments the host launches one after another, cut before each layer group's experts; no kernel waits on a
