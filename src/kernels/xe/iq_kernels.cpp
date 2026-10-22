@@ -1856,12 +1856,7 @@ struct IqGemmKernel {
                mx::joint_matrix<sycl::sub_group, float, mx::use::accumulator, GT_M, GT_N> (&c)[G_SGM][G_SGN]) const {
         const auto gx = sycl::address_space_cast<sycl::access::address_space::global_space,
                                                  sycl::access::decorated::no>(const_cast<sycl::half*>(x));
-        if constexpr (WHOLE)
-            if (k0 + KC < K)   // the next block of A, 32 values (64 bytes, the most a prefetch takes) at a time
-                for (int kp = 0; kp < KC; kp += 32)
-                    mx::joint_matrix_prefetch<G_MS, 32>(sg, const_cast<sycl::half*>(x) + m0 * K + k0 + KC + kp, K,
-                                                        mx::layout::row_major,
-                                                        syclex::properties{syclex::prefetch_hint_L1});
+        // no prefetch of the next block of A (joint_matrix_prefetch): as xmx_gemm.cpp says
         for (int kk = 0; kk < KC; kk += GT_K) {
             mx::joint_matrix<sycl::sub_group, sycl::half, mx::use::a, GT_M, GT_K, mx::layout::row_major> a[G_SGM];
             for (int i = 0; i < G_SGM; ++i) {
