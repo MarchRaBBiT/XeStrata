@@ -160,6 +160,9 @@ python3 tools/intel_llvm_build.py --contrib --keep-build
   Sixteenth, since v7.2.0 the SYCL build refuses the CUDA and HIP adapters unless libclc is built as an LLVM runtime.
   The cross build for Windows builds the runtime alone, with the contrib-llvm toolchain's device tools and its libspirv, and builds no libclc, so its configuration stopped.
   Fixed, with the tools given (`LIBCLC_CUSTOM_LLVM_TOOLS_BINARY_DIR`) the adapters are configured without libclc (`build-cross-adapters`; a build without them is unchanged). A fix to the build only, it asks no finished toolchain to be built again.
+  Seventeenth, since v7.2.0 SYCL's sub-group shuffles (Shuffle, ShuffleXor, ShuffleUp and ShuffleDown in `sycl/detail/spirv.hpp`) call the SPIR-V GroupNonUniform forms on every target but NVIDIA's, and AMD's libspirv has only the SubgroupShuffle*INTEL ones.
+  Every AMD program with a shuffle stopped at its link ("undefined symbol: __spirv_GroupNonUniformShuffleXor(int, float, unsigned int)").
+  Fixed, AMD's libspirv defines the four GroupNonUniform shuffles for the scalar types with SubgroupShuffle*INTEL (`hip-group-shuffle`).
   The CUDA fixes ask only the contrib-llvm toolchain to be built again, the HIP ones only a toolchain with HIP (or one that would have it, ROCm being installed now).
   `offload-bundle-arch` and `l0-static-graph` ask every toolchain.
 - The script configures the build tree again when it was configured with other values of its options (the install folder, libclc's targets and others).

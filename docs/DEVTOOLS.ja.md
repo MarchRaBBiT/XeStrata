@@ -160,6 +160,9 @@ python3 tools/intel_llvm_build.py --contrib --keep-build
   16 番目: v7.2.0 から、SYCL のビルドは libclc を LLVM の runtimes として作らない限り CUDA と HIP のアダプタを拒みます。
   Windows 向けのクロスビルドは、contrib-llvm のツールチェーンのデバイス向けのツールとその libspirv を使って実行時だけを作り、libclc は作らないので、設定の段階で止まっていました。
   修正後は、ツールを渡したとき（`LIBCLC_CUSTOM_LLVM_TOOLS_BINARY_DIR`）は libclc なしでアダプタを設定します（`build-cross-adapters`。渡さないビルドは変わりません）。ビルドだけの修正なので、できあがったツールチェーンの作り直しは求めません。
+  17 番目: v7.2.0 から、SYCL のサブグループの shuffle（`sycl/detail/spirv.hpp` の Shuffle・ShuffleXor・ShuffleUp・ShuffleDown）は、NVIDIA 以外のすべての対象で SPIR-V の GroupNonUniform の形を呼びますが、AMD 向けの libspirv には SubgroupShuffle*INTEL の形しかありません。
+  shuffle を使う AMD 向けのプログラムはどれもリンクで止まっていました（「undefined symbol: __spirv_GroupNonUniformShuffleXor(int, float, unsigned int)」）。
+  修正後は、AMD 向けの libspirv がスカラーの型について 4 つの GroupNonUniform の shuffle を SubgroupShuffle*INTEL で定義します（`hip-group-shuffle`）。
   CUDA の修正は contrib-llvm のツールチェーンにだけ、HIP の修正は HIP を持つ（または ROCm が入った今なら持つ）ツールチェーンにだけ、作り直しを求めます。
   `offload-bundle-arch` と `l0-static-graph` はどのツールチェーンにも作り直しを求めます。
 - スクリプトは、作業フォルダーの設定が今の設定の値（インストール先、libclc の対象など）と違えば、設定し直してからビルドします。
