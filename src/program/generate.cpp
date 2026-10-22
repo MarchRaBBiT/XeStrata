@@ -39,6 +39,7 @@
 #include "strata/platform/aux_cpus.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
 #include "strata/kernels/ngram.hpp"
+#include "strata/ngram/ple_reader.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 #include "strata/kernels/s2_expert_grouped.hpp"
 #include "strata/kernels/sampler.hpp"
@@ -302,6 +303,7 @@ struct Options {
     int ple_inflight = 64;
     double ple_delay_us = 0;           ///< fault injection: every row read completes no earlier than this
     bool ple_sync_submit = false;      ///< A/B arm: submit reads on the token thread, no I/O worker
+    std::string ple_hot;               ///< XeStrata: a file of the table's rows kept in RAM (tools/ple_hot.py)
     std::string kv = "fp16";           ///< plan v0.3 P7: KV storage, fp16 (default) or int8 (half the VRAM)
     int64_t kv_resident = 0;           ///< KV streaming: resident cells per QSA layer (0: all in VRAM)
     int kv_grow = -1;                  ///< the elastic K/V (--kv-grow 1, --no-kv-grow 0, STRATA_KV_GROW; -1: by the device)
@@ -594,6 +596,8 @@ void usage() {
                  "  --ple-inflight N     outstanding SSD reads (default 64)\n"
                  "  --ple-delay-us U     fault injection: each row read completes no earlier than U us\n"
                  "  --ple-sync-submit    A/B arm: submit table reads on the token thread (default: an I/O thread)\n"
+                 "  --ple-hot FILE       keep these rows of the table in RAM (tools/ple_hot.py: the rows of a corpus'\n"
+                 "                       most frequent n-grams) and read nothing for them; --ple-io direct only\n"
                  "  --kv fp16|int8       KV storage (plan v0.3 P7): int8 codes + fp16 scale per 64 values, half the\n"
                  "                       VRAM; default fp16 until gate G-C accepts int8\n"
                  "  --kv q4_0            4-bit K/V after a Hadamard rotation (PR #21): half of int8's memory,\n"
@@ -1047,8 +1051,10 @@ MemSample mem_sample() {
 // watchdog treats a growing count as "the step is slow, not stuck": a prompt layer whose experts are re-read from the
 // pack (low RAM, mmap experts) can take minutes while the heartbeat stands still. Zero where unavailable.
 static uint64_t file_tier_activity() {
+    // XeStrata: the n-gram table's direct reads, one each (a rotational disk does a few hundred a second; a prompt's
+    // rows can then take minutes, slow but not stuck)
+    uint64_t total = strata::ngram::reads_done();
 #if defined(__linux__)
-    uint64_t total = 0;
     if (FILE* f = std::fopen("/proc/self/stat", "r")) {
         char buf[1024] = {};
         const size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
@@ -1074,10 +1080,8 @@ static uint64_t file_tier_activity() {
         }
         std::fclose(f);
     }
-    return total;
-#else
-    return 0;
 #endif
+    return total;
 }
 std::string stage_text() {
     const strata::core::Progress& p = strata::core::progress();
@@ -2369,6 +2373,7 @@ int main(int argc, char** argv) {
         else if (a == "--ple-row-cache") o.ple_row_cache = std::strtoll(next("--ple-row-cache"), nullptr, 10);
         else if (a == "--ple-inflight") o.ple_inflight = (int) std::strtol(next("--ple-inflight"), nullptr, 10);
         else if (a == "--ple-delay-us") o.ple_delay_us = std::strtod(next("--ple-delay-us"), nullptr);
+        else if (a == "--ple-hot") o.ple_hot = next("--ple-hot");
         else if (a == "--ple-sync-submit") o.ple_sync_submit = true;
         else if (a == "--kv") o.kv = next("--kv");
         else if (a == "--kv-resident") o.kv_resident = std::strtoll(next("--kv-resident"), nullptr, 10);
@@ -4251,6 +4256,11 @@ int main(int argc, char** argv) {
         pio.max_inflight = (uint32_t) o.ple_inflight;
         pio.cache_rows = (uint64_t) o.ple_row_cache;
         pio.io_thread = !o.ple_sync_submit;
+        if (!o.ple_hot.empty() && pio.mode != strata::kernels::PleIo::Direct)
+            std::fprintf(stderr, "strata generate: --ple-hot is for --ple-io direct (with --ple-io %s the rows are read through "
+                                 "the mapping): not used\n", o.ple_io.c_str());
+        else
+            pio.hot_path = o.ple_hot;
         // Keep the SSD awake while rows are asked for (PleReader::set_keepalive, upstream e128d6d): some SSDs stall
         // the first reads 50-150 ms after ~250 ms without a command.  STRATA_SSD_KEEPALIVE = ms without a read
         // before one page is read anyway (default 100, 0 = off), STRATA_SSD_KEEPALIVE_WINDOW = seconds after the
@@ -4322,6 +4332,11 @@ int main(int argc, char** argv) {
                          ple_table.locked() ? "locked in RAM" : "loaded (not locked)",
                          std::chrono::duration<double>(Clock::now() - tpl).count());
         std::fprintf(stderr, "strata generate: PLE table format %s\n", ple_table.format());
+        if (ple_table.hot_rows() > 0)                 // XeStrata: --ple-hot
+            std::fprintf(stderr, "strata generate: PLE hot rows: %llu rows (%.2f GiB) kept in RAM from %s, loaded in %.1f s\n",
+                         (unsigned long long) ple_table.hot_rows(),
+                         (double) ple_table.hot_bytes() / (1u << 30),
+                         o.ple_hot.c_str(), ple_table.hot_load_s());
         if (pio.keepalive_ms > 0)
             std::fprintf(stderr, "strata generate: the SSD is kept awake while rows are read: one page of the table after "
                                  "%.0f ms without a read, until %.0f s after the last request "
@@ -11922,6 +11937,8 @@ int main(int argc, char** argv) {
             if (sfx_windows > 0)
                 std::fprintf(stderr, "strata serve: suffix drafts: %lld windows, %lld of %lld drafts accepted\n",
                              (long long) sfx_windows, (long long) sfx_ok, (long long) sfx_drafts);
+            if (const std::string io = ple_table.io_report(); !io.empty())   // XeStrata: cumulative since the start
+                std::fprintf(stderr, "strata serve: %s\n", io.c_str());
             if (o.lookup_chain > 0)
                 std::fprintf(stderr, "strata serve: lookup chain: %lld of %lld windows, %lld of %lld chained drafts accepted\n",
                              (long long) chain_windows, (long long) dec_windows, (long long) chain_ok, (long long) chain_drafts);

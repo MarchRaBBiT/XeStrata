@@ -165,6 +165,9 @@ struct PleIoOptions {
     /// (see PleReader::set_keepalive).
     double keepalive_ms = 0;
     double keepalive_window_s = 60;
+    /// XeStrata, Direct mode only (`--ple-hot`): a file of the table's rows to keep in RAM (tools/ple_hot.py,
+    /// include/strata/ngram/ple_hot.hpp); empty = none. A file cut from another table fails `open`.
+    std::string hot_path;
 };
 
 /// The PLE table. Held by pointer-to-impl to keep its I/O state out of this header.
@@ -221,6 +224,11 @@ public:
 
     /// One line of reader statistics (Direct mode), e.g. for --stats. Empty in Mmap mode.
     std::string io_report() const;
+    /// XeStrata: the rows `PleIoOptions::hot_path` keeps in RAM (0 without one), the RAM they take (ids and rows) and
+    /// the seconds loading them took.
+    uint64_t hot_rows() const;
+    uint64_t hot_bytes() const;
+    double hot_load_s() const;
     PleIo mode() const;
 
 private:

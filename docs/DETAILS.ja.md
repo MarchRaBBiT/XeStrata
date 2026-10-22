@@ -361,6 +361,39 @@ upstream の測定（Gen3 NVMe、RTX 5090、32 GB、Q2_0 を RAM に置いて 26
 CPU 内蔵のグラフィックスは RAM を共有するので、省 RAM モードにはなりません。
 GPU がモデルのどれだけを持てるかの setup の見積もりは upstream のもの（VRAM から約 5 GB を引く）です。
 
+### モデルを回転ディスクに置くとき（n-gram の表のよく読む行を RAM に置く、任意）
+
+n-gram の表（`per_layer_token_embd`、28.8 GB）は、1 トークンにつき 16 行をドライブからランダムに読みます（`--ple-io direct`）。
+回転ディスクのランダムな読み出しは 1 秒に数百回なので、表が回転ディスクにあると、まだ読んだことのない n-gram のトークンはディスクを待ちます。
+RAM に表が入るなら `--ple-io ram`、入らないなら表を SSD に置くのが一番です。
+どちらもできないときは、よく読まれる行だけを RAM に置けます（`--ple-hot`）。
+トークンの 16 行は、そのトークンの bigram（8 行）と trigram（8 行）だけで決まります。
+そのため、コーパスでよく出る n-gram の行は、モデルの文章でもよく読まれます。
+
+1. コーパスを用意します。UTF-8 のテキストで、文書の間を空行 2 つ（`\n\n\n`）で区切ります。モデルに使わせる言語の文章と会話が合います。
+1. `tools/ple_hot.py` で、よく出る n-gram の行を表から切り出します。
+
+   ```sh
+   .venv/bin/python tools/ple_hot.py --gguf <表のある GGUF の shard> --tokenizer <pack>/tokenizer \
+       --gib 3 --out <data>/ple-hot/<model>.hot corpus1.txt corpus2.txt ...
+   ```
+
+   `--gib` は、エンジンがこの行に使う RAM です（行と、1 行 4 バイトの番号）。
+   表は一度通して読むので、回転ディスクでは数分かかります。
+1. 設定の `"args"` に `"--ple-hot", "<data>/ple-hot/<model>.hot"` を足します。
+
+エンジンは起動時にこのファイルを読み、`PLE hot rows: ...` を 1 行出します。
+受け付けるのは、それを切り出した表のファイルだけです（行の大きさ、行数、表の位置と、表の 64 行のハッシュを見ます）。
+同じ形のほかのモデルの表には使えないので、モデルごとに作ります。
+サーバーは要求ごとに `ple io: ...` の行を出し、読まずに済んだ行の割合（`hot rows`、`row-cache hits`）が分かります。
+
+Radeon VII と Swift 1.5 IQ2_XS（huihui-ai の abliterated 版）で、表を 5,400 rpm 級の HDD に置いて測りました（temperature 0、日本語と英語の質問 6 つ、600 トークンずつ）。
+Wikipedia と会話のデータ（英語と日本語、1 億 2,500 万トークン）から作った 3 GiB のファイルで、表の行の 54% が hot 行から、10% が行のキャッシュから出ました。
+decode は 5.0〜9.5 トークン/秒から 14.4〜15.9 トークン/秒になりました。
+
+回転ディスクで長い prompt を読むと、1 つの層の表の読み出しに 1 分を超えることがあります。
+エンジンは、表の読み出しが進んでいる間は止まったとはみなさず、`STRATA_WATCHDOG_IO_S`（既定 600 秒）まで待ちます。
+
 ## 必要なもの
 
 GPU、CPU、RAM、ディスクの目安は [README](../README.ja.md#必要なもの) にあります。
@@ -1354,7 +1387,7 @@ B70 では、`cvec_parity` が制御ベクトルのカーネルを確かめて�
 | `... rocBLAS ... has no code for gfx...`、`... has no code for gfx...` | ディストリビューションの rocBLAS（パッケージではそのエンジン）が、その GPU のコードを持っていません。Ubuntu 26.04 なら、Fedora 44 で動くことがあります（[README](../README.ja.md#amd-の-gpu)）。 |
 | `building for the AMD GPU needs ROCm's ...` | AMD の GPU のコードを作る ROCm のパッケージが足りません。示されたものを入れて、setup をやり直します（`./setup.sh --packages` も参照）。 |
 | `... has no HIP target (AMD GPUs)` | intel/llvm が、ROCm を入れる前にビルドされています。setup が尋ねたら作り直すか、`python3 tools/intel_llvm_build.py --rebuild` を実行します。 |
-| Linux で `no progress for 60 s ... reading the prompt` と出て、止まったときの報告に `threads waiting on the disk (state D): 16 ...` がある | エンジンが止まったのではなく、ドライブを待っています。n-gram の表をランダムに読む（`--ple-io direct`）のに、回転ディスクが追いつきません（upstream #605）。表が回転ディスクにあると、エンジンは起動時に警告します。`--ple-io ram`（表の分の RAM が要ります）か、モデルを SSD に置くと直ります。setup は、回転ディスクで RAM に表が入るなら、自分で `--ple-io ram` を付けます。 |
+| Linux で `no progress for 60 s ... reading the prompt` と出て、止まったときの報告に `threads waiting on the disk (state D): 16 ...` がある | エンジンが止まったのではなく、ドライブを待っています。n-gram の表をランダムに読む（`--ple-io direct`）のに、回転ディスクが追いつきません（upstream #605）。表が回転ディスクにあると、エンジンは起動時に警告します。`--ple-io ram`（表の分の RAM が要ります）か、モデルを SSD に置くと直ります。setup は、回転ディスクで RAM に表が入るなら、自分で `--ple-io ram` を付けます。入らないときは、よく読む行だけを RAM に置けます（[モデルを回転ディスクに置くとき](#モデルを回転ディスクに置くときn-gram-の表のよく読む行を-ram-に置く任意)）。 |
 | `the SYCL runtime of ... lists no GPU` | GPU の Level Zero のドライバー（`libze-intel-gpu1`、Intel の compute-runtime）がないか、その GPU には古すぎます。新しいものを入れます（[BUILD.ja.md](BUILD.ja.md#パッケージ)）。 |
 | `... gives this GPU no XMX` | そのコンパイラでは GPU の XMX が使えません。setup の選択肢から選びます。XMX なしでも動き、prefill に約 1.6 倍の時間がかかります（[BUILD.ja.md](BUILD.ja.md#sycl-のコンパイラ)）。 |
 | `no SYCL compiler for the engine` | SYCL のコンパイラがありません。ディストリビューションの DPC++ を入れるか、`--intel-llvm-build` を付けます。 |

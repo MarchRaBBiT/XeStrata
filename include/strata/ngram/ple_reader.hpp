@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Niko1221 and the Strata contributors
-// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 MistVVK and the XeStrata contributors
+// SPDX-License-Identifier: LGPL-3.0-or-later AND MIT
 // include/strata/ngram/ple_reader.hpp - plan v0.3 P2: the n-gram table read straight from the SSD.
 //
 // The table is 320,001,536 rows of 90 bytes (IQ4_NL, 26.8 GiB) or 160 (FP8 E4M3, 51.2 GB) and is never held in RAM: every row comes from an
@@ -16,6 +17,9 @@
 // THE ROW CACHE IS NOT THE TABLE. It keeps rows this process has already fetched (90 bytes each, bounded,
 // clock eviction). Measured on the frozen corpus (bench/results/2026-09-23-ngram-io): 1M rows (~95 MB)
 // would serve up to ~82% of reads; within one long prompt 20-34% of rows recur. Capacity 0 disables it.
+//
+// XeStrata: rows that are never read at all - the pinned rows (`set_pinned`, the engine's --ple-hot file of the most
+// frequent n-grams' rows, include/strata/ngram/ple_hot.hpp) - are looked up before the row cache.
 #pragma once
 
 #include "strata/platform/direct_file.hpp"
@@ -32,6 +36,7 @@ inline constexpr uint32_t PAGE = 4096;
 struct ReaderStats {
     uint64_t requests = 0;        ///< rows asked for
     uint64_t cache_hits = 0;      ///< rows served from the row cache
+    uint64_t pinned_hits = 0;     ///< rows served from the pinned rows (`set_pinned`)
     uint64_t dedup_rows = 0;      ///< rows that shared a page already being read in the same ticket
     uint64_t reads = 0;           ///< SSD read requests issued
     uint64_t bytes = 0;           ///< bytes read from the SSD
@@ -44,6 +49,11 @@ struct ReaderStats {
     std::vector<float> read_us;   ///< last <= 65,536 read latencies, for percentiles
     double percentile(double q) const;
 };
+
+/// XeStrata: the reads of rows (not the keep-alive reads) every reader of this process has finished. The stall watchdog
+/// takes them as I/O under way, as it takes the file tier's reads: a rotational disk reads the table's 4 KiB pages at a
+/// few hundred a second, ~1 MiB/s, which the file tier's count does not see.
+uint64_t reads_done();
 
 class PleReader {
 public:
@@ -85,6 +95,12 @@ public:
     /// Fault injection for tests and for the plan's P2 exit check: every read completes no earlier than
     /// `delay_us` after it was issued. 0 disables.
     void set_injected_delay_us(double delay_us);
+
+    /// XeStrata (--ple-hot): keep these rows in RAM for the reader's life and read nothing for them; `ids` ascending
+    /// without repeats and below the row count, `bytes` their rows in that order (row_bytes each). Replaces the rows
+    /// set before. Call after `open` with no ticket in flight; `close` drops them.
+    void set_pinned(std::vector<uint32_t> ids, std::vector<uint8_t> bytes);
+    uint64_t pinned_rows() const;
 
     /// Read with no ticket in flight (the worker updates these while reads are outstanding; with the keep-alive
     /// on it may also be counting a keep-alive read - `snapshot` takes a consistent copy).

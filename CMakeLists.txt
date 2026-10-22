@@ -222,7 +222,7 @@ find_package(Threads REQUIRED)
 target_link_libraries(strata_platform PUBLIC strata_warnings Threads::Threads)
 
 # `ngram.cpp` is the PLE hash and table geometry the GPU PLE block will share with the reader.
-add_library(strata_ngram STATIC src/kernels/ngram.cpp src/ngram/ple_reader.cpp)
+add_library(strata_ngram STATIC src/kernels/ngram.cpp src/ngram/ple_reader.cpp src/ngram/ple_hot.cpp)
 target_link_libraries(strata_ngram PUBLIC strata_platform strata_artifact)
 
 # Plan v0.3 P0.1: working-set lock of a host region (CPU only).
@@ -249,6 +249,10 @@ set_tests_properties(platform_memory_test PROPERTIES SKIP_RETURN_CODE 77)   # ul
 add_executable(ple_reader_test src/ngram/ple_reader_test.cpp)
 target_link_libraries(ple_reader_test PRIVATE strata_ngram)
 add_test(NAME ple_reader_selftest COMMAND ple_reader_test --selftest)
+# XeStrata: --ple-hot's file (the rows kept in RAM) against a synthetic table, its checks and the reads it saves
+add_executable(ple_hot_test src/ngram/ple_hot_test.cpp)
+target_link_libraries(ple_hot_test PRIVATE strata_ngram)
+add_test(NAME ple_hot_test COMMAND ple_hot_test)
 
 # ---- Intel Xe foundation --------------------------------------------------
 if(STRATA_ENABLE_XE)

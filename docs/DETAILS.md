@@ -379,6 +379,39 @@ Upstream measured it on a Gen3 NVMe (RTX 5090, 32 GB, Q2_0 kept in RAM at 262K):
 The processor's own graphics share the RAM, so they never take the low-RAM mode.
 setup's estimate of how much of a model the GPU holds is upstream's (its VRAM less ~5 GB).
 
+### A model on a rotational disk: the n-gram table's most read rows in RAM (optional)
+
+The n-gram table (`per_layer_token_embd`, 28.8 GB) is read 16 rows a token, at random, from the drive (`--ple-io direct`).
+A rotational disk does a few hundred random reads a second, so with the table on one a token whose n-grams have not been read yet waits on the disk.
+`--ple-io ram` is best when the table fits the RAM, and otherwise the table on an SSD.
+When neither can be done, the rows read most can be kept in RAM (`--ple-hot`).
+A token's 16 rows depend only on its bigram (8 rows) and its trigram (8 rows),
+so the rows of the n-grams frequent in a corpus are the ones the model's text reads most as well.
+
+1. Get a corpus: UTF-8 text, documents separated by two blank lines (`\n\n\n`). Prose and conversations in the languages the model will be used in fit.
+1. Cut the frequent n-grams' rows out of the table with `tools/ple_hot.py`:
+
+   ```sh
+   .venv/bin/python tools/ple_hot.py --gguf <the GGUF shard with the table> --tokenizer <pack>/tokenizer \
+       --gib 3 --out <data>/ple-hot/<model>.hot corpus1.txt corpus2.txt ...
+   ```
+
+   `--gib` is the RAM the engine gives these rows (the rows and a 4-byte id each).
+   It reads the table through once, which takes a few minutes from a rotational disk.
+1. Add `"--ple-hot", "<data>/ple-hot/<model>.hot"` to the config's `"args"`.
+
+The engine reads the file at start and says `PLE hot rows: ...` in one line.
+It takes only a file cut from its own table (it checks the row size, the row count, the table's offset and a hash of 64 of the table's rows);
+another model's table of the same shape does not take it, so make one for each model.
+The server's `ple io: ...` line after each request says how many rows were not read (`hot rows`, `row-cache hits`).
+
+Measured on a Radeon VII with Swift 1.5 IQ2_XS (huihui-ai's abliterated version), the table on a 5,400 rpm class HDD (temperature 0, six questions in Japanese and English, 600 tokens each):
+with a 3 GiB file made from Wikipedia and conversation data (English and Japanese, 125 million tokens), 54% of the table's rows came from the hot rows and 10% from the row cache,
+and decode went from 5.0-9.5 to 14.4-15.9 tokens/s.
+
+On a rotational disk a long prompt's table rows can take more than a minute for one layer.
+While the table's reads go on, the engine does not take that for a stall, and waits up to `STRATA_WATCHDOG_IO_S` (600 s by default).
+
 ## What you need
 
 The GPU, CPU, RAM and disk are in the [README](../README.md#what-you-need).
@@ -1374,7 +1407,7 @@ On the B70, `cvec_parity` checks the control-vector kernel ([XE.md](XE.md#valida
 | `... rocBLAS ... has no code for gfx...`, `... has no code for gfx...` | The distribution's rocBLAS (in a package, its engine) has no code for that GPU. On Ubuntu 26.04, it may run on Fedora 44 ([README](../README.md#amd-gpus)). |
 | `building for the AMD GPU needs ROCm's ...` | ROCm's packages that build the AMD GPU's code are missing. Install the ones named and run setup again (see also `./setup.sh --packages`). |
 | `... has no HIP target (AMD GPUs)` | intel/llvm was built before ROCm was installed. Let setup build it again when it asks, or run `python3 tools/intel_llvm_build.py --rebuild`. |
-| `no progress for 60 s ... reading the prompt` on Linux, and the stall report says `threads waiting on the disk (state D): 16 ...` | The engine waits for the drive, not a deadlock: the n-gram table is read at random (`--ple-io direct`), which a rotational disk cannot keep up with (upstream #605). The engine warns at start when the table is on one; `--ple-io ram` (it needs RAM for the table) or the model on an SSD fixes it. Setup adds `--ple-io ram` itself on a rotational disk when the RAM holds the table. |
+| `no progress for 60 s ... reading the prompt` on Linux, and the stall report says `threads waiting on the disk (state D): 16 ...` | The engine waits for the drive, not a deadlock: the n-gram table is read at random (`--ple-io direct`), which a rotational disk cannot keep up with (upstream #605). The engine warns at start when the table is on one; `--ple-io ram` (it needs RAM for the table) or the model on an SSD fixes it. Setup adds `--ple-io ram` itself on a rotational disk when the RAM holds the table. When it does not, the rows read most can be kept in RAM ([A model on a rotational disk](#a-model-on-a-rotational-disk-the-n-gram-tables-most-read-rows-in-ram-optional)). |
 | `the SYCL runtime of ... lists no GPU` | The GPU's Level Zero driver (`libze-intel-gpu1`, Intel's compute-runtime) is missing or too old for it; install a newer one ([BUILD.md](BUILD.md#packages)). |
 | `... gives this GPU no XMX` | The compiler gives the GPU no XMX; choose from setup's options. It runs without XMX, with prefill taking about 1.6 times as long ([BUILD.md](BUILD.md#the-sycl-compiler)). |
 | `no SYCL compiler for the engine` | There is no SYCL compiler: install the distribution's DPC++, or pass `--intel-llvm-build`. |

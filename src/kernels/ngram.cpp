@@ -8,6 +8,7 @@
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/artifact/dequant.hpp"
 #include "strata/kernels/f16_bits.hpp"
+#include "strata/ngram/ple_hot.hpp"
 #include "strata/ngram/ple_reader.hpp"
 #include "strata/platform/memory.hpp"
 
@@ -21,6 +22,7 @@
 #endif
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <thread>
 #include <vector>
 #include <stdexcept>
@@ -209,6 +211,7 @@ struct PleTable::Impl {
     uint32_t prefetch_keys[kMaxPrefetch][PLE_N_HEADS] = {};
     uint8_t prefetch_raw[kMaxPrefetch][PLE_N_HEADS * PLE_ROW_BYTES_MAX] = {};
     float scale = 1.0f;               // the FP8 table's one scale
+    double hot_load_s = 0;            // XeStrata: --ple-hot
     uint32_t rb = PLE_ROW_BYTES;      // bytes per row
     void decode(const uint8_t* row, float* out160) const { fmt->dequant(row, scale, out160); }
 };
@@ -315,6 +318,16 @@ bool PleTable::open(const std::string& gguf_path, std::string& err, const PleIoO
         }
         impl_->reader.set_keepalive(io.keepalive_ms, io.keepalive_window_s);
         impl_->n_rows = n_rows;
+        if (!io.hot_path.empty()) {                    // XeStrata: the most frequent n-grams' rows, kept in RAM
+            const auto th = std::chrono::steady_clock::now();
+            strata::ngram::HotRows hot;
+            if (!strata::ngram::load_hot_rows(io.hot_path, impl_->reader, n_rows, table_offset, hot, err)) {
+                close();
+                return false;
+            }
+            impl_->reader.set_pinned(std::move(hot.ids), std::move(hot.bytes));
+            impl_->hot_load_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - th).count();
+        }
     }
     if (io.mode == PleIo::Mmap && io.lock && impl_->data != nullptr) {
 #if defined(_WIN32)
@@ -409,6 +422,7 @@ void PleTable::close() {
     impl_->fmt = &ple_format_info(PleFormat::IQ4_NL);
     impl_->scale = 1.0f;
     impl_->bytes_read = 0;
+    impl_->hot_load_s = 0;
 }
 
 bool PleTable::is_open() const { return impl_->data != nullptr || impl_->reader.is_open(); }
@@ -417,6 +431,12 @@ const char* PleTable::format() const { return impl_->fmt->name; }
 PleIo PleTable::mode() const { return impl_->mode; }
 uint64_t PleTable::rows() const { return impl_->n_rows; }
 uint64_t PleTable::bytes_read() const { return impl_->bytes_read; }
+
+uint64_t PleTable::hot_rows() const { return impl_->reader.pinned_rows(); }
+
+uint64_t PleTable::hot_bytes() const { return hot_rows() * (4u + impl_->rb); }
+
+double PleTable::hot_load_s() const { return impl_->hot_load_s; }
 
 void PleTable::read_row(uint32_t row, float* out160) const {
     if (impl_->mode == PleIo::Direct && impl_->reader.is_open()) {
@@ -550,7 +570,7 @@ void PleTable::set_injected_delay_us(double us) { impl_->reader.set_injected_del
 std::string PleTable::io_report() const {
     if (impl_->mode != PleIo::Direct || !impl_->reader.is_open()) return {};
     const strata::ngram::ReaderStats s = impl_->reader.snapshot();
-    char buf[400];
+    char buf[480];
     int n = std::snprintf(buf, sizeof buf,
                   "ple io: %llu rows, %.1f%% row-cache hits, %llu SSD reads (%.1f MB), read p50 %.0f us p99 %.0f us, "
                   "blocked %.3f ms total (submit %.3f ms), cache %llu/%llu rows",
@@ -558,6 +578,10 @@ std::string PleTable::io_report() const {
                   (unsigned long long) s.reads, (double) s.bytes / 1e6, s.percentile(0.5), s.percentile(0.99),
                   s.wait_us / 1000.0, s.submit_us / 1000.0, (unsigned long long) impl_->reader.cache_size(),
                   (unsigned long long) impl_->reader.cache_capacity());
+    if (s.pinned_hits > 0 && n > 0 && n < (int) sizeof buf)   // XeStrata: --ple-hot
+        n += std::snprintf(buf + n, sizeof buf - (size_t) n, ", %.1f%% hot rows (%llu kept)",
+                           100.0 * (double) s.pinned_hits / (double) s.requests,
+                           (unsigned long long) impl_->reader.pinned_rows());
     if (s.keepalive_reads > 0 && n > 0 && n < (int) sizeof buf)
         std::snprintf(buf + n, sizeof buf - (size_t) n, ", SSD kept awake by %llu reads (slowest %.1f ms)",
                       (unsigned long long) s.keepalive_reads, s.keepalive_us_max / 1000.0);

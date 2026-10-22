@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: 2026 Niko1221 and the Strata contributors
-// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 MistVVK and the XeStrata contributors
+// SPDX-License-Identifier: LGPL-3.0-or-later AND MIT
 // src/ngram/ple_reader.cpp - see include/strata/ngram/ple_reader.hpp.
 #include "strata/ngram/ple_reader.hpp"
 #include "strata/platform/aux_cpus.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -15,6 +17,12 @@
 #include <unordered_map>
 
 namespace strata::ngram {
+
+namespace {
+std::atomic<uint64_t> g_reads_done{0};      // XeStrata: every reader's finished table reads (`reads_done`)
+}  // namespace
+
+uint64_t reads_done() { return g_reads_done.load(std::memory_order_relaxed); }
 
 using platform::Completion;
 using platform::DirectFile;
@@ -73,6 +81,34 @@ struct RowCache {
     }
 };
 
+/// XeStrata: the rows `set_pinned` keeps, found by a bucket on the top bits of the row id and a binary search inside
+/// it. The ids are hashes of n-grams, so the buckets fill evenly (~580 ids each for 45M rows of a 320M-row table).
+struct PinnedRows {
+    static constexpr uint32_t SHIFT = 12;   // 4096 table rows a bucket
+    std::vector<uint32_t> ids;
+    std::vector<uint8_t> bytes;
+    std::vector<uint32_t> start;            // bucket b's ids are ids[start[b] .. start[b + 1])
+    uint32_t rb = ROW_BYTES;
+
+    void set(std::vector<uint32_t> i, std::vector<uint8_t> b, uint32_t row_bytes, uint64_t n_rows) {
+        ids = std::move(i);
+        bytes = std::move(b);
+        rb = row_bytes;
+        start.assign((size_t) (n_rows >> SHIFT) + 2, 0);
+        size_t k = 0;
+        for (size_t s = 0; s < start.size(); ++s) {
+            while (k < ids.size() && (ids[k] >> SHIFT) < s) ++k;
+            start[s] = (uint32_t) k;
+        }
+    }
+    const uint8_t* find(uint32_t row) const {
+        if (ids.empty() || (size_t) (row >> SHIFT) + 1 >= start.size()) return nullptr;
+        const auto lo = ids.begin() + start[row >> SHIFT], hi = ids.begin() + start[(row >> SHIFT) + 1];
+        const auto it = std::lower_bound(lo, hi, row);
+        return it != hi && *it == row ? &bytes[(size_t) (it - ids.begin()) * rb] : nullptr;
+    }
+};
+
 struct Use {
     uint32_t row;
     uint32_t in_page;      // byte offset of the row inside the read buffer
@@ -112,6 +148,7 @@ struct PleReader::Impl {
     std::unordered_map<uint32_t, TicketState> tickets;
     uint32_t next_ticket = 1;
     RowCache cache;
+    PinnedRows pinned;                    // XeStrata: --ple-hot
     ReaderStats stats;
     size_t ring_pos = 0;
     double delay_us = 0;
@@ -229,6 +266,7 @@ struct PleReader::Impl {
         }
         record_latency(now_us() - j.issued_us);
         stats.bytes += c.bytes;
+        g_reads_done.fetch_add(1, std::memory_order_relaxed);
         const uint8_t* buf = slot_buf(s);
         for (const Use& u : j.uses) {
             if (u.in_page + row_bytes > c.bytes) {
@@ -412,6 +450,7 @@ void PleReader::close() {
     m.inflight.clear();
     m.free_slots.clear();
     m.cache.init(0);
+    m.pinned = PinnedRows{};
     m.threaded = false;
     m.stop = false;
     m.keep_us = 0;
@@ -439,6 +478,11 @@ PleReader::Ticket PleReader::issue(const uint32_t* rows, size_t n, uint8_t* out_
         ++m.stats.requests;
         if (rows[i] >= m.n_rows) {
             std::memset(dst, 0, rb);
+            continue;
+        }
+        if (const uint8_t* pin = m.pinned.find(rows[i])) {
+            std::memcpy(dst, pin, rb);
+            ++m.stats.pinned_hits;
             continue;
         }
         if (const uint8_t* hit = m.cache.find(rows[i])) {
@@ -515,6 +559,14 @@ bool PleReader::collect(Ticket t, std::string& err) {
     m.tickets.erase(it);
     return true;
 }
+
+void PleReader::set_pinned(std::vector<uint32_t> ids, std::vector<uint8_t> bytes) {
+    Impl& m = *impl_;
+    std::lock_guard<std::mutex> lk(m.mu);
+    m.pinned.set(std::move(ids), std::move(bytes), m.row_bytes, m.n_rows);
+}
+
+uint64_t PleReader::pinned_rows() const { return impl_->pinned.ids.size(); }
 
 void PleReader::set_keepalive(double period_ms, double window_s) {
     Impl& m = *impl_;
