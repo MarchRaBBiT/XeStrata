@@ -364,6 +364,14 @@ if(STRATA_ENABLE_XE)
   target_link_options(strata_sycl INTERFACE -fsycl ${_strata_sycl_targets} -foffload-fp32-prec-div
                       -foffload-fp32-prec-sqrt -fsycl-max-parallel-link-jobs=${_strata_link_jobs}
                       "SHELL:${_strata_spirv_translator} --spirv-ext=+SPV_KHR_integer_dot_product")
+  # The SYCL runtime's own libraries beside libsycl, for the linker to find what libsycl's libraries need: where the
+  # system's Level Zero is new enough (Fedora 44), intel/llvm v7.2.0 builds UR's loader as a library of its own, and
+  # ld.bfd warned at every link that the libumf it needs was not found.
+  if(NOT WIN32)
+    get_filename_component(_strata_sycl_lib "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    get_filename_component(_strata_sycl_lib "${_strata_sycl_lib}/../lib" ABSOLUTE)
+    target_link_options(strata_sycl INTERFACE "LINKER:-rpath-link,${_strata_sycl_lib}")
+  endif()
 
   add_library(strata_core STATIC src/core/device.cpp src/core/pinned.cpp src/core/gpu.cpp src/core/graph.cpp
                                  src/core/weights.cpp src/core/layout.cpp)
