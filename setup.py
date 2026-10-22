@@ -6128,8 +6128,7 @@ def main() -> int:
         warn(f"--resident-budget-gib is for UD-Q4_K_XL and UD-IQ4_XS: {model} keeps all of its experts in RAM or in "
              "the low-RAM mode")
     low_ram = budget is None and (a.low_ram in ("on", "resident", "mmap") or
-                                  (a.low_ram == "auto" and low_ram_needed(model, ram) and
-                                   low_ram_fits(model, ram, vram)))
+                                  (a.low_ram == "auto" and low_ram_needed(model, ram)))
     # (the low-RAM mode's variant is decided once the context is known, below)
     if not low_ram and budget is None and ram < MODELS[model]["ram_gb"] - 4:
         # #125: a warning and a question, not a stop: the user may accept paging (asked, "no" by default, so an
