@@ -24,7 +24,7 @@ constexpr int kProbes = 3;       // a lookup window size is tried this often bef
 // A size not measured for this many rounds is tried again when a confident lookup could use it: its cost was set in
 // one stretch (a prompt's cache refill, say) and, priced high, it would never be measured again (#1252)
 constexpr double kStaleRounds = 300.0;
-// The MTP's window: a draft's acceptance before any is observed (the same 0.7 as mtp_tokens), and the chance the
+// The MTP's window: a draft's acceptance before any is observed (the same 0.7 as prior_tokens), and the chance the
 // drafts must have of holding for a size whose cost is only guessed to be tried (as chain()'s 0.6 for a lookup)
 constexpr double kDraftPrior = 0.7;
 constexpr double kProbeHeld = 0.5;
@@ -66,7 +66,7 @@ bool DraftPolicy::stale(int t) const { return cost_n_[t] > 0 && rounds_ - last_[
 
 double DraftPolicy::mtp_tokens(int t) const {
     if (mtp_n_[t] > 0) return mtp_tok_[t];
-    return 1.0 + 0.7 * (t - 1);       // before any MTP window of this size: a typical acceptance
+    return prior_tokens(t);
 }
 
 DraftPolicy::Pick DraftPolicy::choose(int t_mtp, int lookup_k, int match) const {

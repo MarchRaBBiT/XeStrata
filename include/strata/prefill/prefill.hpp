@@ -24,6 +24,7 @@
 #include <future>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace strata::kernels::cpu { class ExpertPool; }
 namespace strata::gpu { struct Event; }
@@ -42,6 +43,10 @@ struct PrefillStats {
     int64_t experts_helper = 0;     ///< ...computed on a helper GPU from its own cache instead of streamed (set_helper)
     double cpu_share = 0;           ///< ...the share of the streamed ones it took last (measured with `auto`)
     double ms_ple = 0;
+    /// The prompts' routings, (token, k) pairs per model layer x expert (n_layers x n_expert; empty before the first
+    /// MoE layer), and the k of a token: what the decode after a prompt is likely to route to, set against the cache
+    std::vector<int64_t> routed;
+    int64_t routed_k = 0;
 };
 
 /// --prefill-cpu-share: the CPU pool's share of a short chunk's streamed experts, fixed (0..1; negative: measured,

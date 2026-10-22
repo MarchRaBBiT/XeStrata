@@ -2434,6 +2434,10 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         if (e < 0 || e >= m.g->n_expert) { err = "prefill: routed id out of range"; return false; }
                         ++m.cnt[(size_t) e];
                     }
+                    if (stats_.routed.empty()) stats_.routed.assign((size_t) (m.g->n_layers * m.g->n_expert), 0);
+                    stats_.routed_k = K;
+                    for (int32_t e = 0; e < m.g->n_expert; ++e)
+                        stats_.routed[(size_t) (l * m.g->n_expert + e)] += m.cnt[(size_t) e];
                     const strata::kernels::cpu::ExpertLayout& lay = strata::kernels::cpu::expert_layout();
                     int64_t routed = 0;   // the experts this layer routes to: a chunk's layer takes MMQ by their mean rows
                     for (int32_t e = 0; e < m.g->n_expert; ++e) routed += m.cnt[(size_t) e] > 0;

@@ -2090,28 +2090,47 @@ void setup_pcie_split(strata::core::ExpertDispatch& d, int64_t n_layers, const O
     d.pcie_overlap = overlap;
     // a row of the split: of f = 1..16 missed experts with as many VRAM hits, the number read over PCIe
     std::string row;
-    bool any_pcie = false;
-    for (int f = 1; f <= 16; ++f) {
-        const int m = strata::core::pcie_split_m(t, overlap, f, f);
-        any_pcie = any_pcie || m > 0;
-        row += " " + std::to_string(m);
-    }
-    // the arena moves into host USM only when the split reads experts over PCIe and the GPU cannot read it as it is
-    // (a registration for copies only, Level Zero's): the move takes seconds and gains nothing where nothing is read
-    if (any_pcie && d.src->device_alias(t.layer, 0) == nullptr) {
-        std::string err;
-        const auto t0 = std::chrono::steady_clock::now();
-        if (d.src->make_kernel_readable(err))
-            std::fprintf(stderr, "strata generate: the expert arena moved into host USM for the PCIe share (%.1f s)\n",
-                         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
-        else
-            std::fprintf(stderr, "strata generate: the expert arena stays registered for copies (%s): the CPU takes every "
-                                 "missed expert\n", err.c_str());
-    }
+    for (int f = 1; f <= 16; ++f) row += " " + std::to_string(strata::core::pcie_split_m(t, overlap, f, f));
     std::fprintf(stderr, "strata generate: PCIe split, measured: an expert %.3f ms on the CPU (%.3f beside the link), "
                          "%.3f ms over PCIe (%.3f beside the CPU), %.3f ms on the GPU, layer %lld -> of 1..16 missed "
                          "experts (as many hits) PCIe takes%s%s\n",
                  t.c, t.cb, t.p, t.pb, t.q, (long long) t.layer, row.c_str(), overlap ? " (beside the hits)" : "");
+}
+
+// The expert arena moves into host USM (seconds: Gyro-M's 30 GB took 12 s on the B70) only where the GPU cannot read
+// it as it is (a registration for copies only, Level Zero's) and the split would read experts over PCIe at the misses
+// a window is likely to have: the share of the prompts' routings the cache does not hold, over a window of the prior's
+// tokens.  Until 2026-10-23 the move went by the split's table alone, for any count of misses, and the decode then
+// read 0.01 experts a layer over PCIe (Gyro-M, B70).  Once per process: the move failed or declined stays as it is.
+bool pcie_move_if_pays(strata::core::ExpertDispatch& d, bool overlap, const strata::prefill::PrefillStats& ps,
+                       const std::vector<int32_t>& host_res, int spec) {
+    const strata::core::PcieSplitTimes* t = d.pcie_split;
+    if (t == nullptr || ps.routed.empty() || ps.routed_k <= 0 || d.src->device_alias(t->layer, 0) != nullptr) return false;
+    int64_t total = 0, missed = 0;
+    for (size_t i = 0; i < ps.routed.size() && i < host_res.size(); ++i) {
+        total += ps.routed[i];
+        if (host_res[i] < 0) missed += ps.routed[i];
+    }
+    if (total <= 0) return false;
+    const double rows = strata::spec::DraftPolicy::prior_tokens(spec) * (double) ps.routed_k;   // a layer's routings a window
+    const double f = rows * (double) missed / (double) total;
+    const int fi = (int) std::lround(f), hi = (int) std::lround(rows - f);
+    const int m = fi > 0 ? strata::core::pcie_split_m(*t, overlap, fi, hi) : 0;
+    if (m <= 0) {
+        std::fprintf(stderr, "strata generate: PCIe split: the prompt routes %.2f missed experts a layer a window, which "
+                             "the CPU takes: the expert arena stays registered for copies\n", f);
+        return true;
+    }
+    std::string err;
+    const auto t0 = std::chrono::steady_clock::now();
+    if (d.src->make_kernel_readable(err))
+        std::fprintf(stderr, "strata generate: the expert arena moved into host USM for the PCIe share (%.1f s; the "
+                             "prompt routes %.2f missed experts a layer a window, %d of them over PCIe)\n",
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), f, m);
+    else
+        std::fprintf(stderr, "strata generate: the expert arena stays registered for copies (%s): the CPU takes every "
+                             "missed expert\n", err.c_str());
+    return true;
 }
 }  // namespace
 
@@ -7855,6 +7874,7 @@ int main(int argc, char** argv) {
         strata::core::PcieSplitTimes pcie_split;   // the measured split, kept for the requests that set no share
         setup_pcie_split(drive.d, g.n_layers, o, pcie_given, !split_devs.empty(), ver.fetch_branch(), pcie_split);
         strata::core::PcieSplitTimes* const pcie_split_ptr = drive.d.pcie_split;
+        bool pcie_move_decided = false;   // the arena's move into host USM: decided once, after a prompt is read
         {   // STRATA_ROUTE_TAIL_SKIP: ON BY DEFAULT (rank 7, upstream b4e3407b; measured on XeStrata's GPUs, docs/DETAILS.md): a
             // missed expert that every token of a verify window routes at rank 7 or lower is neither copied nor computed
             // (answers differ slightly; =0 restores the bytes of a build without it).  No default and no line when every
@@ -11525,6 +11545,8 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata pipeline calibration (p_on decile: on/scored):%s\n", cal.c_str());
                 }
             }
+            if (!pcie_move_decided && drive.d.pcie_split == pcie_split_ptr)
+                pcie_move_decided = pcie_move_if_pays(drive.d, ver.fetch_branch(), sp.stats(), host_res, o.spec);
             // the window rule, as the chain drafts: another draft after n when the rule would keep it (--spec-window)
             const strata::core::MtpDrafter::More draft_more = [&](int n, const float* pr) {
                 return req_minp_rule ? pr[n - 1] >= (float) req_spec_min_p : policy.mtp_extend(pr, n, S_mtp);
@@ -12537,6 +12559,7 @@ int main(int argc, char** argv) {
         if (drive.d.pcie_num > 256) drive.d.pcie_num = 256;
         strata::core::PcieSplitTimes pcie_split;   // the measured split
         setup_pcie_split(drive.d, g.n_layers, o, pcie_given, !split_devs.empty(), ver.fetch_branch(), pcie_split);
+        pcie_move_if_pays(drive.d, ver.fetch_branch(), prefill.stats(), host_res, o.spec);
         const int64_t pcie0 = drive.d.pcie_experts;
         if (o.adapt_every > 0 && o.adapt_swaps > 0) drive.d.usage.assign((size_t) (g.n_layers * g.n_expert), 0.0f);
         // the adaptive tier at fixed positions of the text: it counts the routing of the rows whose input was the

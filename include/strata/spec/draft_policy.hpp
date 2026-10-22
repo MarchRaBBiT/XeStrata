@@ -48,6 +48,8 @@ public:
     double chain_rate(int match) const;
     double lookup_rate(int match) const;   // current q for a match length
     double cost_ms(int t) const;           // measured or scaled round time of a window of t tokens
+    /// The tokens a window of t committed before any is observed: a typical acceptance of a draft
+    static double prior_tokens(int t) { return 1.0 + 0.7 * (t - 1); }
     /// The MTP's own window, from this round's drafts (the idea of DeepInfer's confidence-scheduled verification,
     /// written anew): a draft is kept while the tokens it is expected to add, at its calibrated acceptance, raise the
     /// window's expected tokens per ms at the measured window costs; a size whose cost is only guessed is tried when
