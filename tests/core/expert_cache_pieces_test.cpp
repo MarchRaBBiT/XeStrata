@@ -13,11 +13,22 @@
 #include "strata/core/runtime.hpp"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
 
 namespace {
+
+// the environment as the engine reads it (std::getenv); Windows has no setenv, and an empty value removes the variable
+void set_env(const char* name, const char* value) {
+#if defined(_WIN32)
+    _putenv_s(name, value);
+#else
+    if (value[0] == '\0') ::unsetenv(name);
+    else ::setenv(name, value, 1);
+#endif
+}
 
 int open_and_check(const char* name, const std::vector<int64_t>& slot_bytes, int64_t nl, int64_t ne,
                    int64_t want_slots) {
@@ -77,14 +88,14 @@ int main() {
     // plain: one allocation, no pieces
     bad += open_and_check("plain", slots, 3, 4, 6);
     // the one allocation refused: every piece taken, the whole cache in pieces
-    ::setenv("STRATA_TEST_ALLOC_FAIL", "1", 1);
+    set_env("STRATA_TEST_ALLOC_FAIL", "1");
     bad += open_and_check("fallback", slots, 3, 4, 6);
     // the same refusal, with the pieces from the second on refused: only the first piece's slots stay
-    ::setenv("STRATA_TEST_ALLOC_FAIL", "1", 1);
-    ::setenv("STRATA_TEST_PIECE_FAIL", "5", 1);
+    set_env("STRATA_TEST_ALLOC_FAIL", "1");
+    set_env("STRATA_TEST_PIECE_FAIL", "5");
     bad += open_and_check("prefix", slots, 3, 4, 1);
-    ::unsetenv("STRATA_TEST_PIECE_FAIL");
-    ::unsetenv("STRATA_TEST_ALLOC_FAIL");
+    set_env("STRATA_TEST_PIECE_FAIL", "");
+    set_env("STRATA_TEST_ALLOC_FAIL", "");
     // a want beyond any card here: the pre-check's refusal, said in full (Lower --expert-cache)
     bad += open_and_check("toobig", std::vector<int64_t>(6, 64ll << 30), 3, 4, -1);
     return bad == 0 ? 0 : 1;

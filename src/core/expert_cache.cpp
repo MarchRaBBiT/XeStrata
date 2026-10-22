@@ -541,14 +541,7 @@ bool ExpertCache::open_sized(const std::vector<int64_t>& slot_bytes, int64_t n_l
             std::fprintf(stderr, "strata: expert cache: the one allocation of %lld MiB was refused; %lld slots "
                                  "(%lld MiB) taken in pieces instead\n",
                          (long long) (want >> 20), (long long) fitted, (long long) (slot_end(fitted) >> 20));
-            start_tables(fitted, n_layers, n_expert, mx);
-            // #369: each layer's cursor at the bottom of its own range, as open() seeds it
-            layer_next_.assign((size_t) (n_layers > 0 ? n_layers : 0), 0);
-            for (int64_t l = 0; l < n_layers; ++l) {
-                int64_t lo = 0, hi = 0;
-                layer_slot_range(l, lo, hi);
-                layer_next_[(size_t) l] = (int32_t) lo;
-            }
+            start_tables(fitted, n_layers, n_expert, mx);   // seeds the layers' cursors on these slots (#369)
             return true;
         }
         return false;
