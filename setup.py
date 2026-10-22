@@ -53,6 +53,7 @@ import os
 import platform
 import re
 import shutil
+import site
 import struct
 import subprocess
 import sys
@@ -2512,7 +2513,9 @@ def pip_install(packages, what):
     """pip install into .venv, skipped when the same list was installed before.  An install from before the pinned
     requirements recorded bare names: those packages are kept as they are (nothing is reinstalled), and the pinned
     dependencies it already has count as installed."""
-    stamp = Path(sys.prefix) / ".strata-pip.json"
+    # a Python whose prefix this user cannot write (the system's, run without setup.sh's .venv): pip installs into the
+    # user's site, and the list is kept there
+    stamp = (Path(sys.prefix) if os.access(sys.prefix, os.W_OK) else Path(site.getuserbase())) / ".strata-pip.json"
     have = json.loads(stamp.read_text()) if stamp.exists() else []
     bare = {p.lower() for p in have if req_name(p) == p.lower()}
     need = [p for p in packages if p not in have and req_name(p) not in bare
@@ -2522,7 +2525,11 @@ def pip_install(packages, what):
         return
     say(f"  Installing {what} ...")
     run([sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", *need])
-    stamp.write_text(json.dumps(sorted(set(have) | set(need)), indent=0))
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(json.dumps(sorted(set(have) | set(need)), indent=0))
+    except OSError as e:                                 # only costs asking pip again next time
+        warn(f"could not record the installed packages in {stamp} ({e}): the next run checks them again")
     ok(f"{what} installed")
 
 
