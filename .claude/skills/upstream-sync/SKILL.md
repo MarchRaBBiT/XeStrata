@@ -199,7 +199,7 @@ The previous XeStrata is the newest `xe*` release before this run (step 1). Its 
 ```sh
 python .claude/skills/upstream-sync/scripts/judge.py \
   --prev IQ3_XXS=<data>/records/bench-results/<date>-release-<xe tag> --prev Q2_0=<last merge>/Q2_0 ... \
-  $o/IQ3_XXS $o/Q2_0 $o/IQ2_XS $o/IQ3_S $o/UD-Q4_K_XL
+  $o/IQ3_XXS $o/Q2_0 $o/IQ2_XS $o/IQ3_S $o/UD-Q4_K_XL $o/Gyro-M
 ```
 
 Against the tag, a cell (file, GPU, tier, prompt or output) passes when XeStrata's median is at most 1% below upstream's.

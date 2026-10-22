@@ -199,6 +199,18 @@ python $u/sync_collect.py $o/serve xe<VERSION> <upstream tag>                 # 
 `XE` and `UP` are as above; serve and everyday use pass stdin to them, so upstream's `sycl/` wrapper runs `podman run -i`.
 `XE_ROOT` and `UP_ROOT` are the engines' worktrees (their `serve/server.py`), `PY` a Python with the server's packages (the data folder's `venv`); everyday use runs at a 262144 context with what setup writes for it.
 
+### Gyro-M
+
+And one more on the same GPUs and engines (the user's decision of 2026-10-22): agentionai's Gyro-M (the experts' trellis type TQ2_T), generate at 32K and 1K by the upstream merge's `bench_generate.py`, two rounds, the engines alternating and both following one text (`--spec-follow`, upstream's own first run); upstream reads its own pack through the merge's `up-pack.sh` (its references/measure.md, the files table).
+
+```sh
+G=<data>/models/Gyro/Qwen3.8-Flash-Next-Gyro-M-TQ2_0.gguf
+XE="..." UP="$u/up-pack.sh" UP_REAL="<upstream's command, as above>" XE_PROFILE=... UP_PROFILE=... DATA=<data> IDS=<ids-serve> \
+  PACK=<data>/packs/gyro-m UP_PACK=<upstream's Gyro-M pack> NATIVE=$G PLE=$G TIERS="32k 1k" ROUNDS=2 \
+  python $u/bench_generate.py $o/gyro-m <GPU>
+python $u/sync_collect.py $o/gyro-m xe<VERSION> <upstream tag>                 # matrix.json, the tables
+```
+
 ### image generation
 
 And one more on the same GPUs (the user's decision of 2026-10-15): each engine's image generator as its own setup sets it up on the GPU, one 1024x1024 image of 8 steps from a fixed prompt and seed, by the upstream merge's `bench_image.py` (its references/measure.md, "Image generation": XeStrata's resident engine measured warm, upstream's backend, how its `sd-cli` is built in its tree, the GPUs); two images per engine, alternating, after a warm-up each; a few minutes a GPU.
@@ -209,12 +221,12 @@ XE_ROOT=<xe tree> UP_ROOT=<up tree> DATA=<data> QUANT=<Q8_0, Q6_K on a 12 GB car
 python $u/sync_collect.py $o/image xe<VERSION> <upstream tag>                 # matrix-image.json
 ```
 
-The record goes into `$o/`, in the data folder and never into git (XeStrata's own measurements are not shared, the user's decision of 2026-10-11): a README (the machines, the two engines' commits and builds, the method, the tables and what the numbers say), `matrix.json`, `serve/` (its `matrix-serve.json`, `matrix-usage.json` and runs), `image/` (its `matrix-image.json`, runs and images), and the logs in `runs/` with this PC's paths written as `<repo>` and `<data>` (as the speed-matrix record does).
+The record goes into `$o/`, in the data folder and never into git (XeStrata's own measurements are not shared, the user's decision of 2026-10-11): a README (the machines, the two engines' commits and builds, the method, the tables and what the numbers say), `matrix.json`, `serve/` (its `matrix-serve.json`, `matrix-usage.json` and runs), `gyro-m/` (its `matrix.json` and runs), `image/` (its `matrix-image.json`, runs and images), and the logs in `runs/` with this PC's paths written as `<repo>` and `<data>` (as the speed-matrix record does).
 It is not committed; the release notes carry the tables.
 
 ## 10. The final release (確定報)
 
-The final release is reached a GPU at a time (the user's decision, 2026-10-11): as soon as one GPU's tables are complete (its generate table, its serve and everyday table and its image table), add them to the notes (English and Japanese sections) and update the release (`gh release edit`, below), without waiting for the other GPUs.
+The final release is reached a GPU at a time (the user's decision, 2026-10-11): as soon as one GPU's tables are complete (its generate table, its serve and everyday table, its Gyro-M table and its image table), add them to the notes (English and Japanese sections) and update the release (`gh release edit`, below), without waiting for the other GPUs.
 
 - The comparison section comes after the notes' other sections: its opening lines (the engines' versions, the model, the method), then the note on temperatures and what counts as equal (below) right after them, once, then the GPUs in a fixed order, the B70, the RTX 4070, the RX 9060 XT, each as its tables are done.
 - While some are missing, one line under the done ones names them: B70・RTX 4070: 計測中（後で足す） / B70, RTX 4070: being measured (added later).
@@ -224,6 +236,7 @@ The final release is reached a GPU at a time (the user's decision, 2026-10-11): 
 The tables:
 
 The notes' table is one per GPU, from `bench-collect.py`'s medians (the record's README keeps `bench-collect.py`'s own tables): a row per tier, named by the model's weight type and the length (`IQ3_XXS 1K`), and for prefill and then decode three columns (the LLM terms, in both languages; the user's decision, 2026-10-11): XeStrata's value, upstream's, and the difference (the value columns named with the engine and its version, `XeStrata xe0.1.43.1-1`, `upstream v0.1.41`), marked ✅ where XeStrata is faster and ❌ where it is slower: prefill as a ratio (`✅ 2.1 倍`, `✅ ×2.1`), decode as a percentage (`✅ +14%`; slower: `❌ −3%`).
+Gyro-M's rows, from `gyro-m/`'s medians, come after IQ3_XXS's in the same generate table (`Gyro-M 32K`, `Gyro-M 1K`).
 Within ±1% (either way) the two count as equal: `≒ 同等（−0.1%）` / `≈ equal (−0.1%)`, for prefill as well.
 A value upstream was stopped in is 計測不能（低速） / not measurable (too slow), its difference `✅`, with the line saying upstream was stopped at 10 tok/s or less; a value that does not fit stays `-`.
 Above each GPU's tables: the GPU (and its memory) and which build of upstream it ran (`sycl/`, CUDA, HIP).

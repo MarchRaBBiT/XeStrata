@@ -27,6 +27,7 @@ Each GPU is one matrix path (the B70 XMX, the RTX 4070 tensor cores, the RX 9060
 | IQ2_XS | `32k` | the experts' IQ1_M |
 | IQ3_S | `32k` | the experts' IQ4_XS |
 | UD-Q4_K_XL | `32k` | the experts' K-quants (Q4_K, Q5_K), Q5_1 and Q8_0 |
+| Gyro-M | `32k 1k` | the experts' trellis type TQ2_T (agentionai's Gyro, from upstream 0.2.0) and its prompt and decode paths (the user's decision of 2026-10-22) |
 
 Each tier stands for a kind of prompt: 1K the chunks below 1,024 tokens (the CPU takes a share of the experts), 32K a long context whose K/V is all in VRAM, 64K the K/V streamed from RAM (the path of every tier from 64K to 262K).
 The attention over the earlier tokens grows with the context (B70, IQ3_XXS: the prompt at 1,488 tok/s at 64K, 1,099 at 262K), so a loss in the attention or the K/V reads shows smaller at 64K: the run that decides (step 8) measures IQ3_XXS at 262K too.
@@ -43,6 +44,8 @@ python .claude/skills/upstream-sync/scripts/sync_collect.py $o/<file> xe-<commit
 
 `bench_generate.py` alternates the engines after a warm-up each; the merge runs one round per tier (`ROUNDS=1`, the user's decision of 2026-10-12; the scripts' own default is more).
 A model other than IQ3_XXS comes from a model config setup wrote (`CONFIG`: its files, its draft layer and the settings setup and the calibration chose, such as the RAM budget) or from its files (`PACK`, `NATIVE`, `PLE`); the same variables work for the serve and everyday scripts.
+Gyro-M's packs differ by engine: XeStrata's (`packs/gyro-m`, xs2) and upstream's (its `tools/iq_pack.py` of the tag, its native experts; `LOCAL.md`), so `UP` is `scripts/up-pack.sh` around upstream's command (`UP_REAL`, with `UP_PACK` upstream's pack; `PACK`, `NATIVE` and `PLE` are XeStrata's, one Gyro GGUF for both shards).
+Upstream's pack is made again only when its pack format changes.
 The three scripts are entry points to `tools/bench_core.py`, which setup's `--bench` runs too: the prompts, the conversations and how the runs are made and read are defined there once.
 Both engines write one text a tier (the user's decision of 2026-10-10): upstream runs first in the tier and writes its own answer, and every later run of both engines follows it with `--spec-follow` (upstream's own tool, ac131a3a).
 The rounds and the drafts accepted are then the same, so the output speeds compare the engines and not which text each happened to write: the two engines round differently, their answers part after a few dozen tokens, and on UD-Q4_K_XL that alone moved the output by 5%.
