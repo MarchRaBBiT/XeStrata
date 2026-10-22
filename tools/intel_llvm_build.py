@@ -66,14 +66,26 @@ def patch_id(patch: Path) -> str:
     return patch.stem.split("-", 1)[1]
 
 
-def patched_files() -> list:
-    """The files the patches change, as paths in the clone."""
-    files = set()
+def patched_files() -> tuple[list, list]:
+    """The files the patches change and the files they add, as paths in the clone."""
+    files, added, cur = set(), set(), ""
     for patch in PATCHES:
         for line in patch.read_text().splitlines():
             if line.startswith("diff --git a/"):
-                files.add(line.split()[2][2:])
-    return sorted(files)
+                cur = line.split()[2][2:]
+                files.add(cur)
+            elif line.startswith("new file mode") and cur:
+                added.add(cur)
+    return sorted(files - added), sorted(added)
+
+
+def restore_release() -> None:
+    """The files the patches change back to the release, and the files they add removed (git knows no such path to
+    check out, and a patch does not apply over its own file)."""
+    changed, added = patched_files()
+    run(["git", "-C", SRC, "checkout", "--", *changed])
+    for f in added:
+        (SRC / f).unlink(missing_ok=True)
 
 
 def set_out(out: Path) -> None:
@@ -294,7 +306,7 @@ def build_device_libs(jobs: int) -> bool:
 
 def fix_sources() -> None:
     # the patched files back to the release, then every patch in order
-    run(["git", "-C", SRC, "checkout", "--", *patched_files()])
+    restore_release()
     for patch in PATCHES:
         r = subprocess.run(["git", "-C", str(SRC), "apply", str(patch)], capture_output=True, text=True)
         if r.returncode != 0:
@@ -313,7 +325,7 @@ def prepare_source(tag: str) -> None:
         if have != tag:
             run(["git", "-C", SRC, "fetch", "--depth", "1", "origin", "tag", tag])
             # the patched files back to the release first
-            run(["git", "-C", SRC, "checkout", "--", *patched_files()])
+            restore_release()
             run(["git", "-C", SRC, "checkout", "--detach", tag])
     else:
         run(["git", "clone", "--depth", "1", "--branch", tag, REPO, SRC])
