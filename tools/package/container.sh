@@ -46,6 +46,9 @@ cudnn_headers() {
 }
 
 intel_key=https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB
+# oneMKL's series (setup.py's ONEMKL_SERIES: the newest whose SYCL library runs on intel/llvm 7.1.1's runtime); the
+# packages suggest the package of the library the engine links, so this series
+mkl_series=$(sed -n 's/^ONEMKL_SERIES = "\(.*\)"$/\1/p' "$src/setup.py")
 case "$distro" in
   ubuntu*)
     export DEBIAN_FRONTEND=noninteractive
@@ -74,7 +77,7 @@ python3-requests, python3-pil, python3-psutil"
       echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" \
         > /etc/apt/sources.list.d/oneAPI.list
       apt-get update -q
-      apt-get install -y -q --no-install-recommends intel-oneapi-mkl-sycl-devel
+      apt-get install -y -q --no-install-recommends "intel-oneapi-mkl-sycl-devel-$mkl_series"
     fi
     # ROCm (universe, free software), for AMD GPUs in every package: HIP for intel/llvm's HIP target and adapter, the
     # device libraries the AMD code links, ROCm's clang with its runtime (HIP's CMake package), rocBLAS and hipBLASLt
@@ -109,7 +112,7 @@ gpgcheck=1
 repo_gpgcheck=1
 gpgkey=$intel_key
 EOF
-      dnf install -y -q intel-oneapi-mkl-sycl-devel
+      dnf install -y -q "intel-oneapi-mkl-sycl-devel-$mkl_series"
     fi
     # ROCm, for AMD GPUs in every package (as on Ubuntu above)
     dnf install -y -q rocm-hip-devel rocm-device-libs rocm-clang rocm-clang-runtime-devel rocblas-devel hipblaslt-devel \

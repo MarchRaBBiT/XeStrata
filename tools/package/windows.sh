@@ -20,8 +20,8 @@ hip_archs="gfx1030;gfx1031;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx11
 xwin_ver=0.10.0
 python_ver=3.14.8
 # oneMKL's Windows headers, import libraries and CMake package (Intel's PyPI wheels; not free software: linked against,
-# never in the 7z), of the version whose DLLs the engine then loads (mkl_sycl_blas.6.dll)
-mkl_ver=2026.2.0
+# never in the 7z), of the version whose DLLs the engine then loads (mkl_sycl_blas.6.dll): setup.py's ONEMKL_SERIES
+mkl_ver=$(sed -n 's/^ONEMKL_SERIES = "\(.*\)"$/\1/p' "$src/setup.py").0
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q

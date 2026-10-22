@@ -1169,12 +1169,17 @@ def amd_elsewhere() -> str:
 # optional conversation compression's), and each GPU maker's (Intel's oneMKL in the contrib mode only, NVIDIA's in the
 # contrib mode only).  On Arch the
 # Vulkan ICD is the GPU maker's own package, not one mesa-vulkan-drivers carries for both.
+# oneMKL's series the contrib mode takes (Intel's repositories carry several side by side): the newest whose SYCL
+# library runs on the SYCL runtime XeStrata builds with (intel/llvm 7.1.1's libsycl.so.9); 2026.2's needs 4 functions
+# that runtime lacks (sycl::detail::defaultAsyncHandler among them) and does not load.  The packages take it too
+# (tools/package/container.sh, windows.sh).
+ONEMKL_SERIES = "2026.1"
 PACKAGES = {
     "ubuntu": {
         "base": "python3-venv git cmake ninja-build build-essential lld libhwloc-dev libzstd-dev libvulkan-dev glslc "
                 "spirv-headers mesa-vulkan-drivers libblosc2-dev",
         "intel": "libze1 libze-intel-gpu1 libigc2 libigdfcl2",
-        "intel-contrib": "intel-oneapi-mkl-sycl-devel",
+        "intel-contrib": f"intel-oneapi-mkl-sycl-devel-{ONEMKL_SERIES}",
         "amd": "libamdhip64-dev rocm-device-libs-21 clang-21 libclang-rt-21-dev librocblas-dev libhipblaslt-dev "
                "libhipblas-common-dev",
         "nvidia": "nvidia-cuda-toolkit",
@@ -1183,7 +1188,7 @@ PACKAGES = {
         "base": "python3 git cmake ninja-build gcc-c++ lld hwloc-devel libzstd-devel libzstd-static "
                 "vulkan-loader-devel glslc spirv-headers-devel mesa-vulkan-drivers blosc2-devel",
         "intel": "oneapi-level-zero oneapi-level-zero-devel intel-level-zero",
-        "intel-contrib": "intel-oneapi-mkl-sycl-devel",
+        "intel-contrib": f"intel-oneapi-mkl-sycl-devel-{ONEMKL_SERIES}",
         "amd": "rocm-hip-devel rocm-device-libs rocm-clang rocm-clang-runtime-devel rocblas-devel hipblaslt-devel "
                "hipblas-common-devel",
         "nvidia": "cuda-toolkit-13-4",
@@ -2647,7 +2652,7 @@ INTEL_LLVM_CONTRIB = ROOT / ".tools" / "intel-llvm-contrib" / "install"
 FREE_HOW = ("intel/llvm's DPC++ 7 or later (free software): build it here: ./setup.sh --intel-llvm-build (13 minutes "
             "on 28 threads, 3.5 GB), or a distribution's package of version 7 or later")
 MKL_HOW = ("oneMKL (not free software; Intel's apt repository, set up as docs/BUILD.md#packages says): "
-           "sudo apt install intel-oneapi-mkl-sycl-devel")
+           f"sudo apt install intel-oneapi-mkl-sycl-devel-{ONEMKL_SERIES}")
 # Intel's repositories carry apt and dnf packages, not Arch's: on Arch the oneAPI packages come from Intel's offline
 # installer, if they are wanted at all (the free and contrib modes build intel/llvm from the source)
 ONEAPI_ARCH = ("Intel oneAPI is not in Arch's repositories (only apt's and dnf's): either install it with Intel's "
@@ -2738,9 +2743,11 @@ def packaged_engine() -> dict:
 
 def mkl_root() -> str | None:
     """Where oneMKL is (the contrib modes' dense products, the SYCL image encoder): oneAPI's MKLROOT, else oneAPI's
-    default folder."""
-    root = (oneapi_env() or {}).get("MKLROOT") or "/opt/intel/oneapi/mkl/latest"
-    return root if Path(root, "lib").is_dir() else None
+    folder of ONEMKL_SERIES, else its latest (a newer series may not load: ONEMKL_SERIES)."""
+    root = (oneapi_env() or {}).get("MKLROOT") or next(
+        (r for r in (f"/opt/intel/oneapi/mkl/{ONEMKL_SERIES}", "/opt/intel/oneapi/mkl/latest") if Path(r).is_dir()),
+        "")
+    return root if root and Path(root, "lib").is_dir() else None
 
 
 def compiler_version(cxx, env) -> str:
