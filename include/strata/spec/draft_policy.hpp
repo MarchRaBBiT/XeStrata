@@ -48,11 +48,26 @@ public:
     double chain_rate(int match) const;
     double lookup_rate(int match) const;   // current q for a match length
     double cost_ms(int t) const;           // measured or scaled round time of a window of t tokens
+    /// The MTP's own window, from this round's drafts (the idea of DeepInfer's confidence-scheduled verification,
+    /// written anew): a draft is kept while the tokens it is expected to add, at its calibrated acceptance, raise the
+    /// window's expected tokens per ms at the measured window costs; a size whose cost is only guessed is tried when
+    /// its drafts are likely to hold.  `probs[j]`: draft j's probability under the draft layer (0 past the drafts
+    /// made).  Returns the window size, 1..max_t.
+    int mtp_window(const float* probs, int max_t) const;
+    /// While drafting: with `n` drafts made (probs[0..n-1]), whether one more could still pay, at the mean
+    /// acceptance of a draft; false as well when the drafts made already stop paying.
+    bool mtp_extend(const float* probs, int n, int max_t) const;
+    /// After an MTP window of `t` tokens: its drafts' probabilities and the accepted count, which calibrate the
+    /// drafts' probabilities against what the model accepts (decayed, as the lookup counts).
+    void observe_mtp_drafts(const float* probs, int t, int accepted);
 
 private:
     static int bucket(int match);
     double mtp_tokens(int t) const;
     bool stale(int t) const;               // a size not measured for a long stretch of rounds
+    double draft_q(float p) const;         // a draft's acceptance, from its probability and the calibration
+    double draft_q_mean() const;           // the mean acceptance of a tested draft
+    bool mtp_step_pays(int t, double held, double q, double expected) const;
 
     int max_t_;
     double margin_;
@@ -62,6 +77,7 @@ private:
     double rounds_ = 0;                                    // rounds observed so far
     std::array<double, kMaxT + 1> last_{};                 // the round at which each size was last measured
     std::array<double, kBuckets> cok_{}, cbad_{};          // chained lookup drafts, the same (reached rounds only)
+    double dq_ok_ = 0, dq_p_ = 0, dq_n_ = 0;               // MTP drafts tested: accepted, their probabilities, count
 };
 
 }  // namespace strata::spec

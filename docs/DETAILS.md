@@ -549,6 +549,10 @@ Four engine settings depend on the PC more than on the model:
   Without it the engine splits them by an expert's time on each side, measured at start
   ([XE](XE.md#splitting-the-missed-experts-between-the-cpu-and-pcie)); a fixed share is kept only when it is more than 3% faster;
 - how sure the draft layer must be to add another guess to a check (`--spec-min-p`);
+  by default (`--spec-window auto`) a guess is added while the output it is expected to add, over the time of a check
+  of that size measured since the start, raises the output per ms (the expectation is the draft layer's probability,
+  corrected by the share actually accepted); the `--spec-min-p` floor applies with `--spec-window min-p`, and when
+  the calibration passes a value with a request;
 - how many CPU threads compute experts (`--pool-workers`): on CPUs with efficiency cores, fewer can be faster;
   it also tries one fewer than the P-cores, and one fewer than one socket's cores on a 2-socket PC;
   on a CPU with more efficiency cores than performance cores, setup writes the performance cores (but the host's
