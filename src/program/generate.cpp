@@ -5338,7 +5338,7 @@ int main(int argc, char** argv) {
                 return 1;
             }
             if (!auto_cache || attempt - failed >= 6) break;
-            strata::gpu::memset(xcache.device_slot(0), 0, (size_t) xcache.bytes());
+            xcache.zero_arena();   // in pieces, a memset from slot 0 would walk off the first piece
             strata::gpu::device_sync();
             size_t free_b = 0, total_b = 0;
             strata::gpu::mem_info(&free_b, &total_b);
