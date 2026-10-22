@@ -64,7 +64,8 @@ std::unordered_map<sycl::device, Backend> g_backends;
 
 // Windows: the GPU makers' libraries the 7z does not carry, where their installers put them, for oneMath's backends to
 // load: after the PATH the user set (setvars.bat, a Python environment's), oneAPI's mkl and tbb folders (ONEAPI_ROOT,
-// which the installer sets, else its default folder) and MKLROOT's for oneMKL; the CUDA toolkit's (CUDA_PATH) and the
+// which the installer sets, else its default folder), MKLROOT's and the Library\bin pip's oneMKL makes in the Python the
+// 7z carries for oneMKL; the CUDA toolkit's (CUDA_PATH) and the
 // folders pip's nvidia-cublas-cu12 and nvidia-cuda-runtime-cu12 make in the Python the 7z carries (<7z>\python beside
 // <7z>\app\engine) for cuBLAS; the folder AMD's rocm-sdk-libraries-<family> makes in that Python for rocBLAS and
 // hipBLASLt (free software, but built for each GPU family; the import libraries name its DLLs,
@@ -86,6 +87,8 @@ void add_library_dirs() {
             const std::filesystem::path site =
                 std::filesystem::path(exe).parent_path().parent_path().parent_path() / "python" / "Lib" / "site-packages";
             for (const char* sub : {"cublas", "cuda_runtime"}) dirs.push_back((site / "nvidia" / sub / "bin").string());
+            // pip's oneMKL (onemkl-sycl-blas, mkl, tbb): their DLLs in the Python's Library\bin
+            dirs.push_back((site.parent.parent / "Library" / "bin").string());
             // AMD's rocm-sdk-libraries-<family> (rocBLAS and hipBLASLt): one folder for the GPU family it was made for
             std::error_code ec;
             for (const auto& e : std::filesystem::directory_iterator(site, ec))

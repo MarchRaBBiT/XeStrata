@@ -157,7 +157,7 @@ version=$(sed -n 's/^set(STRATA_UPSTREAM_VERSION "\(.*\)")$/\1/p' "$src/CMakeLis
 python3 "$src/tools/package/windows_bundle.py" --src "$src" --engine /build/engine --sycl "$sycl" \
   --launcher /build/launcher --nuget /cache/nuget --python-zip "/build/python-$python_ver-embed-amd64.zip" \
   --wheels /build/wheels --llama "$llama" --rocm /build/rocmwin --version "$version" --cuda-archs "$archs" \
-  --hip-archs "$hip_archs" --out /build/out
+  --hip-archs "$hip_archs" --mkl-version "$mkl_ver" --out /build/out
 cp /build/out/*.7z /out/
 
 {

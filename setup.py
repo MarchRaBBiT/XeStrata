@@ -1414,6 +1414,23 @@ def windows_nvidia_libs() -> list:
     return missing
 
 
+def windows_intel_libs() -> list:
+    """pip's packages of oneMKL (BUILD.json's runtime "onemkl_pip": the version the 7z was built with, without the
+    SYCL runtime they depend on, which the 7z carries) when the engine would not find it on Windows, where it looks
+    (add_library_dirs in src/prefill/gemm.cpp): the PATH, oneAPI's installer's folders (ONEAPI_ROOT, its default),
+    MKLROOT's, the Python beside the engine (pip's Library/bin); empty when it would."""
+    names = (packaged_engine().get("runtime") or {}).get("onemkl_pip") or []
+    dirs = [Path(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+    for root in (os.environ.get("ONEAPI_ROOT"), r"C:\Program Files (x86)\Intel\oneAPI"):
+        if root:
+            dirs.append(Path(root) / "mkl" / "latest" / "bin")
+    if os.environ.get("MKLROOT"):
+        dirs.append(Path(os.environ["MKLROOT"]) / "bin")
+    dirs.append(Path(sys.executable).parent / "Library" / "bin")
+    found = any(next(d.glob("mkl_sycl_blas*.dll"), None) for d in dirs if d.is_dir())
+    return [] if found else names
+
+
 # AMD's Python packages for Windows with rocBLAS and hipBLASLt (rocm-sdk-libraries-<family>, free software), one per
 # GPU family: the release whose DLLs export what the engine's rocBLAS backend imports (tools/package/win_rocm.sh)
 ROCM_WIN_INDEX = "https://repo.amd.com/rocm/whl/"
@@ -1518,10 +1535,15 @@ def check_runtime(makers: set, gfx: set, data: Path) -> None:
     """Stops when the GPUs of `makers` lack their makers' packages, and says how to install them; names oneMKL and
     cuBLAS too when they are missing, without stopping (XeStrata's own kernels do their work).  Windows: the GPU
     makers' drivers bring what the engine runs on (Level Zero, the CUDA driver), the 7z the rest, and the launcher
-    checks the Visual C++ runtime.  NVIDIA's cuBLAS, CUDA runtime and cuDNN, and AMD's rocBLAS and hipBLASLt for the
-    AMD GPUs' families (`gfx`, their gfx names), are named when the engine would not find them, with pip's command for
-    the Python the 7z carries."""
+    checks the Visual C++ runtime.  Intel's oneMKL, NVIDIA's cuBLAS, CUDA runtime and cuDNN, and AMD's rocBLAS and
+    hipBLASLt for the AMD GPUs' families (`gfx`, their gfx names), are named when the engine would not find them, with
+    pip's command for the Python the 7z carries."""
     if WIN:
+        mkl = windows_intel_libs() if "intel" in makers and packaged_engine().get("license") == "contrib" else []
+        if mkl:
+            warn("faster with Intel's oneMKL for the matrix products (not free software; without it XeStrata's own "
+                 "kernels do the work):")
+            say(f'  "{sys.executable}" -m pip install --no-deps ' + " ".join(f'"{n}"' for n in mkl))
         missing = windows_nvidia_libs() if "nvidia" in makers and packaged_engine().get("license") == "contrib" else []
         if missing:
             warn("faster with NVIDIA's " + ", ".join(missing) + " (not free software: cuBLAS for the matrix products, "

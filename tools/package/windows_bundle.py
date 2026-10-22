@@ -171,6 +171,7 @@ def main() -> None:
     ap.add_argument("--version", required=True)
     ap.add_argument("--cuda-archs", required=True, help="the engine's NVIDIA architectures, sm_60;sm_61;...")
     ap.add_argument("--hip-archs", required=True, help="the engine's AMD architectures, gfx1030;gfx1100;...")
+    ap.add_argument("--mkl-version", required=True, help="the oneMKL the engine was built with, 2026.2.0")
     a = ap.parse_args()
 
     top_name = f"XeStrata-{a.version}-windows-x64"
@@ -215,7 +216,11 @@ def main() -> None:
     archs = [x for x in a.cuda_archs.split(";") if x]
     (eng / "BUILD.json").write_text(json.dumps({
         "source": "package", "backend": "xe", "package": top_name, "version": a.version, "license": "contrib",
-        "cuda_archs": archs, "hip_archs": [x for x in a.hip_archs.split(";") if x], "runtime": {}, "lib_dirs": []},
+        "cuda_archs": archs, "hip_archs": [x for x in a.hip_archs.split(";") if x],
+        # oneMKL's pip packages for the Python the 7z carries (setup names them), the version the engine was built with,
+        # without the SYCL runtime they depend on (the 7z's)
+        "runtime": {"onemkl_pip": [f"onemkl-sycl-blas=={a.mkl_version}", f"mkl=={a.mkl_version}", "tbb==2023.*",
+                                   f"onemkl-license=={a.mkl_version}"]}, "lib_dirs": []},
         indent=1) + "\n")
 
     # ---- Python: the embeddable distribution without its Visual C++ runtime (the user's, which xestrata.exe checks)
