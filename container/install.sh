@@ -4,9 +4,8 @@
 # container/install.sh - the inside of the Containerfile: installs XeStrata's rpm (container/rpm/*.rpm when there is
 # one, else the release's, checked against its SHA256SUMS), then every GPU maker's packages its BUILD.json records
 # ("runtime"), so that the image runs Intel's, AMD's and NVIDIA's GPUs; NVIDIA's driver libraries come from the host
-# (CDI), and the libraries of NVIDIA's neither Fedora's nor Ubuntu's own repositories have (cuDNN, Fedora's cuBLAS)
-# from pip into the data folder (mounted from the host) when xestrata --setup names them.  XESTRATA_NONFREE=0 leaves
-# out oneMKL (and its repository).
+# (CDI), and those of NVIDIA's libraries Fedora's own repositories do not have (cuBLAS, cuDNN, the CUDA runtime) from
+# pip, into the image (on the linker's path).  XESTRATA_NONFREE=0 leaves out oneMKL (and its repository) and those.
 set -eu
 repo=https://github.com/MistVVK/XeStrata
 local=$(find /ctx/rpm -maxdepth 1 -name '*.rpm' 2>/dev/null | head -n 1)
@@ -31,8 +30,7 @@ else
 fi
 dnf install -y -q "$rpm"
 
-# the GPU makers' packages, by maker, from the engine's record; not pip's names (nvidia_pip), which xestrata --setup
-# names for the data folder, with this image's pip
+# the GPU makers' packages, by maker, from the engine's record; pip's (nvidia_pip) below
 runtime=$(python3 -c 'import json, sys
 r = json.load(open(sys.argv[1])).get("runtime") or {}
 skip = ("nvidia_pip",) + (() if sys.argv[2] == "1" else ("onemkl",))
@@ -48,4 +46,18 @@ case " $runtime " in
 esac
 # shellcheck disable=SC2086
 dnf install -y -q $runtime mesa-vulkan-drivers python3-pip
+# NVIDIA's from pip, where xestrata --setup would name them for the data folder: into the image, whose linker finds
+# them (setup then names nothing); without its dependencies, which are among them or the host's driver
+pip=$(python3 -c 'import json, sys
+print(" ".join((json.load(open(sys.argv[1])).get("runtime") or {}).get("nvidia_pip") or []))' \
+  /usr/lib64/xestrata/engine/BUILD.json)
+if [ "$XESTRATA_NONFREE" = 1 ] && [ -n "$pip" ]; then
+  nv=/usr/lib64/xestrata/nvidia-libs
+  set -f   # the names' version patterns (nvidia-cuda-runtime==13.*) are not file names
+  # shellcheck disable=SC2086
+  python3 -m pip install -q --no-cache-dir --root-user-action ignore --target "$nv" --no-deps $pip
+  set +f
+  for d in "$nv"/nvidia/*/lib; do echo "$d"; done > /etc/ld.so.conf.d/xestrata-nvidia.conf
+  ldconfig
+fi
 dnf clean all
