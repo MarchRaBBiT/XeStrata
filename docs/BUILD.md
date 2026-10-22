@@ -48,7 +48,7 @@ The engine builds in two modes (AGENTS.md, "Free and non-free builds"), chosen b
   Validated with intel/llvm v7.1.1 built from source by `tools/intel_llvm_build.py` (see [Setup](#setup)).
   A distribution's package of version 7 or later serves as well; an older one (Ubuntu 26.04's `dpclang++` 6.2) is refused by CMake and setup.
   6.2's SYCL runtime reported no XMX for the Arc Pro B70, and the prefill path took about 1.6 times as long.
-  With intel/llvm built with ROCm's HIP, `STRATA_HIP_ARCHS` (`gfx1200`, for example) makes the code for AMD GPUs (RDNA2 and later: gfx103x, gfx11xx, gfx12xx) as well.
+  With intel/llvm built with ROCm's HIP, `STRATA_HIP_ARCHS` (`gfx1200`, for example) makes the code for AMD GPUs (RDNA2 and later: gfx103x, gfx11xx, gfx12xx; and gfx906) as well.
   ROCm is free software, so this is the same in the free and contrib-llvm modes ([DEVTOOLS.md](DEVTOOLS.md#hip-amd-gpus)).
   `auto` (the default) takes this PC's AMD GPUs as the kernel's KFD reports them, and `rocblas` every RDNA2 or later GPU the distribution's rocBLAS has code for and the SYCL compiler has a target for (the packages are built so; intel/llvm 7.1.1 has none for gfx1152 and gfx1153).
   For ROCm's device libraries (`ockl.bc`), CMake builds a test kernel for the AMD GPU with AMD's in `/opt/rocm*`, the distribution's and the SYCL compiler's own (`tools/intel_llvm_build.py` builds them with it), in that order, and takes the first that builds.
@@ -59,6 +59,11 @@ The engine builds in two modes (AGENTS.md, "Free and non-free builds"), chosen b
   Without hipBLASLt, CMake warns (and stops with `STRATA_PACKAGE=ON`), and those products run in rocBLAS alone (at about a fifteenth of the speed on gfx12).
   Validated: CTest passes on an RX 9060 XT (gfx1200, Fedora 44, ROCm 7.1.1).
   Validated to build and run on a gfx1030 card (RX 6800 XT, CachyOS (Arch), ROCm 7.2.4): the setup unit tests pass, and IQ3_XXS decodes at ~64-68 tok/s (2000-token runs, 262144 context, ~65 tok/s with ~215K tokens loaded).
+  gfx906 (the Radeon VII, the Instinct MI50 / MI60) is a GPU of 64-lane waves: the kernels written for 32-lane warps run with one warp in each half of a 64-lane sub-group (`include/strata/kernels/warp32.hpp`).
+  Its dense products are chosen by `STRATA_HIP_WAVE64_BLAS`: `auto` (the default) takes rocBLAS where the installed one has gfx906 code and XeStrata's own kernels otherwise; `rocblas` and `own` choose one of the two.
+  The distributions' rocBLAS has no gfx906 code, so rocBLAS needs a ROCm with gfx906 code (a community build, for example) to build on.
+  intel/llvm needs the fix `hip-flat-work-group-size` ([DEVTOOLS.md](DEVTOOLS.md#intelllvm-from-source)): without it AMD kernels are compiled for work-groups of 1024 work-items, which on gfx906 limits them to 64 VGPRs and spills the rest to scratch memory.
+  Validated: CTest passes on a Radeon VII (gfx906, in a container of a community build of ROCm 7.14); Qwen3.6-35B-A3B UD-Q4_K_XL read a 6.3K-token prompt at ~750 tok/s and decoded at 58-97 tok/s, Qwen3.8-Flash-Next IQ2_XS at ~425 tok/s and 28-45 tok/s.
 - **contrib-llvm** (the default, `-DSTRATA_LICENSE=contrib`): intel/llvm built with its CUDA target (`tools/intel_llvm_build.py --contrib`), and with `STRATA_CUDA_ARCHS` (`sm_89`, for example) the code for NVIDIA GPUs as well.
   XeStrata's source is the free mode's and stays free software,
   but the build needs NVIDIA's CUDA toolkit and a run NVIDIA's driver, neither of them free software (XeStrata ships neither).

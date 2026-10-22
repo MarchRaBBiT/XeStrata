@@ -76,11 +76,15 @@ So XeStrata runs only on the GPUs the distribution's rocBLAS has code for.
 | Ryzen AI Max integrated graphics | gfx1151 | yes | yes |
 | RX 9060 | gfx1200 | yes | yes |
 | RX 9070 | gfx1201 | yes | yes |
+| Radeon VII, Instinct MI50 / MI60 | gfx906 | from the source | from the source |
 
 - **On an RX 6700 or an RX 7600, use Fedora 44.** Ubuntu 26.04's rocBLAS has no code for these GPUs.
 - The RX 6600 (gfx1032) and the RX 6500 / 6400 (gfx1034) do not run: neither distribution's rocBLAS has code for them.
 - gfx1152 and gfx1153 (some Ryzen AI integrated graphics) do not run: Fedora 44's rocBLAS has code for them, but the
   intel/llvm 7.1.1 XeStrata builds with has no target for them.
+- **The Radeon VII and the Instinct MI50 / MI60 (gfx906) run when [installed from the source](docs/BUILD.md#installing-from-the-source).** The packages have no code for them.
+  gfx906 is a GPU of 64-lane waves, and runs the engine's 32-lane kernels two to a sub-group.
+  The distributions' rocBLAS has no gfx906 code, so prefill's dense matrix products run in a rocBLAS with gfx906 code where there is one, and otherwise in XeStrata's own kernels.
 - `xestrata --check` shows your GPU's gfx after its name.
 - The table is that of ROCm 7.1's rocBLAS on both distributions. Only the RX 9060 XT (gfx1200) has been checked.
 

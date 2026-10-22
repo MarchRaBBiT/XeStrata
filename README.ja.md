@@ -74,10 +74,14 @@ AMD の GPU では、prefill の密な行列積をディストリビューショ
 | Ryzen AI Max の内蔵 GPU | gfx1151 | ○ | ○ |
 | RX 9060 | gfx1200 | ○ | ○ |
 | RX 9070 | gfx1201 | ○ | ○ |
+| Radeon VII、Instinct MI50 / MI60 | gfx906 | ソースから | ソースから |
 
 - **RX 6700 と RX 7600 では Fedora 44 を使ってください。** Ubuntu 26.04 の rocBLAS には、これらの GPU のコードがありません。
 - RX 6600（gfx1032）と RX 6500 / 6400（gfx1034）は、どちらのディストリビューションの rocBLAS にもコードがないので動きません。
 - gfx1152 と gfx1153（Ryzen AI の一部の内蔵 GPU）は、Fedora 44 の rocBLAS にはコードがありますが、XeStrata が使う intel/llvm 7.1.1 にそのターゲットがないので動きません。
+- **Radeon VII と Instinct MI50 / MI60（gfx906）は、[ソースから入れて](docs/BUILD.ja.md#ソースから入れる)動かします。** パッケージにはそのコードがありません。
+  gfx906 は 1 つのウェーブが 64 レーンの GPU で、エンジンの 32 レーンのカーネルを 1 つのサブグループに 2 つ載せて動かします。
+  ディストリビューションの rocBLAS には gfx906 のコードがないので、prefill の密な行列積は、gfx906 のコードを持つ rocBLAS があればそれで、なければ XeStrata 自身のカーネルで計算します。
 - 自分の GPU の gfx は、`xestrata --check` が GPU の名前の後ろに出します。
 - 表は、どちらのディストリビューションも ROCm 7.1 の rocBLAS のものです。確かめたのは RX 9060 XT（gfx1200）だけです。
 

@@ -159,6 +159,10 @@ python3 tools/intel_llvm_build.py --contrib --keep-build
   16 番目: デバイスライブラリ（libdevice）は、それをコンパイルするツールを `LIBCLC_CUSTOM_LLVM_TOOLS_BINARY_DIR` で渡しても、作っている最中のコンパイラとその道具一式（`sycl-compiler`）に依存していました。
   Windows 向けのクロスビルド（`--windows`）では、誰も動かさない Windows の `clang.exe` と道具を作っていて、それがビルドの時間の大半でした。
   修正後は、ツールを渡したときは SYCL のヘッダーにだけ依存します（`build-libdevice-custom-tools`。渡さないビルドは変わりません）。ビルドだけの修正なので、できあがったツールチェーンの作り直しは求めません。
+  17 番目: SYCL のカーネルの work-group の大きさ（`reqd_work_group_size`、`max_work_group_size` のプロパティ、`max_linear_work_group_size`）は、NVIDIA のコードには NVVM の注釈として渡りますが（`SYCLCreateNVVMAnnotationsPass`）、AMD のコードには渡っていませんでした。
+  AMD のカーネルはどれも 1024 work-item までの work-group 用にコンパイルされ、1 つのウェーブが 64 レーンの GPU（gfx906）では VGPR が 64 個に限られて、残りがスクラッチメモリにあふれていました（エンジンの 4,007 のカーネルのうち 2,298）。
+  修正後は、同じパスが AMDGCN のカーネルにその範囲を `amdgpu-flat-work-group-size` として付けます（`reqd_work_group_size` は N,N、ほかは 1,N。N は次元の積で 1024 まで。カーネル自身の `amdgpu-flat-work-group-size` はそのままです。`hip-flat-work-group-size`）。
+  エンジンは起動する work-group の大きさをカーネルに付けます（`include/strata/kernels/work_group.hpp`）。
   CUDA の修正は contrib-llvm のツールチェーンにだけ、HIP の修正は HIP を持つ（または ROCm が入った今なら持つ）ツールチェーンにだけ、作り直しを求めます。
   `offload-bundle-arch` と `l0-static-graph` はどのツールチェーンにも作り直しを求めます。
 - スクリプトは、作業フォルダーの設定が今の設定の値（インストール先、libclc の対象など）と違えば、設定し直してからビルドします。

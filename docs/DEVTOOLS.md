@@ -159,6 +159,10 @@ python3 tools/intel_llvm_build.py --contrib --keep-build
   Sixteenth, the device libraries (libdevice) depended on the compiler being built and all its tools (`sycl-compiler`) even when `LIBCLC_CUSTOM_LLVM_TOOLS_BINARY_DIR` gives the tools that compile them.
   The cross build for Windows (`--windows`) built a Windows `clang.exe` and tools nobody runs, most of its time.
   Fixed, with the tools given they depend on the SYCL headers alone (`build-libdevice-custom-tools`; a build without them is unchanged). A fix to the build only, it asks no finished toolchain to be built again.
+  Seventeenth, a SYCL kernel's work-group size (`reqd_work_group_size`, the `max_work_group_size` property, `max_linear_work_group_size`) reached NVIDIA's code as NVVM annotations (`SYCLCreateNVVMAnnotationsPass`) and AMD's not at all.
+  Every AMD kernel was compiled for work-groups of up to 1024 work-items, which on a GPU of 64-lane waves (gfx906) limited it to 64 VGPRs and spilled the rest to scratch memory (2,298 of the engine's 4,007 kernels).
+  Fixed, the same pass gives an AMDGCN kernel the range as `amdgpu-flat-work-group-size` (N,N for `reqd_work_group_size`, 1,N for the others, N the product of the dimensions, at most 1024; a kernel's own `amdgpu-flat-work-group-size` stays; `hip-flat-work-group-size`).
+  The engine gives its kernels the work-group sizes they are launched with (`include/strata/kernels/work_group.hpp`).
   The CUDA fixes ask only the contrib-llvm toolchain to be built again, the HIP ones only a toolchain with HIP (or one that would have it, ROCm being installed now).
   `offload-bundle-arch` and `l0-static-graph` ask every toolchain.
 - The script configures the build tree again when it was configured with other values of its options (the install folder, libclc's targets and others).

@@ -49,7 +49,7 @@ CMake のオプション `STRATA_LICENSE` で選びます。
   `tools/intel_llvm_build.py` でソースからビルドしたもの（v7.1.1）で確かめています（[setup](#setup) を参照）。
   ディストリビューションのパッケージも 7 以降なら使えます。それより古いもの（Ubuntu 26.04 の `dpclang++` 6.2）は、CMake と setup が断ります。
   6.2 の SYCL ランタイムは Arc Pro B70 に XMX がないと報告し、prefill の経路が約 1.6 倍遅くなっていました。
-  ROCm の HIP 付きでビルドした intel/llvm なら、`STRATA_HIP_ARCHS`（例 `gfx1200`）で AMD の GPU（RDNA2 以降: gfx103x、gfx11xx、gfx12xx）向けのコードも作ります。
+  ROCm の HIP 付きでビルドした intel/llvm なら、`STRATA_HIP_ARCHS`（例 `gfx1200`）で AMD の GPU（RDNA2 以降: gfx103x、gfx11xx、gfx12xx。それに gfx906）向けのコードも作ります。
   ROCm は自由ソフトウェアなので、free でも contrib-llvm でも同じです（[DEVTOOLS.ja.md](DEVTOOLS.ja.md#hipamd-の-gpu)）。
   `auto`（既定）はカーネルの KFD が報告するこの PC の AMD の GPU を選び、`rocblas` はディストリビューションの rocBLAS がコードを持つ RDNA2 以降の GPU のうち、SYCL のコンパイラにターゲットのあるものをすべて選びます（パッケージはこれでビルドします。intel/llvm 7.1.1 には gfx1152 と gfx1153 のターゲットがありません）。
   ROCm のデバイスライブラリ（`ockl.bc`）は、AMD の `/opt/rocm*`、ディストリビューションのもの、SYCL のコンパイラ自身のもの（`tools/intel_llvm_build.py` が一緒にビルドします）の順に、AMD のカーネルを試しにビルドして、通った最初のものを使います。
@@ -60,6 +60,11 @@ CMake のオプション `STRATA_LICENSE` で選びます。
   hipBLASLt が見つからないと CMake は警告し（`STRATA_PACKAGE=ON` では止まります）、その積は rocBLAS だけで計算します（gfx12 では 15 分の 1 ほどの速さでした）。
   RX 9060 XT（gfx1200、Fedora 44、ROCm 7.1.1）で CTest が通ることを確かめています。
   gfx1030 のカード（RX 6800 XT、CachyOS（Arch）、ROCm 7.2.4）でビルドと実行が通ることを確かめています。setup の単体テストが通り、IQ3_XXS は 64-68 tok/s でデコードします（2000 トークンの実行、262144 コンテキスト。215K トークンを読んだときは約 65 tok/s）。
+  gfx906（Radeon VII、Instinct MI50 / MI60）は 1 つのウェーブが 64 レーンの GPU で、32 レーンの warp で書いたカーネルを、64 レーンのサブグループの半分ずつに warp を 1 つ載せて動かします（`include/strata/kernels/warp32.hpp`）。
+  その密な積は `STRATA_HIP_WAVE64_BLAS` で選びます。`auto`（既定）は入っている rocBLAS が gfx906 のコードを持てば rocBLAS、なければ XeStrata 自身のカーネルで、`rocblas` と `own` はそれぞれに決めます。
+  ディストリビューションの rocBLAS は gfx906 のコードを持たないので、rocBLAS を使うには gfx906 のコードを持つ ROCm（コミュニティのビルドなど）の上でビルドします。
+  intel/llvm にはパッチ `hip-flat-work-group-size`（[DEVTOOLS.ja.md](DEVTOOLS.ja.md#intelllvm-をソースからビルドする)）が要ります。これがないと AMD のカーネルは 1024 work-item の work-group 用にコンパイルされ、gfx906 では VGPR が 64 個に限られて、残りがスクラッチメモリにあふれます。
+  Radeon VII（gfx906、ROCm 7.14 のコミュニティのビルドのコンテナ）で CTest が通ることを確かめています。Qwen3.6-35B-A3B UD-Q4_K_XL は 6.3K トークンの prefill が約 750 tok/s、decode が 58-97 tok/s、Qwen3.8-Flash-Next IQ2_XS は prefill が約 425 tok/s、decode が 28-45 tok/s でした。
 - **contrib-llvm**（既定、`-DSTRATA_LICENSE=contrib`）: intel/llvm を CUDA のターゲット付きでビルドしたもの（`tools/intel_llvm_build.py --contrib`）を使い、
   `STRATA_CUDA_ARCHS`（例 `sm_89`）で NVIDIA の GPU 向けのコードも作ります。
   XeStrata のソースは free のときと同じで、自由ソフトウェアのままです。
