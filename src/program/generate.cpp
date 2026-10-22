@@ -2132,6 +2132,30 @@ bool pcie_move_if_pays(strata::core::ExpertDispatch& d, bool overlap, const stra
                              "missed expert\n", err.c_str());
     return true;
 }
+
+// After a prompt, the adaptive tier's counts start from the prompt's routing instead of from nothing (as PlainModel's
+// prompt path adds its routing to the counts).  A count is the rows routed to an expert, decayed by `decay` once a
+// period of `period` tokens, so an expert the prompt routed with probability p holds p * period / (1 - decay) rows at
+// the tier's steady state: that is added for the routings `ps` holds beyond `seen` (a request's own prompt in serve,
+// where the stats run on from request to request).  The tier's rounds then swap by the counts as before.
+// STRATA_USAGE_SEED=0: the counts start from nothing, as before (the A/B).
+void seed_usage_from_prompt(std::vector<float>& usage, const strata::prefill::PrefillStats& ps,
+                            std::vector<int64_t>& seen, int64_t n_expert, int64_t period, double decay) {
+    static const bool on = [] { const char* v = std::getenv("STRATA_USAGE_SEED"); return v == nullptr || *v != '0'; }();
+    if (!on || usage.empty() || ps.routed.empty() || ps.routed_k <= 0 || usage.size() != ps.routed.size() ||
+        n_expert <= 0 || period <= 0)
+        return;
+    if (seen.size() != ps.routed.size()) seen.assign(ps.routed.size(), 0);
+    const double rows = (double) period / std::max(1e-3, 1.0 - decay);
+    for (size_t l0 = 0; l0 + (size_t) n_expert <= ps.routed.size(); l0 += (size_t) n_expert) {
+        int64_t total = 0;
+        for (size_t i = l0; i < l0 + (size_t) n_expert; ++i) total += ps.routed[i] - seen[i];
+        if (total <= 0) continue;   // not a MoE layer, or nothing new
+        for (size_t i = l0; i < l0 + (size_t) n_expert; ++i)
+            usage[i] += (float) ((double) (ps.routed[i] - seen[i]) * (double) ps.routed_k / (double) total * rows);
+    }
+    seen = ps.routed;
+}
 }  // namespace
 
 // Whether the prompt path gets the CPU pool for its share (STRATA_PREFILL_CPU_SHARE, auto by default).  An explicit
@@ -7875,6 +7899,7 @@ int main(int argc, char** argv) {
         setup_pcie_split(drive.d, g.n_layers, o, pcie_given, !split_devs.empty(), ver.fetch_branch(), pcie_split);
         strata::core::PcieSplitTimes* const pcie_split_ptr = drive.d.pcie_split;
         bool pcie_move_decided = false;   // the arena's move into host USM: decided once, after a prompt is read
+        std::vector<int64_t> routed_seen;   // the prompts' routings already given to the adaptive tier's counts
         {   // STRATA_ROUTE_TAIL_SKIP: ON BY DEFAULT (rank 7, upstream b4e3407b; measured on XeStrata's GPUs, docs/DETAILS.md): a
             // missed expert that every token of a verify window routes at rank 7 or lower is neither copied nor computed
             // (answers differ slightly; =0 restores the bytes of a build without it).  No default and no line when every
@@ -11547,6 +11572,7 @@ int main(int argc, char** argv) {
             }
             if (!pcie_move_decided && drive.d.pcie_split == pcie_split_ptr)
                 pcie_move_decided = pcie_move_if_pays(drive.d, ver.fetch_branch(), sp.stats(), host_res, o.spec);
+            seed_usage_from_prompt(drive.d.usage, sp.stats(), routed_seen, g.n_expert, 4 * (int64_t) o.adapt_every, o.adapt_decay);
             // the window rule, as the chain drafts: another draft after n when the rule would keep it (--spec-window)
             const strata::core::MtpDrafter::More draft_more = [&](int n, const float* pr) {
                 return req_minp_rule ? pr[n - 1] >= (float) req_spec_min_p : policy.mtp_extend(pr, n, S_mtp);
@@ -12562,6 +12588,10 @@ int main(int argc, char** argv) {
         pcie_move_if_pays(drive.d, ver.fetch_branch(), prefill.stats(), host_res, o.spec);
         const int64_t pcie0 = drive.d.pcie_experts;
         if (o.adapt_every > 0 && o.adapt_swaps > 0) drive.d.usage.assign((size_t) (g.n_layers * g.n_expert), 0.0f);
+        {
+            std::vector<int64_t> seen;   // the whole prompt
+            seed_usage_from_prompt(drive.d.usage, prefill.stats(), seen, g.n_expert, 4 * (int64_t) o.adapt_every, o.adapt_decay);
+        }
         // the adaptive tier at fixed positions of the text: it counts the routing of the rows whose input was the
         // text (Verifier::add_routing) and swaps when a window ends on a multiple of 4 x --adapt-every tokens, the
         // windows cut there where the CPU and the GPU round differently (adapt_cuts_windows).  Counted per window (every row, the rejected drafts' too) and swapped every N windows,
