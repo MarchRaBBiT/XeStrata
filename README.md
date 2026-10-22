@@ -244,11 +244,14 @@ Only Podman and podman-compose go on the host. XeStrata goes into a Fedora 44 co
 ```bash
 git clone https://github.com/MistVVK/XeStrata && cd XeStrata/container
 mkdir -p ~/.config/xestrata ~/.local/state/xestrata ~/.local/share/xestrata
+export PODMAN_COMPOSE_PROVIDER=podman-compose
 podman compose build                         # the image, with the latest release and the GPU libraries
 podman compose run --rm xestrata --setup     # answer the questions; it downloads the model
 podman compose up -d                         # http://127.0.0.1:8095 (podman compose down stops it)
 ```
 
+- **podman-compose**: `PODMAN_COMPOSE_PROVIDER` makes `podman compose` run podman-compose. Where Docker's compose plugin
+  is installed too, it is taken otherwise, and stops unless Podman's API socket runs.
 - **GPU**: Intel's as it is. For AMD add `-f compose.yaml -f compose.amd.yaml` after `podman compose`, for NVIDIA
   `-f compose.yaml -f compose.nvidia.yaml` (or `export COMPOSE_FILE=compose.yaml:compose.nvidia.yaml`).
   NVIDIA needs the NVIDIA Container Toolkit's CDI specification on the host ([docs/BUILD.md](docs/BUILD.md#podman)).

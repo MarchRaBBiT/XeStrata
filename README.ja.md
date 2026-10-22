@@ -230,11 +230,14 @@ Qwen-Image-2.1 の重みは Qwen Research License で、自由なソフトウェ
 ```bash
 git clone https://github.com/MistVVK/XeStrata && cd XeStrata/container
 mkdir -p ~/.config/xestrata ~/.local/state/xestrata ~/.local/share/xestrata
+export PODMAN_COMPOSE_PROVIDER=podman-compose
 podman compose build                         # 最新のリリースと GPU のライブラリを入れたイメージを作ります
 podman compose run --rm xestrata --setup     # 質問に答えてモデルを取ってきます
 podman compose up -d                         # http://127.0.0.1:8095（止めるときは podman compose down）
 ```
 
+- **podman-compose**: `PODMAN_COMPOSE_PROVIDER` で、`podman compose` に podman-compose を使わせます。Docker の compose プラグインも
+  入った PC では、指定しないとそちらが選ばれ、Podman の API のソケットが動いていないと止まります。
 - **GPU**: Intel はこのままです。AMD は `-f compose.yaml -f compose.amd.yaml`、NVIDIA は `-f compose.yaml -f compose.nvidia.yaml` を
   `podman compose` の後に付けます（`export COMPOSE_FILE=compose.yaml:compose.nvidia.yaml` でも同じです）。
   NVIDIA はホストに NVIDIA Container Toolkit の CDI の設定が要ります（[docs/BUILD.ja.md](docs/BUILD.ja.md#podman)）。
