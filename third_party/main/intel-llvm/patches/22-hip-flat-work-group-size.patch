@@ -1,0 +1,95 @@
+SPDX-FileCopyrightText: The LLVM project contributors
+SPDX-FileCopyrightText: 2026 MistVVK and the XeStrata contributors
+SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+hip-flat-work-group-size: a fix to intel/llvm v7.1.1, applied by tools/intel_llvm_build.py.
+
+A SYCL kernel's work-group size (reqd_work_group_size, the max_work_group_size property, max_linear_work_group_size)
+reaches NVIDIA's code as NVVM annotations (SYCLCreateNVVMAnnotationsPass) and AMD's not at all: every AMD kernel was
+compiled for work-groups of up to 1024 work-items, which on a wave64 GPU (gfx906) limits it to 64 VGPRs and spills the
+rest to scratch memory (2,298 of the engine's 4,007 kernels), whatever size it is launched with.  The same pass now
+gives an AMDGCN kernel the range as amdgpu-flat-work-group-size: N,N for reqd_work_group_size, 1,N for the others (N
+the product of the dimensions, at most 1024; a kernel with its own amdgpu-flat-work-group-size keeps it).
+---
+diff --git a/clang/lib/CodeGen/BackendUtil.cpp b/clang/lib/CodeGen/BackendUtil.cpp
+index c8d98c328..1baf9bf2f 100644
+--- a/clang/lib/CodeGen/BackendUtil.cpp
++++ b/clang/lib/CodeGen/BackendUtil.cpp
+@@ -1266,7 +1266,8 @@ void EmitAssemblyHelper::RunOptimizationPipeline(
+       // and before cleaning up metadata)
+       MPM.addPass(RecordSYCLAspectNamesPass());
+ 
+-      if (TargetTriple.isNVPTX())
++      // NVPTX: the NVVM annotations; AMDGCN: the flat work-group size range
++      if (TargetTriple.isNVPTX() || TargetTriple.isAMDGCN())
+         MPM.addPass(SYCLCreateNVVMAnnotationsPass());
+ 
+       // Remove SYCL metadata added by the frontend, like sycl_aspects
+diff --git a/llvm/lib/SYCLLowerIR/SYCLCreateNVVMAnnotations.cpp b/llvm/lib/SYCLLowerIR/SYCLCreateNVVMAnnotations.cpp
+index d6e92725f..c9bbc0159 100644
+--- a/llvm/lib/SYCLLowerIR/SYCLCreateNVVMAnnotations.cpp
++++ b/llvm/lib/SYCLLowerIR/SYCLCreateNVVMAnnotations.cpp
+@@ -11,9 +11,11 @@
+ //===----------------------------------------------------------------------===//
+ 
+ #include "llvm/SYCLLowerIR/SYCLCreateNVVMAnnotations.h"
++#include "llvm/ADT/StringExtras.h"
+ #include "llvm/IR/Constants.h"
+ #include "llvm/IR/Module.h"
+ #include "llvm/Support/Debug.h"
++#include "llvm/TargetParser/Triple.h"
+ 
+ using namespace llvm;
+ 
+@@ -63,8 +65,51 @@ decomposeWGMetadata(const MDNode &Node, const Function &F) {
+   return Ops;
+ }
+ 
++// AMDGPU: the work-group sizes as the kernel's flat work-group size range, which
++// the backend sizes the registers by.  Without it a kernel is compiled for
++// work-groups of up to 1024 work-items, which limits a wave64 GPU's kernels to
++// 64 VGPRs and spills the rest to scratch memory, whatever size it is launched
++// with.  reqd_work_group_size gives the range N,N, max_work_group_size and
++// max_linear_work_group_size 1,N (N: the product of the dimensions given).
++static bool lowerToAMDGPUFlatWorkGroupSize(Function &F) {
++  if (F.isDeclaration() || F.hasFnAttribute("amdgpu-flat-work-group-size"))
++    return false;
++  auto Product = [&F](const MDNode &Node) -> std::optional<uint64_t> {
++    uint64_t N = 1;
++    for (std::optional<uint64_t> V : decomposeWGMetadata(Node, F)) {
++      if (!V)
++        continue;
++      if (*V == 0 || *V > 1024 || N * *V > 1024)
++        return std::nullopt;
++      N *= *V;
++    }
++    return N;
++  };
++  std::optional<uint64_t> Min, Max;
++  if (MDNode *Node = F.getMetadata("reqd_work_group_size")) {
++    Min = Max = Product(*Node);
++  } else {
++    if (MDNode *Node = F.getMetadata("max_work_group_size"))
++      Max = Product(*Node);
++    if (MDNode *Node = F.getMetadata("max_linear_work_group_size"))
++      if (auto V = getSingleIntMetadata(*Node); V && *V >= 1 && *V <= 1024)
++        Max = Max ? std::min(*Max, *V) : *V;
++  }
++  if (!Max)
++    return false;
++  F.addFnAttr("amdgpu-flat-work-group-size",
++              utostr(Min.value_or(1)) + "," + utostr(*Max));
++  return true;
++}
++
+ PreservedAnalyses
+ SYCLCreateNVVMAnnotationsPass::run(Module &M, ModuleAnalysisManager &MAM) {
++  if (Triple(M.getTargetTriple()).isAMDGCN()) {
++    bool Changed = false;
++    for (auto &F : M)
++      Changed |= lowerToAMDGPUFlatWorkGroupSize(F);
++    return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
++  }
+   for (auto &F : M) {
+     // Certain functions will never have metadata
+     if (F.isIntrinsic())
