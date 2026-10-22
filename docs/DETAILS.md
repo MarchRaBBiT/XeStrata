@@ -803,6 +803,7 @@ on easy questions all three think briefly, on hard ones `high` thinks longest an
   Only XeStrata's own page can save (JSON, with the API key when one is set, as for the Chat settings); the network, key, MCP and program keys are not editable there.
 - **From other devices on your network.** The server listens on your PC only (`127.0.0.1`) unless you say otherwise:
   run `./setup.sh --host 0.0.0.0 --api-key some-long-secret` (kept in the model's config for the next starts), or add `"host": "0.0.0.0"` and `"api_key": "..."` to `xestrata-<model>.json`.
+  To take IPv6 as well, use `::` instead of `0.0.0.0` (it listens on IPv4 and IPv6 both).
   The server window then prints this PC's addresses (`from other devices: http://192.168.x.x:8095/`).
   Open that on the other device, or use `.../v1` as an API base URL.
 - **From the internet.** Put a tunnel in front of it, for example
@@ -825,7 +826,7 @@ on easy questions all three think briefly, on hard ones `high` thinks longest an
   With a key the check is off: such a page cannot send the key, and tunnels and proxies that pass their own name on keep working.
   The names it knows, on any port:
   `localhost` (and `*.localhost`), any IP address (`127.0.0.1`, `[::1]`, `192.168.x.x`, ...), the address it listens on,
-  and, when it listens beyond this PC (`0.0.0.0` or a LAN address), this PC's name (`mypc`, `mypc.local`) and `host.docker.internal`.
+  and, when it listens beyond this PC (`0.0.0.0`, `::` or a LAN address), this PC's name (`mypc`, `mypc.local`) and `host.docker.internal`.
   Others get **403** naming the setting, and the server window prints one line for each.
   To reach it under another name (a reverse proxy that keeps the name, a tunnel, a DNS name on your network, another container's name for it), add the name:
   `"allowed_hosts": ["strata.example.com"]` in `xestrata-<model>.json` or `STRATA_ALLOWED_HOSTS=strata.example.com` (comma-separated).

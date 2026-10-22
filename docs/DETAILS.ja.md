@@ -786,6 +786,7 @@ print(r.choices[0].message.content)
   保存できるのは XeStrata 自身のページだけです（JSON、API キーがあればそれも。Chat の設定と同じ）。ネットワーク、キー、MCP、プログラムのキーは、そこでは変えられません。
 - **同じネットワークのほかの機器から**: 指定しなければ、server はこの PC（`127.0.0.1`）でだけ待ち受けます。
   `./setup.sh --host 0.0.0.0 --api-key 長い秘密の文字列` で起動するか（モデルの設定に保存され、次からも使われます）、`xestrata-<model>.json` に `"host": "0.0.0.0"` と `"api_key": "..."` を書きます。
+  IPv6 でも受けるときは、`0.0.0.0` の代わりに `::` にします（IPv4 と IPv6 の両方で待ち受けます）。
   server のウィンドウに、この PC のアドレスが出ます（`from other devices: http://192.168.x.x:8095/`）。
   ほかの機器でそれを開くか、`.../v1` を API のベース URL に使います。
 - **インターネットから**: 前にトンネルを置きます。
@@ -808,7 +809,7 @@ print(r.choices[0].message.content)
   キーがあれば確かめません（そうしたページはキーを送れず、名前をそのまま渡すトンネルやプロキシも動き続けます）。
   知っている名前は次のとおりで、ポートは問いません。
   `localhost`（と `*.localhost`）、IP アドレス（`127.0.0.1`、`[::1]`、`192.168.x.x` など）、待ち受けているアドレス、
-  この PC の外でも待ち受けているとき（`0.0.0.0` や LAN のアドレス）はこの PC の名前（`mypc`、`mypc.local`）と `host.docker.internal` です。
+  この PC の外でも待ち受けているとき（`0.0.0.0`、`::` や LAN のアドレス）はこの PC の名前（`mypc`、`mypc.local`）と `host.docker.internal` です。
   それ以外には、設定の名前を示して **403** を返し、server のウィンドウにも 1 行ずつ出します。
   別の名前で届かせる（名前を残すリバースプロキシ、トンネル、ネットワークの DNS の名前、別のコンテナから見た名前）なら、その名前を足します。
   `xestrata-<model>.json` に `"allowed_hosts": ["strata.example.com"]`、または `STRATA_ALLOWED_HOSTS=strata.example.com`（カンマ区切り）です。

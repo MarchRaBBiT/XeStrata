@@ -156,6 +156,25 @@ class OverHttp(unittest.TestCase):
                      f"192.168.1.20:{self.port}"):
             self.assertEqual(self.req("GET", "/status", host=host)[0], 200, host)
 
+    def test_dual_stack(self):
+        # "::" listens on IPv6 and on IPv4 both (IPv4 clients arrive as ::ffff:a.b.c.d)
+        try:
+            with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+                s.bind(("::1", 0))
+        except OSError as e:
+            self.skipTest(f"no IPv6 on this PC: {e}")
+        self.httpd = serve(self.svc, host="::", port=0)
+        self.port = self.httpd.server_address[1]
+        self.assertEqual(self.req("GET", "/status")[0], 200)                    # over IPv4 (127.0.0.1)
+        c = http.client.HTTPConnection("::1", self.port, timeout=30)
+        try:
+            c.request("GET", "/status")
+            r = c.getresponse()
+            r.read()
+            self.assertEqual(r.status, 200)                                       # over IPv6
+        finally:
+            c.close()
+
     def test_no_host_header_passes(self):
         self.start()
         with socket.create_connection(("127.0.0.1", self.port), timeout=10) as s:      # an HTTP/1.0 client
