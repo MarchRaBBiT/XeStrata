@@ -218,14 +218,16 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         }
         strata::gpu::copy(dense_, blob.data(), blob.size());
         vram_ += blob.size();
-        // The q and o projections, read by the drafter's native_mmvq alone, go into kNativeQ8Rows' layout (each row's
-        // values, then its scales: every load 32-bit aligned), as the main layers' Q8_0 matrices do at load: the Q8_0
-        // blocks' 2-byte alignment read 2560 x 10240 at 176 us a call against 34 in the rows layout (B70,
-        // 2026-10-24).  The same values reach the same dot in the same order, so the drafts are the same.  The
-        // embedding, hidden, k and v projections stay Q8_0: the prompt path's MTP pass reads them as such
-        // (prefill.cpp, tensor_q8), and so does the shared expert's kernel its own.
+        // The projections native_mmvq reads go into kNativeQ8Rows' layout (each row's values, then its scales: every
+        // load 32-bit aligned), as the main layers' Q8_0 matrices do at load: the Q8_0 blocks' 2-byte alignment read
+        // 2560 x 10240 at 176 us a call against 34 in the rows layout (B70, 2026-10-24).  The same values reach the
+        // same dot in the same order, so the drafts are the same.  The prompt path's MTP pass reads four of them too,
+        // with the type tensor_q8_type gives (its dequantization knows the layout).  The shared expert's matrices
+        // keep Q8_0: its own kernel.
         {
-            static const char* const rows_names[] = {"self_attn.q_proj.weight", "self_attn.o_proj.weight"};
+            static const char* const rows_names[] = {"fc_embedding.weight", "fc_hidden.weight", "self_attn.k_proj.weight",
+                                                     "self_attn.v_proj.weight", "self_attn.q_proj.weight",
+                                                     "self_attn.o_proj.weight"};
             void* const cs0 = &Runtime::get().compute();
             for (Tensor& t : tensors_) {
                 if (t.kind != "q8_0" || t.cols > INT_MAX || t.rows > INT_MAX ||
