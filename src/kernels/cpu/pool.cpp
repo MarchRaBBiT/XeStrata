@@ -4,6 +4,7 @@
 // src/kernels/cpu/pool.cpp - P2.S3: the CPU expert pool.  Read pool.hpp first; it explains the protocol.
 #include "strata/kernels/cpu/pool.hpp"
 #include "strata/platform/aux_cpus.hpp"
+#include "strata/platform/thread_name.hpp"
 #include "strata/core/progress.hpp"
 #include "strata/kernels/cpu/canon_expert.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
@@ -162,6 +163,62 @@ std::vector<int> physical_cores(bool skip_first) {
 #endif
     if (skip_first && !cores.empty()) cores.erase(cores.begin());
     return cores;
+}
+
+namespace {
+std::vector<int> g_pool_cores;   // --pool-cores: set once at start-up, before the pool exists
+}  // namespace
+void set_pool_cores(const std::vector<int>& cpus) { g_pool_cores = cpus; }
+const std::vector<int>& pool_cores_setting() { return g_pool_cores; }
+
+std::vector<LogicalCpuInfo> logical_cpu_layout() {
+    std::vector<LogicalCpuInfo> out;
+#if defined(_WIN32)
+    DWORD len = 0;
+    GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len);
+    if (len == 0) return out;
+    std::vector<char> buf(len);
+    if (!GetLogicalProcessorInformationEx(RelationProcessorCore, (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX) buf.data(),
+                                          &len))
+        return out;
+    // a `start /affinity` or a job limit on a PC with one processor group: only those processors are the process's
+    DWORD_PTR proc_mask = 0, sys_mask = 0;
+    const bool limited = GetActiveProcessorGroupCount() == 1 &&
+                         GetProcessAffinityMask(GetCurrentProcess(), &proc_mask, &sys_mask);
+    long core = 0;
+    for (const char* p = buf.data(); p < buf.data() + len;
+         p += ((const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*) p)->Size) {
+        const auto* e = (const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*) p;
+        if (e->Relationship != RelationProcessorCore) continue;
+        for (WORD group = 0; group < e->Processor.GroupCount; ++group) {
+            const GROUP_AFFINITY& g = e->Processor.GroupMask[group];
+            for (int bit = 0; bit < 64; ++bit)
+                if ((g.Mask & (KAFFINITY(1) << bit)) && (!limited || (proc_mask & (DWORD_PTR(1) << bit))))
+                    out.push_back({(int) (g.Group * 64 + bit), core});
+        }
+        ++core;
+    }
+#else
+    auto topo = [](int cpu, const char* what) -> long {
+        char path[96];
+        std::snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/topology/%s", cpu, what);
+        long v = -1;
+        if (std::FILE* f = std::fopen(path, "r")) {
+            if (std::fscanf(f, "%ld", &v) != 1) v = -1;
+            std::fclose(f);
+        }
+        return v;
+    };
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    if (sched_getaffinity(0, sizeof set, &set) != 0) return out;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+        if (!CPU_ISSET(cpu, &set)) continue;
+        const long pkg = topo(cpu, "physical_package_id"), core = topo(cpu, "core_id");
+        out.push_back({cpu, pkg >= 0 && core >= 0 ? pkg * 1000000 + core : -1});
+    }
+#endif
+    return out;
 }
 
 namespace {
@@ -328,8 +385,29 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, int first_core,
     if (tasks < 0 || tasks > kMaxTasks) throw std::invalid_argument("expert pool tasks must be in 0..4096");
     if (const char* e = std::getenv("STRATA_POOL_SPIN_US"))   // a test knob; see kSpinBeforeSleep
         spin_before_sleep_ = std::chrono::microseconds((std::max)(0, std::atoi(e)));
-    const std::vector<int> cores = physical_cores(true);
-    n_ = n_workers > 0 ? n_workers : (int) std::min<size_t>(cores.size(), (size_t) default_worker_cap());
+    pinned_ = pin;
+    std::vector<int> cores = physical_cores(true);
+    // --pool-cores (experimental, off by default): the person's own list of logical processors for the workers, in its
+    // order; only where the workers are pinned (and, by default, their count) comes from it
+    if (!pool_cores_setting().empty()) {
+        const std::vector<int> all = physical_cores(false);   // the host takes the first one (SessionLoopScratch)
+        const PoolCoresCheck chk = check_pool_cores(pool_cores_setting(), logical_cpu_layout(), all.empty() ? -1 : all[0]);
+        static std::atomic<bool> told{false};   // (a second pool, --batch-cpu-split's, checks the same list again)
+        const bool say = !told.exchange(true);
+        if (say)
+            for (const std::string& w : chk.warnings) std::fprintf(stderr, "strata cpu pool: --pool-cores: %s\n", w.c_str());
+        if (chk.cpus.empty()) {
+            if (say)
+                std::fprintf(stderr, "strata cpu pool: --pool-cores: no usable logical processor in the list; the pool "
+                                     "uses its default placement\n");
+        } else {
+            cores = chk.cpus;
+            explicit_cores_ = true;
+        }
+    }
+    n_ = n_workers > 0 ? n_workers
+                       : explicit_cores_ ? (int) cores.size()
+                                         : (int) std::min<size_t>(cores.size(), (size_t) default_worker_cap());
     if (n_ < 1) n_ = 1;
     scratch_.resize((size_t) n_);
     wstate_.reset(new std::atomic<int32_t>[(size_t) n_]);
@@ -345,11 +423,25 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, int first_core,
         const int core = pin ? (c < (int) cores.size() ? cores[(size_t) c] : -1) : -1;
         if (core >= 0) worker_cpus_.push_back(core);
         threads_.emplace_back([this, i, core] {
+            strata::platform::name_this_thread("strata-pool", i);
             strata::aux_cpus::note_owned_thread();   // --aux-cpus never moves a worker
             pin_this_thread(core);
             worker(i);
         });
     }
+}
+
+std::string ExpertPool::placement_line() const {
+    if (n_ <= 0) return "";
+    if (!pinned_)
+        return "CPU workers: " + std::to_string(n_) + " workers, not pinned to logical processors (the OS places them)";
+    const std::vector<int> all = physical_cores(false);   // the host takes the first one (SessionLoopScratch)
+    std::string s = describe_worker_placement(worker_cpus_, all.empty() ? -1 : all[0], logical_cpu_layout(),
+                                              explicit_cores_);
+    // a worker beyond the cores listed runs unpinned (more --pool-workers than logical processors)
+    if ((int) worker_cpus_.size() < n_)
+        s += "; " + std::to_string(n_ - (int) worker_cpus_.size()) + " more not pinned";
+    return s;
 }
 
 ExpertPool::~ExpertPool() {
@@ -734,3 +826,24 @@ void ExpertPool::run(ExpertJob* jobs, int n) {
 }
 
 }  // namespace strata::kernels::cpu
+
+#if defined(_WIN32)
+// strata/platform/thread_name.hpp: the Windows half lives here, where <windows.h> is already included (upstream
+// 8c41d3611).  SetThreadDescription (Windows 10 1607 and later) is looked up, not linked: older SDKs and toolchains lack
+// the import.
+namespace strata::platform {
+void name_this_thread(const char* base, int index) {
+    char name[64];
+    if (index >= 0) std::snprintf(name, sizeof name, "%s-%d", base, index);
+    else std::snprintf(name, sizeof name, "%s", base);
+    using SetDesc = HRESULT(WINAPI*)(HANDLE, PCWSTR);
+    static const SetDesc fn = (SetDesc) GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription");
+    if (fn == nullptr) return;
+    wchar_t wide[64];
+    int i = 0;
+    for (; name[i] != '\0' && i < 63; ++i) wide[i] = (wchar_t) (unsigned char) name[i];
+    wide[i] = L'\0';
+    (void) fn(GetCurrentThread(), wide);
+}
+}  // namespace strata::platform
+#endif
