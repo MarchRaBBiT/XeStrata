@@ -565,9 +565,8 @@ window length:
 
 The defaults were measured by upstream on a Ryzen 5 7600 with an RTX 5070.
 Some have been measured again on the B70 ([XE.md](XE.md#upstream-settings-not-remeasured-on-xe)).
-The engine and setup fit them from what they measure, so this is usually not needed. Setup asks after an install
-whether to measure them on your PC (by default it does not); `./setup.sh --calibrate` does it any time (it asks first
-whether to measure anyway; `--yes` skips the question).
+The engine and setup fit them from what they measure, so this is usually not needed. They are measured only when you
+run `./setup.sh --calibrate` (it asks first whether to measure anyway; `--yes` skips the question).
 It measures the decode speed with each setting and keeps one only when it is more than 3% faster.
 The result is remembered per PC and model in the settings file, so updates keep it.
 Measuring the worker count needs a fresh engine, so the model is loaded more than once, and the PC can stop responding for a minute or two each time (upstream #1197).

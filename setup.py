@@ -5604,8 +5604,8 @@ def setup_plain(a, family: str, fam: dict, gpu: dict, chosen: list, sel: list, f
 
 def finish_setup(a, cfg: dict, tag: str, port: int, adopted: Path | None, images: bool, tune: bool = True,
                  notes: list[str] | tuple = ()) -> int:
-    """The end of an install: the model's config written, its start script, the warm-up, the offer to tune the
-    engine's settings for this PC (`tune`: Qwen3.8-Flash-Next's engine options only), what to do next, and the start.
+    """The end of an install: the model's config written, its start script, the warm-up, what to do next, and the
+    start.  `tune`: Qwen3.8-Flash-Next's engine options, where an earlier calibration's settings for this PC apply.
     `notes`: the model's own tips, printed with the CPU's."""
     cfg_path = CONF / f"xestrata-{tag.lower()}.json"
     CONF.mkdir(parents=True, exist_ok=True)
@@ -5633,15 +5633,7 @@ def finish_setup(a, cfg: dict, tag: str, port: int, adopted: Path | None, images
     script = None if PACKAGED else write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)
     if not a.no_warmup:
         warm_up(cfg_path)
-    # offered only when someone answers: --yes installs and adopted earlier installs are not held up by it; the engine
-    # and setup fit these settings by themselves, so the answer that costs no time is the default
-    if tune and cal is None and not a.no_start and not a.yes and ask(
-            f"Tune Strata for this PC now? {CALIBRATE_NOT_NEEDED} It measures a few engine settings anyway (about "
-            f"15-30 minutes, longer on a slow card; the PC is busy meanwhile; later: {SETUP_CMD} --calibrate)",
-            ["y", "n"], "n", a.yes) == "y":
-        tuned = calibrate_config(cfg_path)
-    else:
-        tuned = None                                   # not asked for: nothing to repeat below
+    # no tuning is offered here: the engine and setup fit these settings by themselves (--calibrate still measures them)
     if script is not None:
         ok(f"start script: {script.name}")
 
@@ -5656,9 +5648,6 @@ def finish_setup(a, cfg: dict, tag: str, port: int, adopted: Path | None, images
         " - it starts right away")
     if images:
         say("  Images:           send them in the chat page, in chat.py (/image <path>) or over the API")
-    if tuned is False:                                 # upstream #447: a failed tuning is repeated here, not only above
-        say(f"  Tuning:           FAILED (the reason is above): the default settings stay - {SETUP_CMD} --calibrate "
-            "tries again")
     if a.no_start:
         return 0
     return start(cfg_path, port)
