@@ -1211,7 +1211,9 @@ sycl::event row_top_prob_split(sycl::queue& q, const float* logits, int n_rows, 
         sycl::atomic_fence(sycl::memory_order::release, sycl::memory_scope::device);
         sycl::group_barrier(it.get_group());
         if (it.get_local_id(0) != 0) return;
-        sycl::atomic_ref<uint32_t, sycl::memory_order::acq_rel, sycl::memory_scope::device,
+        // relaxed, ordered by the release fence above and the acquire fence below: intel/llvm v7.2.0's NVPTX backend
+        // refuses an acquire or release atomic for sm_60 and older (Pascal, the cuda12.4 package's link stopped there)
+        sycl::atomic_ref<uint32_t, sycl::memory_order::relaxed, sycl::memory_scope::device,
                          sycl::access::address_space::global_space> cnt(sc.count[t]);
         if (cnt.fetch_add(1u) != TOP_SPLIT - 1) return;
         sycl::atomic_fence(sycl::memory_order::acquire, sycl::memory_scope::device);
