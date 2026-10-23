@@ -65,6 +65,9 @@ struct ExpertJobMulti {
     float* out[MAXT] = {};
     /// Plan v0.3 P6: a native pack's activations (native_quant_act's, in a NativeAct), one per token.
     const void* nact[MAXT] = {};
+    /// Upstream 149 (zero-copy): this job's own layout (null: the layer's) - the GGUF read in place, where gate, up and
+    /// down are three tensors: `blob` is the gate rows and the offsets reach the expert's up and down rows in the mapping.
+    const NativeFmt* fmt = nullptr;
 };
 
 /// One logical processor per PHYSICAL core, so a worker is never scheduled onto an SMT sibling of another

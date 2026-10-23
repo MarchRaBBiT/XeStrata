@@ -5018,6 +5018,34 @@ int main(int argc, char** argv) {
             const long threads = std::strtol(v, nullptr, 10);
             if (threads > 0) src.set_fetch_threads((int) std::min<long>(threads, std::numeric_limits<int>::max()));
         }
+        // Linux, the file tier's I/O path (upstream 149 and 0.2.1): by default for the GGUF read in place, and for an
+        // experts.bin pack while the page cache has room for 55% of its experts - whole-blob preads, the predicted
+        // experts of the next layers read ahead on I/O threads with the decode gate, and (the GGUF in place) the experts
+        // the page cache holds computed from the mapping (zero-copy).  STRATA_IO_PREFETCH=0, STRATA_IO_PF_GATE=0 and
+        // STRATA_COLD_OVERLAP=0 turn them off, STRATA_IO_PREFETCH=1 on where they are not the default.
+        const char* io_pf_env = std::getenv("STRATA_IO_PREFETCH");
+        const bool io_pf_default = (io_pf_env == nullptr || io_pf_env[0] == '\0') && src.linux_io_defaults();
+        if (io_pf_default || (io_pf_env != nullptr && std::strtol(io_pf_env, nullptr, 10) != 0)) {
+            const char* th = std::getenv("STRATA_IO_PF_THREADS");
+            src.set_io_prefetch(true, th != nullptr ? (int) std::strtol(th, nullptr, 10) : 0);
+            const char* cv = std::getenv("STRATA_COLD_OVERLAP");
+            const bool zc = cv != nullptr && cv[0] != '\0' ? std::strtol(cv, nullptr, 10) == 4 : src.gguf_mode();
+            if (src.io_prefetch())
+                std::fprintf(stderr, "strata generate: file tier (Linux%s): %s, io prefetch with whole-blob preads on %s I/O "
+                                     "threads, the decode's read-ahead %s; off: STRATA_COLD_OVERLAP=0, "
+                                     "STRATA_IO_PREFETCH=0, STRATA_IO_PF_GATE=0\n",
+                             io_pf_default ? " defaults" : ", STRATA_IO_PREFETCH=1",
+                             src.gguf_mode() ? (zc ? "page-cached experts computed from the mapping (zero-copy)"
+                                                   : "page-cached experts copied (STRATA_COLD_OVERLAP=0)")
+                                             : "experts.bin read from the mapping, its pages filled by the I/O threads",
+                             th != nullptr ? th : "8",
+                             src.gate_on() ? "only while the page cache has room for it and it pays" : "always (STRATA_IO_PF_GATE=0)");
+            else if (!io_pf_default)
+                std::fprintf(stderr, "strata generate: STRATA_IO_PREFETCH=1 is not available here (the Linux mapped file "
+                                     "tier only); the file tier reads as before\n");
+        } else if (const char* sv = std::getenv("STRATA_IO_STATS"); sv != nullptr && std::strtol(sv, nullptr, 10) != 0) {
+            src.set_io_stats(true);
+        }
         srcp = &src;
     } else {
         arena_src.set_gguf(o.native_preset);   // plan v0.3 P6: a native pack may take its experts from shard 1
@@ -5715,6 +5743,38 @@ int main(int argc, char** argv) {
     drive.d.src = srcp;
     drive.d.n_expert = g.n_expert;
     drive.d.jobs.resize((size_t) K);
+    // CS-T: routing-aware prefetch of the file tier: the next layer's router on this layer's MoE input predicts its
+    // experts, and with io prefetch (upstream 149) the I/O threads read them ahead (else their pages are only advised).
+    // It never changes what is computed; STRATA_LOOKAHEAD=0 is the A/B arm, STRATA_LOOKAHEAD_K the experts per token
+    // (default 10).  Measured on the RX 9060 XT in a 32 GiB cgroup (IQ3_XXS, upstream v0.2.2, 1K): decode 22.4 tok/s
+    // with it, 18.8 without; as a page hint alone (2026-10-04, UD-Q4_K_XL in 62 GiB) it was no faster.
+    strata::core::RouterLookahead lookahead;
+    if (srcp == &src && src.warms() && [] { const char* v = std::getenv("STRATA_LOOKAHEAD"); return v == nullptr || std::strtol(v, nullptr, 10) != 0; }()) {
+        std::vector<std::vector<uint16_t>> routers((size_t) g.n_layers);
+        bool ok = true;
+        for (int64_t l = 0; l < g.n_layers && ok; ++l) {
+            const strata::core::WeightRef* w = wt.find("blk." + std::to_string(l) + ".ffn_gate_inp.weight");
+            ok = w != nullptr && w->kind == strata::core::WeightKind::Bf16InF32 &&
+                 w->bytes == (uint64_t) (g.n_expert * g.n_embd) * 2;
+            if (!ok) break;
+            routers[(size_t) l].resize((size_t) (g.n_expert * g.n_embd));
+            ok = strata::gpu::copy(routers[(size_t) l].data(), w->data, (size_t) w->bytes) == true;
+        }
+        const char* kv = std::getenv("STRATA_LOOKAHEAD_K");
+        if (ok && lookahead.start(std::move(routers), g.n_embd, g.n_expert, kv ? (int) std::strtol(kv, nullptr, 10) : 10, &src, err)) {
+            drive.d.lookahead = &lookahead;
+            // two layers ahead with io prefetch (upstream 149's default); STRATA_IO_PREFETCH_DEPTH 1..4
+            if (const char* dv = std::getenv("STRATA_IO_PREFETCH_DEPTH"); dv != nullptr && std::strtol(dv, nullptr, 10) > 0)
+                lookahead.set_depth((int) std::strtol(dv, nullptr, 10));
+            else if (src.io_prefetch())
+                lookahead.set_depth(2);
+            std::fprintf(stderr, "strata generate: routing-aware prefetch of the file tier on (the next layer's router)\n");
+        } else {
+            std::fprintf(stderr, "strata generate: routing-aware prefetch off (%s)\n",
+                         ok ? err.c_str() : "the routers are not BF16 in the arena");
+            err.clear();
+        }
+    }
     // ---- R4.2c: THE HIT PATH.  Every one of these is required for `hits_ready()`, which is all-or-nothing on
     // purpose: a half-configured hit path would compute some experts twice and others not at all, and a token
     // built on that is wrong rather than refused.
@@ -12809,6 +12869,8 @@ int main(int argc, char** argv) {
         // the low-RAM mode's tiers during the decode only (the startup fill and the prompt read files too)
         const int64_t file_reads0 = src.file_reads(), ram_reads0 = src.ram_reads();
         const uint64_t file_bytes0 = src.file_read_bytes();
+        const strata::core::FileExpertSource::IoCounters io0 = src.io_counters();
+        const int64_t zc0 = src.zero_copies();
         // STRATA_SPEC_WATCH=<seconds> (diagnostics, off by default; upstream 4c3edf476): the serve watchdog for this
         // loop.  A run whose verify windows and prompt chunks stop beating for that long prints the stage it is in and
         // the stall report, then ends.
@@ -13069,6 +13131,25 @@ int main(int argc, char** argv) {
                         "file tier", (long long) (src.file_reads() - file_reads0),
                         (double) (src.file_read_bytes() - file_bytes0) / 1e6,
                         (double) (src.file_read_bytes() - file_bytes0) / 1e6 / (double) rounds);
+        if (rounds > 0 && src.io_stats()) {   // the Linux I/O path (upstream 149): the decode's file reads by page-cache residency
+            const strata::core::FileExpertSource::IoCounters io = src.io_counters();
+            std::printf("%-24s file reads: page cache held %.1f MB, not %.1f MB (mincore at the read); %lld computed from "
+                        "the mapping (zero-copy); read ahead %llu, used %llu, unused %llu, skipped (cached) %llu, "
+                        "dropped %llu; pread %.1f MB in %llu calls; decode waited %.1f ms/round in the fetches",
+                        "io path", (double) (io.cached_bytes - io0.cached_bytes) / 1e6,
+                        (double) (io.uncached_bytes - io0.uncached_bytes) / 1e6, (long long) (src.zero_copies() - zc0),
+                        (unsigned long long) (io.pf_read_blobs - io0.pf_read_blobs),
+                        (unsigned long long) (io.pf_used - io0.pf_used), (unsigned long long) (io.pf_unused - io0.pf_unused),
+                        (unsigned long long) (io.pf_resident_skips - io0.pf_resident_skips),
+                        (unsigned long long) (io.pf_dropped - io0.pf_dropped),
+                        (double) (io.pread_bytes - io0.pread_bytes) / 1e6, (unsigned long long) (io.pread_n - io0.pread_n),
+                        (double) (io.crit_us - io0.crit_us) / 1e3 / (double) rounds);
+            if (src.gate_on())
+                std::printf("; gate %s (room %.2f of the experts, read ahead used %.0f%%, closed %lld windows, %lld flips)",
+                            src.gate_open() ? "open" : "closed", src.gate_ratio(), 100.0 * src.gate_useful(),
+                            (long long) src.gate_closed_windows(), (long long) src.gate_flips());
+            std::printf("\n");
+        }
         if (rounds > 0) {
 #if defined(_WIN32)
             std::printf("%-24s %lld page faults (soft and hard) while decoding; %llu MiB committed by this process\n",
