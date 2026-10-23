@@ -10,8 +10,9 @@ Endpoints: POST /v1/chat/completions (OpenAI, stream and non-stream), POST /v1/m
 non-stream), GET /v1/models, GET /models, GET /props, GET /slots, GET /health, GET /mcp. One sequence at a time
 behind a FIFO (plan: one resident sequence).
 Image generation (optional, when the config has an "images" section): POST /v1/images/generations and
-/v1/images/edits (OpenAI's shapes, plus seed) run Qwen-Image-2.1-Turbo on XeStrata's own image engine (strata-image,
-resident after the first image), one job at a time on the GPU the text engine uses (serve/images.py).
+/v1/images/edits (OpenAI's shapes, plus seed) run the image model setup --images installed (Qwen-Image-2.1-Turbo,
+Qwen-Image-2.1 or Mage-Flow) on XeStrata's own image engine (strata-image, resident after the first image), one job at
+a time on the GPU the text engine uses (serve/images.py; docs/IMAGE.md).
 Tools from MCP servers (serve/mcp.py, `"mcp_servers"` in the config or --mcp-config) are offered only to requests that
 ask for them with `"strata_mcp": true` - the web app does; other clients see exactly the API they always saw.
 Images (optional, when the config has a "vision" entry): OpenAI image_url parts and Anthropic image blocks (base64
@@ -6040,8 +6041,7 @@ def make_handler(svc: Service):
             gen = svc.images
             if gen is None:
                 self._json(404, {"error": {"type": "invalid_request_error", "code": "images_not_set_up",
-                                           "message": "image generation is not set up on this server (run setup "
-                                                      "with --images qwen-image-turbo)"}})
+                                           "message": images_api.not_set_up_message()}})
                 return
             job = images_api.parse_request(req, gen.cfg)        # ImageRequestError (a ValueError): 400
             self._image_job(gen, job)
@@ -6054,8 +6054,7 @@ def make_handler(svc: Service):
             gen = svc.images
             if gen is None:
                 self._json(404, {"error": {"type": "invalid_request_error", "code": "images_not_set_up",
-                                           "message": "image generation is not set up on this server (run setup "
-                                                      "with --images qwen-image-turbo)"}})
+                                           "message": images_api.not_set_up_message()}})
                 return
             body = self._body()
             ctype = self.headers.get("Content-Type", "") or ""

@@ -1,19 +1,23 @@
 # SPDX-FileCopyrightText: 2026 Niko1221 and the Strata contributors
 # SPDX-FileCopyrightText: 2026 MistVVK and the XeStrata contributors
 # SPDX-License-Identifier: LGPL-3.0-or-later AND MIT
-"""tools/image/install.py - image generation (Qwen-Image-2.1-Turbo or Qwen-Image-2.1) for an existing XeStrata
-install: downloads and checks the model files for the image engine setup compiled with the text engine
+"""tools/image/install.py - image generation (Qwen-Image-2.1-Turbo, Qwen-Image-2.1 or Mage-Flow) for an existing
+XeStrata install: downloads and checks the model files for the image engine setup compiled with the text engine
 (engine/strata-image), and writes the "images" section into a run config (or prints it), as setup.py --images does
 inside the normal setup (setup.py's setup_images).
 
     python tools/image/install.py --config ~/.config/xestrata/xestrata-iq3_xxs.json
     python tools/image/install.py --quant Q6_K --print
+    python tools/image/install.py --config ~/.config/xestrata/xestrata-iq3_xxs.json --model mage-flow-turbo
 
 --gpu-policy auto|keep|shrink|unload: what the text model does during an image job (serve/images.py).
---quant: the image model's size, lowered (after its text encoder's) when the files would not fit the RAM the config's
-text model leaves, unless --ssd-offload on.
---model qwen-image-turbo|qwen-image-base[-uncensored]: the image model (setup.py --images); -uncensored: its text
-encoder with the refusal direction removed.  The text encoder is Q8_0, or lowered first.
+--quant: Qwen-Image-2.1's image model's size, lowered (after its text encoder's) when the files would not fit the RAM
+the config's text model leaves, unless --ssd-offload on; Mage-Flow's comes in one size (bf16).
+--model qwen-image-turbo|qwen-image-base|mage-flow-turbo|mage-flow|mage-flow-base[-uncensored]: the image model
+(setup.py --images); -uncensored: its text encoder with the refusal direction removed.  The text encoder is Q8_0, or
+lowered first.
+--dit-q8, --dit-keep: Mage-Flow's image model in 8 or 16 bits, and the one not in use kept in RAM (as setup's
+--image-dit-q8 and --image-dit-keep).
 """
 from __future__ import annotations
 

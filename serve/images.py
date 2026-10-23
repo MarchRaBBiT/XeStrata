@@ -298,6 +298,30 @@ def image_dims(data: bytes) -> tuple[int, int]:
     raise ImageRequestError("a reference image: PNG, JPEG, GIF or BMP")
 
 
+def _qimage():
+    """tools/image/qimage.py, the one table of setup's --images choices (setup.py takes it the same way)."""
+    tools = str(Path(__file__).resolve().parent.parent / "tools" / "image")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    import qimage
+    return qimage
+
+
+def setup_choice(cfg: dict) -> str:
+    """The setup --images value that installs the image model of the config's "images" section `cfg` (its
+    "model_name" is the model's name, which for Qwen-Image-2.1 is not the choice's)."""
+    models = _qimage().IMAGE_MODELS
+    name = cfg.get("model_name") or MODEL_NAME
+    return next((k for k, v in models.items() if v[0] == name), _qimage().DEFAULT_MODEL)
+
+
+def not_set_up_message() -> str:
+    """What a request for an image is told when the server has no image generation (the 404)."""
+    choices = [k for k in _qimage().IMAGE_MODELS if not k.endswith("-uncensored")]
+    return ("image generation is not set up on this server: run setup with --images and an image model ("
+            + ", ".join(choices) + "; -uncensored after one for its uncensored text encoder), see docs/IMAGE.md")
+
+
 def parse_edit_request(req: dict, images: list[bytes], cfg: dict, mask: bytes | None = None) -> dict:
     """An edit (/v1/images/edits): parse_request's fields with `images` (the reference images' bytes, PNG, JPEG, GIF or
     BMP) as job["refs"].  size "auto" (or none): the first reference's shape at about 1024 x 1024 pixels, its sides
@@ -307,7 +331,7 @@ def parse_edit_request(req: dict, images: list[bytes], cfg: dict, mask: bytes | 
     mage = cfg.get("family") == "mage-flow"
     if not cfg.get("vision") or (mage and not cfg.get("edit_model")):
         raise ImageRequestError("edits need the vision encoder" + (" and the edit model" if mage else "") +
-                                f": run setup with --images {cfg.get('model_name') or 'qwen-image-turbo'} again")
+                                f": run setup with --images {setup_choice(cfg)} again")
     if not images:
         raise ImageRequestError("image: one reference image or more")
     max_refs = int(cfg.get("max_refs") or (MF_MAX_REFS if mage else MAX_REFS))
