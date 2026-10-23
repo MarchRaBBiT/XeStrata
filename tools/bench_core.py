@@ -888,7 +888,8 @@ if job["do"] == "make":
     import qimage as QI
     m = job["make"]
     if hasattr(QI, "IMAGE_EXE"):
-        cfg = QI.image_config(m["quant"], Path(m["exe"]), Path(m["models"]))
+        kw = {"model": m["model"]} if m.get("model") else {}
+        cfg = QI.image_config(m["quant"], Path(m["exe"]), Path(m["models"]), **kw)
         print(json.dumps(cfg))
         sys.exit(0)
     kw = {"lib_dirs": m.get("lib_dirs") or ()}
@@ -957,19 +958,21 @@ def image_job(e: Engine, job: dict, timeout: float = DEADLINE) -> dict:
 
 
 def image_config(e: Engine, backend: str, quant: str, exe: str, models: str, gpu: int | None = None,
-                 lib_dirs: list[str] | None = None) -> dict:
+                 lib_dirs: list[str] | None = None, model: str | None = None) -> dict:
     """The "images" section `e`'s setup writes for this GPU (its timed choices included) -> the config, or
-    {"error": ...}."""
+    {"error": ...}.  `model`: setup's --images name, for XeStrata's tree (upstream's has Qwen-Image-2.1-Turbo
+    alone)."""
     return image_job(e, {"do": "make", "make": {"backend": backend, "quant": quant, "exe": exe, "models": models,
-                                                "gpu": gpu, "lib_dirs": lib_dirs or []}})
+                                                "gpu": gpu, "lib_dirs": lib_dirs or [], "model": model}})
 
 
 def ab_image(out: Path, gpu: str, engines: list[Engine], cfgs: dict[str, dict], rounds: int = ROUNDS,
-             on_run: Callable | None = None, dry: bool = False, envs: dict[str, dict] | None = None) -> None:
+             on_run: Callable | None = None, dry: bool = False, envs: dict[str, dict] | None = None,
+             model: str = "qwen-image-turbo") -> None:
     """OUT/image-runs/GPU-ARM-ROUND.json (the times), .txt (sd-cli's log, or the resident engine's figures) and .png:
     each engine's "images" config (`cfgs`, by arm; `envs`: what a resident engine's environment adds, by arm), one
     discarded warm-up per engine first (the files into the page cache), then the engines alternating, one process an
-    image (IMAGE_RUNNER)."""
+    image (IMAGE_RUNNER).  `model`: setup's --images name of the configs, for the tables."""
     runs = out / "image-runs"
     runs.mkdir(parents=True, exist_ok=True)
 
@@ -982,7 +985,8 @@ def ab_image(out: Path, gpu: str, engines: list[Engine], cfgs: dict[str, dict], 
             return
         r = image_job(e, {"do": "run", "cfg": cfg, "request": IMAGE_REQUEST, "png": str(runs / f"{stem}.png"),
                           "log": str(runs / f"{stem}.txt"), "env": (envs or {}).get(e.arm)})
-        rec = {"gpu": gpu, "arm": e.arm, "round": rnd, "backend": cfg.get("backend"), "quant": cfg.get("quant"),
+        rec = {"gpu": gpu, "arm": e.arm, "round": rnd, "model": model, "steps": cfg.get("steps") or 8,
+               "backend": cfg.get("backend"), "quant": cfg.get("quant"),
                "args": cfg.get("args"), "env": cfg.get("env"), **r}
         (runs / f"{stem}.json").write_text(json.dumps(rec, indent=1) + "\n")
         took = (f"{r['seconds']} s (sampling {r['sampling_s']} s, VAE {r['decode_s']} s)" if r.get("rc") == 0 else
@@ -1080,15 +1084,18 @@ def collect(out: Path, names: dict[str, str], say: Callable = print) -> None:
             continue
         ok = r.get("rc") == 0
         image.append({"gpu": r["gpu"], "arm": r["arm"], "engine": names.get(r["arm"], r["arm"]), "round": r["round"],
+                      "model": r.get("model") or "qwen-image-turbo", "steps": r.get("steps") or 8,
                       "backend": r.get("backend"), "quant": r.get("quant"),
                       **{k: r.get(k) if ok else None for k in ("seconds", "text_s", "sampling_s", "decode_s")}})
     if image:
         (out / "matrix-image.json").write_text(json.dumps(image, indent=1) + "\n")
-        for gpu in sorted({r["gpu"] for r in image}):
-            say(f"\n### {gpu} image generation (1024x1024, 8 steps)\n\n| Engine | backend | image (s) | sampling (s) | "
-                "VAE (s) |\n| --- | --- | ---: | ---: | ---: |")
-            for name in names.values():
-                c = [r for r in image if (r["gpu"], r["engine"]) == (gpu, name)]
+        for gpu, model in sorted({(r["gpu"], r["model"]) for r in image}):
+            steps = next(r["steps"] for r in image if (r["gpu"], r["model"]) == (gpu, model))
+            say(f"\n### {gpu} image generation, {model} (1024x1024, {steps} steps)\n\n| Engine | backend | image (s) | "
+                "sampling (s) | VAE (s) |\n| --- | --- | ---: | ---: | ---: |")
+            # the named arms first, then any other (bench_comfy.py's ComfyUI arms)
+            for name in dict.fromkeys([*names.values(), *sorted(r["engine"] for r in image)]):
+                c = [r for r in image if (r["gpu"], r["model"], r["engine"]) == (gpu, model, name)]
                 if not c:
                     continue
                 cells = []
