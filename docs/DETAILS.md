@@ -543,16 +543,17 @@ Setup says so when you choose it.
 
 ### Tuning for your PC (`--calibrate`)
 
-Four engine settings depend on the PC more than on the model:
+These engine settings depend on the PC more than on the model; the calibration measures the three other than the
+window length:
 
 - the share of the experts missing from VRAM that are copied to the GPU instead of computed by the CPU (`--pcie-frac`).
   Without it the engine splits them by an expert's time on each side, measured at start
   ([XE](XE.md#splitting-the-missed-experts-between-the-cpu-and-pcie)); a fixed share is kept only when it is more than 3% faster;
-- how sure the draft layer must be to add another guess to a check (`--spec-min-p`);
-  by default (`--spec-window auto`) a guess is added while the output it is expected to add, over the time of a check
-  of that size measured since the start, raises the output per ms (the expectation is the draft layer's probability,
-  corrected by the share actually accepted); the `--spec-min-p` floor applies with `--spec-window min-p`, and when
-  the calibration passes a value with a request;
+- how sure the draft layer must be to add another guess to a check, which is not measured:
+  by default (`--spec-window auto`) the engine adds a guess while the output it is expected to add, over the time of a
+  check of that size measured since the start, raises the output per ms (the expectation is the draft layer's
+  probability, corrected by the share actually accepted); a request that passes `spec_min_p` runs the `--spec-min-p`
+  floor instead, so the calibration passes none;
 - how many CPU threads compute experts (`--pool-workers`): on CPUs with efficiency cores, fewer can be faster;
   it also tries one fewer than the P-cores, and one fewer than one socket's cores on a 2-socket PC;
   on a CPU with more efficiency cores than performance cores, setup writes the performance cores (but the host's
