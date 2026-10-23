@@ -4685,6 +4685,12 @@ def hardware_key(cfg: dict) -> str:
                      cfg.get("model_name", "?"), ctx, "images" if "--vision" in a else "text"])
 
 
+# What the engine and setup fit to the PC by themselves, said wherever the tuning is offered or asked for
+CALIBRATE_NOT_NEEDED = ("The engine and setup already fit these settings to this PC from what they measure (the PCIe "
+                        "share, the verify window, the CPU threads, the expert cache's swaps), so it is usually not "
+                        "needed.")
+
+
 def calibrate_config(cfg_path: Path) -> bool:
     """Measure the engine's hardware-dependent settings on this PC (tools/calibrate.py), write them into the run
     config and remember them per PC and model in the settings file, so an update or a reinstall keeps them."""
@@ -5627,10 +5633,12 @@ def finish_setup(a, cfg: dict, tag: str, port: int, adopted: Path | None, images
     script = None if PACKAGED else write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)
     if not a.no_warmup:
         warm_up(cfg_path)
-    # offered only when someone answers: --yes installs and adopted earlier installs are not held up by it
+    # offered only when someone answers: --yes installs and adopted earlier installs are not held up by it; the engine
+    # and setup fit these settings by themselves, so the answer that costs no time is the default
     if tune and cal is None and not a.no_start and not a.yes and ask(
-            "Tune Strata for this PC now? It measures a few engine settings (about 15-30 minutes, longer on a slow "
-            f"card; the PC is busy meanwhile; later: {SETUP_CMD} --calibrate)", ["y", "n"], "y", a.yes) == "y":
+            f"Tune Strata for this PC now? {CALIBRATE_NOT_NEEDED} It measures a few engine settings anyway (about "
+            f"15-30 minutes, longer on a slow card; the PC is busy meanwhile; later: {SETUP_CMD} --calibrate)",
+            ["y", "n"], "n", a.yes) == "y":
         tuned = calibrate_config(cfg_path)
     else:
         tuned = None                                   # not asked for: nothing to repeat below
@@ -5894,7 +5902,8 @@ def main() -> int:
                          "English, code and French (French answers draft more)")
     ap.add_argument("--calibrate", action="store_true",
                     help="tune the engine's settings for this PC (about 15-30 minutes, longer on a slow card), "
-                         "then start the model")
+                         "then start the model; usually not needed, the engine and setup fit them by themselves "
+                         "(it asks first; --yes skips the question)")
     ap.add_argument("--bench", action="store_true",
                     help="measure the speed of the installed IQ3_XXS (another installed model: --model, --family) on "
                          "this PC (about 40 minutes) and write a record for the developers to the data folder's "
@@ -6052,6 +6061,22 @@ def main() -> int:
             fail(f"--calibrate: {a.model or a.family} is not installed (installed: {installed})",
                  "calibrate an installed model, or set this one up first without --calibrate")
         have = targets
+        # --yes with --calibrate asks for it outright; otherwise the person confirms, since it is rarely worth the time
+        if not a.yes and ask(f"{CALIBRATE_NOT_NEEDED} Measure anyway? (about 15-30 minutes, longer on a slow card; "
+                             "the PC is busy meanwhile)", ["y", "n"], "n", a.yes) != "y":
+            ok("not tuned: the settings the engine and setup pick stay")
+            if a.no_start:
+                return 0
+            run_cfg = have[0]
+            if len(have) > 1:
+                say()
+                for i, c in enumerate(have, 1):
+                    say(f"  {i}) {json.loads(c.read_text(encoding='utf-8-sig')).get('model_name', c.stem)}")
+                run_cfg = have[int(ask("Start which one?", [str(i) for i in range(1, len(have) + 1)], "1",
+                                       a.yes)) - 1]
+            return start(run_cfg, a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
+                         keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
+                               "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
         update_installed_engine()
         pick_cfg = have[0]
         if len(have) > 1:

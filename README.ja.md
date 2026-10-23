@@ -292,8 +292,8 @@ podman compose up -d                         # http://127.0.0.1:8095（止める
 新しいパッケージを [Releases](https://github.com/MistVVK/XeStrata/releases) から取ってきて、インストールと同じく `sudo apt install ./<ファイル>.deb` か `sudo dnf install ./<ファイル>.rpm` で入れます。
 モデルの設定は次の起動で更新します。
 
-**自分の PC に合わせる**: `xestrata --calibrate` は、エンジンの設定のいくつかをこの PC で測り、速いものを残します
-（5〜10 分ほど）。
+**自分の PC に合わせる**: エンジンと setup が、この PC で測った値から設定を合わせるので、ふつうは何もしなくて大丈夫です。
+`xestrata --calibrate` は、エンジンの設定のいくつかをこの PC で測り直し、速いものを残します（5〜10 分ほど。始める前に、それでも測るかを聞きます）。
 
 **速さを測る**: `xestrata --bench` は、入れた IQ3_XXS（ほかのモデルは `--model IQ2_XS` などで指定）のこの PC での速さと、どこに時間がかかっているかを測り、
 データフォルダの `records/bench-<日時>/` に記録を書きます（40 分ほど。動いている xestrata は先に止めます）。

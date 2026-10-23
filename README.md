@@ -308,8 +308,9 @@ at the start and every six hours while it runs; `xestrata --check-update` checks
 [Releases](https://github.com/MistVVK/XeStrata/releases) and install it as before, with `sudo apt install ./<file>.deb`
 or `sudo dnf install ./<file>.rpm`. The model's settings are updated at the next start.
 
-**Fitting it to your PC:** `xestrata --calibrate` measures some of the engine's settings on this PC and keeps the
-fastest (about 5-10 minutes).
+**Fitting it to your PC:** the engine and setup fit the settings to this PC from what they measure, so usually
+nothing is needed. `xestrata --calibrate` measures some of the engine's settings on this PC again and keeps the
+fastest (about 5-10 minutes; it asks first whether to measure anyway).
 
 **Measuring its speed:** `xestrata --bench` measures the installed IQ3_XXS's speed on this PC (another model: `--model IQ2_XS`, for example) and where the time goes,
 and writes a record to the data folder's `records/bench-<time>/` (about 40 minutes; stop a running xestrata first).
