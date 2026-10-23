@@ -488,6 +488,7 @@ struct Options {
     /// (DraftPolicy::mtp_window); "min-p" is the floor on the drafts' probabilities, --spec-min-p.  A request's own
     /// spec_min_p (setup's calibration) takes the min-p rule for that request.
     std::string spec_window = "auto";
+    bool spec_window_given = false;   ///< --spec-window was given (else the file tier takes min-p, below)
     /// Stop when the model emits an end-of-turn token (<|endoftext|> 248044, <|im_end|> 248046, or --eos-ids).
     bool stop_eos = false;
     std::vector<int64_t> eos_ids = {248044, 248046};
@@ -2607,6 +2608,7 @@ int main(int argc, char** argv) {
         else if (a == "--spec-min-p") o.spec_min_p = std::strtod(next("--spec-min-p"), nullptr);
         else if (a == "--spec-window") {
             o.spec_window = next("--spec-window");
+            o.spec_window_given = true;
             if (o.spec_window != "auto" && o.spec_window != "min-p") {
                 std::fprintf(stderr, "strata generate: --spec-window takes auto or min-p, not %s\n", o.spec_window.c_str());
                 return 2;
@@ -6927,6 +6929,16 @@ int main(int argc, char** argv) {
                          (double) src.resident_bytes() / 1073741824.0, (long long) src.resident_count());
             mem_mark("the resident experts");
         }
+    }
+    // The experts the GPU does not hold read from the model files (--mmap-experts, no RAM copy): the window rule is
+    // min-p unless --spec-window was given.  A round's time there swings with how many of its experts the SSD reads,
+    // and the auto rule's measured costs priced the wider windows out: on the RX 9060 XT in a 32 GiB cgroup (IQ3_XXS,
+    // the page cache emptied before each run, 2026-10-24) auto took one-token windows in half the rounds at 32K and
+    // decoded 16.1-16.2 tok/s, min-p 17.0; at 1K 26.0-26.3 against 26.1.
+    if (!o.spec_window_given && o.spec_window == "auto" && srcp == &src && !src.complement_ready()) {
+        o.spec_window = "min-p";
+        std::fprintf(stderr, "strata generate: the verify window takes the min-p rule (the experts are read from the "
+                             "files; --spec-window auto keeps the measured costs)\n");
     }
     // (the arena mode has no RAM copy to exchange with: its experts are always in RAM, the tier only copies them in)
     if (o.adapt_async && !src.complement_ready() && srcp != &arena_src)
