@@ -1105,14 +1105,29 @@ def collect(out: Path, names: dict[str, str], say: Callable = print) -> None:
                 say(f"| {name} | {c[0]['backend']} {c[0]['quant']} | " + " | ".join(cells) + " |")
 
     usage = []
+    runs_u = []
     for f in sorted((out / "usage-runs").glob("*.json")):
         if f.name.endswith(".config.json"):
             continue
         r = json.loads(f.read_text())
         if r["round"] == 0 or (r["why"] and not r["why"].startswith("stopped")):   # warm-ups, runs that failed
             continue
+        runs_u.append(r)
+    # a conversation's turns that every engine reached on that GPU in that round: the agent goes on only while the model
+    # calls a tool, and a turn that reads a tool's file is no measure of the turns another engine stopped before
+    # (2026-10-24: upstream ended the agent at its first answer, XeStrata went on to read a 3,800-token file)
+    reached: dict = {}
+    for r in runs_u:
         for conv in dict.fromkeys(t["conv"] for t in r["turns"]):
-            ct = [x for x in r["turns"] if x["conv"] == conv]
+            rk = (r["gpu"], r["round"], conv)
+            have = {x["turn"] for x in r["turns"] if x["conv"] == conv}
+            reached[rk] = have if rk not in reached else reached[rk] & have
+    for r in runs_u:
+        for conv in dict.fromkeys(t["conv"] for t in r["turns"]):
+            common = reached[(r["gpu"], r["round"], conv)]
+            ct = [x for x in r["turns"] if x["conv"] == conv and x["turn"] in common]
+            if not ct:
+                continue
             tot = lambda k: sum(x[k] or 0 for x in ct)   # noqa: E731
             usage.append({
                 "gpu": r["gpu"], "arm": r["arm"], "engine": names.get(r["arm"], r["arm"]), "conv": conv,
