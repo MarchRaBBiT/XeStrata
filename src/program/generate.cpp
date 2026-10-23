@@ -2144,16 +2144,21 @@ bool pcie_move_if_pays(strata::core::ExpertDispatch& d, bool overlap, const stra
 // card's VRAM against the model, the CPU and the link, not on a device's name.  Chosen once and at a position of the
 // text, so the swaps stay at fixed positions (window-invariant output, #152); the 4-token positions include the
 // 16-token ones before them.
+// `from_files`: the experts the GPU does not hold are read from the model files (--mmap-experts, no RAM copy), and a
+// swap's blob is a file read too: there the period stays.  Measured 2026-10-24 on the RX 9060 XT in a 32 GiB cgroup
+// (IQ3_XXS, the page cache emptied before each run, decode): every 4 tokens 23.6-24.2 tok/s at 1K and 14.7 at 32K,
+// every 16 25.5 and 16.9, every 32 25.3-26.5 and 16.4, every 64 25.8 and 15.9 - the pool's share was 0.85.
 constexpr int64_t kAdaptDecideAt = 32;
 constexpr double kAdaptPoolShare = 0.3;
 
-int64_t auto_adapt_period(const strata::core::Verifier& v, int64_t period, const char* who) {
+int64_t auto_adapt_period(const strata::core::Verifier& v, int64_t period, bool from_files, const char* who) {
     const double all = v.ms_wait + v.ms_pool + v.ms_host + v.ms_commit;
     const double share = all > 0.0 ? v.ms_pool / all : 0.0;
-    const int64_t next = share >= kAdaptPoolShare ? std::min<int64_t>(period, 4) : period;
+    const int64_t next = share >= kAdaptPoolShare && !from_files ? std::min<int64_t>(period, 4) : period;
     std::fprintf(stderr, "strata %s: adaptive tier every %lld tokens: the CPU pool took %.0f%% of the verify windows "
-                         "(a round every window from %.0f%%; --adapt-every sets it)\n",
-                 who, (long long) next, 100.0 * share, 100.0 * kAdaptPoolShare);
+                         "(a round every window from %.0f%%%s; --adapt-every sets it)\n",
+                 who, (long long) next, 100.0 * share, 100.0 * kAdaptPoolShare,
+                 from_files ? ", not while the experts are read from the files" : "");
     return next;
 }
 
@@ -11832,7 +11837,7 @@ int main(int argc, char** argv) {
                     for (int st = 0; st < n_stages; ++st) stage_ver(st).add_routing(drive.d.usage.data(), g.n_expert, a + 1);
                 if (adapt_auto && produced_n >= kAdaptDecideAt) {
                     adapt_auto = false;
-                    adapt_period = auto_adapt_period(ver, adapt_period, "serve");
+                    adapt_period = auto_adapt_period(ver, adapt_period, srcp == &src && !src.complement_ready(), "serve");
                 }
                 if (!drive.d.usage.empty() && !ajob &&
                     (adapt_period > 0 ? (p + a + 1) / adapt_period > p / adapt_period : ((rounds + 1) % o.adapt_every) == 0))
@@ -13014,7 +13019,7 @@ int main(int argc, char** argv) {
             if (adapt_period > 0) ver.add_routing(drive.d.usage.data(), g.n_expert, a + 1);
             if (adapt_auto && (int64_t) produced.size() >= kAdaptDecideAt) {
                 adapt_auto = false;
-                adapt_period = auto_adapt_period(ver, adapt_period, "generate");
+                adapt_period = auto_adapt_period(ver, adapt_period, srcp == &src && !src.complement_ready(), "generate");
             }
             if (adapt_period > 0 && (p + a + 1) / adapt_period > p / adapt_period)
                 adapt_thr = std::thread([&] {
