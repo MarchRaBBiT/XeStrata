@@ -366,7 +366,7 @@ The engine's options (added to the settings' `args`):
 | `--max-context N` | the KV cache's tokens (setup picks it from the GPU's VRAM) |
 | `--expert-profile PATH` | fill the experts in VRAM in this profile's order at start |
 | `--expert-profile-save PATH` | write what this run learned as a profile |
-| `--adapt-every N` | how often the experts in VRAM are swapped: at every 4N-th token of a request; where a layer rounds differently on the CPU and the GPU the windows are cut there, so the text does not depend on the drafting. Qwen3.8's four files decode to the same bits on the CPU and the GPU and are not cut, but serve's prompts from the second turn on round with the swaps' timing, so the text can differ from run to run (`STRATA_ADAPT_CUT=1` cuts them) (the batch slots, `--pipeline-windows` and `--adapt-async`: every N windows) (default 4; 0: no swaps) |
+| `--adapt-every N` | how often the experts in VRAM are swapped: at every 4N-th token of a request; where a layer rounds differently on the CPU and the GPU the windows are cut there, so the text does not depend on the drafting. Qwen3.8's four files decode to the same bits on the CPU and the GPU and are not cut, but serve's prompts from the second turn on round with the swaps' timing, so the text can differ from run to run (`STRATA_ADAPT_CUT=1` cuts them) (the batch slots, `--pipeline-windows` and `--adapt-async`: every N windows) (default 4; 0: no swaps). Without it, when the CPU pool took 30% or more of the checks' time at the 32nd output token, the swaps come every 4 tokens; not when the experts the GPU does not hold are read from the files (`--mmap-experts`) |
 | `--adapt-swaps N` | the most experts one swap moves (default 96; the one right after a prompt moves up to 2,048, those the prompt used most, and fills every free slot with any expert it used) |
 | `--adapt-mib-per-token N` | the swaps copy at most N MiB for each token read since the last one (default 48; 0: no bound) |
 | `--mmap-experts` | read the experts from the model file instead of loading them into RAM |
@@ -417,6 +417,13 @@ With every expert in RAM, the move into the GPU driver's memory (host USM) for t
   90% or more of the experts' pages are already in the page cache at the first prefill (Linux: a sample checked with
   `mincore`), it takes the RAM profile (a few threads) instead and says so in its log (upstream 83a7dbc0, #1353).
   `STRATA_STAGER_SSD=1` / `0` forces either.
+  On Linux, reading the GGUF files in place, the decode reads as follows (upstream 149).
+  An expert whose pages are all in the page cache is computed from the files' mapping, not copied (`STRATA_COLD_OVERLAP=0` copies it).
+  The others are read with pread without read-ahead; the next layer's router predicts the experts of the next two layers, and I/O threads read them ahead (`STRATA_IO_PREFETCH=0` turns this off, `STRATA_LOOKAHEAD=0` the prediction alone).
+  The read-ahead runs only while the page cache has room for 55% of the experts and what it reads is used (`STRATA_IO_PF_GATE=0` reads ahead always).
+  An experts.bin pack has its pages read ahead by the I/O threads the same way while the page cache has room for 55% of its experts.
+  Reading from the files, the adaptive tier's period is not shortened (`--adapt-every`), and the check's guesses are cut at the `--spec-min-p` floor (`--spec-window auto` sizes them by the measured times).
+  On the RX 9060 XT with 32 GiB of RAM (IQ3_XXS) the decode went from 11.6 to 26.0 tokens/s at 1K and from 11.2 to 16.8 at 32K; on the B70 from 46.9 to 56.5 at 1K, and on the RTX 4070 from 13.3 to 34.8 at 1K.
 
 `--low-ram on|off|resident|mmap` overrides the choice, and `./setup.sh --check` shows what each size would use.
 
@@ -601,7 +608,9 @@ window length:
   by default (`--spec-window auto`) the engine adds a guess while the output it is expected to add, over the time of a
   check of that size measured since the start, raises the output per ms (the expectation is the draft layer's
   probability, corrected by the share actually accepted); a request that passes `spec_min_p` runs the `--spec-min-p`
-  floor instead, so the calibration passes none;
+  floor instead, so the calibration passes none; when the experts the GPU does not hold are read from the files
+  (`--mmap-experts`) and `--spec-window` is not given, the `--spec-min-p` floor cuts them (a check's time there swings
+  with the SSD's reads, and the wider ones were priced too high);
 - how many CPU threads compute experts (`--pool-workers`): on CPUs with efficiency cores, fewer can be faster;
   it also tries one fewer than the P-cores, and one fewer than one socket's cores on a 2-socket PC;
   on a CPU with more efficiency cores than performance cores, setup writes the performance cores (but the host's
