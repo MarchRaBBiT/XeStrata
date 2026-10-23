@@ -59,6 +59,18 @@ if(CMAKE_CXX_COMPILER)
   if(EXISTS "${_strata_cxx_bin}/ld.lld")
     file(CREATE_LINK "${_strata_cxx_bin}/ld.lld" "${_strata_lld_dir}/ld.lld-link" SYMBOLIC)
   endif()
+  # and its lld (-flavor gnu -m elf64_amdgpu), found here first, ignores the libraries the device objects name: the MSVC
+  # and Windows SDK headers' #pragma comment(lib, ...) and CMake's --dependent-lib=msvcrt reach the device compilation
+  # too, and intel/llvm v7.2.0's lld (LLVM 23) refuses a library it cannot find there (msvcrt, msvcprt, uuid.lib)
+  if(EXISTS "${_strata_cxx_bin}/lld")
+    file(WRITE "${_strata_lld_dir}/lld"
+         "#!/bin/sh
+case \" $* \" in *\" elf64_amdgpu \"*) exec \"${_strata_cxx_bin}/lld\" \"$@\" --no-dependent-libraries ;; esac
+"
+         "exec \"${_strata_cxx_bin}/lld\" \"$@\"
+")
+    execute_process(COMMAND chmod 755 "${_strata_lld_dir}/lld")
+  endif()
 endif()
 set(_strata_win_link "-B\"${_strata_lld_dir}\" -L\"${STRATA_XWIN}/crt/lib/x86_64\" \
 -L\"${STRATA_XWIN}/sdk/lib/um/x86_64\" -L\"${STRATA_XWIN}/sdk/lib/ucrt/x86_64\" -L\"${STRATA_SYCL_WINDOWS}/lib\"")
