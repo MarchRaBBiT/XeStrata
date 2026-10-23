@@ -3,7 +3,8 @@
 """ComfyUI's arms of the image table on one GPU, beside bench_image.py's XeStrata and upstream: the same 1024x1024
 image (tools/bench_core.py's IMAGE_REQUEST: its prompt and seed) through ComfyUI's HTTP API, measured as
 bench_image.py measures XeStrata's resident engine: each run starts the server, makes a warm-up image of another
-prompt (the models into memory, the GPU code compiled), then the measured one, and stops the server.
+prompt (the models into memory, the GPU code compiled; a second one when it fails), then the measured one, and
+stops the server.
 
     COMFY=DIR VENV=.venv-cuda IMAGE_MODEL=qwen-image-turbo [WEIGHTS="int8 bf16"] [PORT=8191] [ROUNDS=2] \\
       python .claude/skills/upstream-sync/scripts/bench_comfy.py OUT GPU       # from the repository root
@@ -104,9 +105,13 @@ def one(weights: str, rnd: int, stem: str) -> None:
                 except OSError:
                     time.sleep(1)
             r = {}
-            jobs: list[tuple[str, int, str]] = [(WARM, 1, "warm"),
+            # a second warm-up when the first fails: ComfyUI on the RX 9060 XT runs out of memory in the first image's
+            # VAE decode, unloads its models and makes the next image (2026-10-21, 2026-10-23)
+            jobs: list[tuple[str, int, str]] = [(WARM, 1, "warm"), (WARM, 2, "warm2"),
                                                 (str(B.IMAGE_REQUEST["prompt"]), int(B.IMAGE_REQUEST["seed"]), "run")]
             for prompt, seed, tag in jobs:
+                if tag == "warm2" and "cold_s" in r:
+                    continue
                 log.flush()
                 size0 = logf.stat().st_size
                 t0 = time.monotonic()
@@ -127,6 +132,9 @@ def one(weights: str, rnd: int, stem: str) -> None:
                 text = logf.read_text(errors="ignore")[size0:]
                 status = h.get("status", {}).get("status_str")
                 if status != "success":
+                    if tag == "warm":
+                        r["warm_error"] = status
+                        continue
                     r = {"rc": 1, "error": f"{tag}: {status}"}
                     break
                 it = re.findall(r"\|\s*(\d+)/(\d+) \[[0-9:]+<[0-9:?]+,\s*([0-9.]+)(s/it|it/s)\]", text)
@@ -134,7 +142,7 @@ def one(weights: str, rnd: int, stem: str) -> None:
                 if it:
                     n, v, u = int(it[-1][1]), float(it[-1][2]), it[-1][3]
                     samp = round(n * (v if u == "s/it" else 1 / v), 2)
-                if tag == "warm":
+                if tag.startswith("warm"):
                     r["cold_s"] = round(wall, 2)
                     continue
                 r.update({"rc": 0, "seconds": round(wall, 2), "text_s": None, "sampling_s": samp, "decode_s": None})
