@@ -243,6 +243,52 @@ Arc Pro B70（32 GB）と i7-14700、RAM 96 GB で、setup の設定のまま、
 
 答えは、どの実行でも同じトークンでした。
 
+### Unsloth の UD-Q5_K_XL・UD-Q6_K_XL・Q8_0（実験的）
+
+Unsloth の 5・6・8 ビットのファイルも選べます（それぞれ 6 つのシャード、upstream 0.1.44）。
+エキスパートの gate・up は Q5_K、Q6_K、Q8_0、down は Q8_0 で、エンジンのエキスパートのカーネルがそのまま読みます。
+XeStrata ではこれらのファイルを動かしていないので、setup は実験的と表示します。
+RAM の扱いは UD-Q4_K_XL と同じで、RAM が下の目安より少なければ、エキスパートのうち RAM の予算の分だけを RAM に置き、残りを SSD から読みます。
+
+| 大きさ | ダウンロード | エキスパート | RAM の目安 |
+| --- | ---: | ---: | ---: |
+| UD-Q5_K_XL | 158 GB | 98 GB | 108 GB |
+| UD-Q6_K_XL | 169 GB | 109 GB | 118 GB |
+| Q8_0 | 188 GB | 128 GB | 136 GB |
+
+```sh
+./setup.sh --setup --family unsloth --model UD-Q5_K_XL
+```
+
+### Gyro-S と Gyro-M
+
+**[Gyro](https://huggingface.co/agentionai/Qwen3.8-Flash-Next-Gyro-GGUF)** は、agentionai による元のモデルの量子化です（upstream ba64156fd）。
+エキスパートをアダマール行列で回し、trellis の形式（TQ2_T、TQK6、TQK7）で格納しています。
+要るメモリは VRAM と RAM の合計で、Gyro-S は 27.6 GB、Gyro-M は 35 GB です。
+ファイルには n-gram の表も入っていて（SSD から読みます）、ダウンロードは 58 GB と 92 GB です。
+Gyro-M は IQ3_XXS くらいの品質で、GPU のメモリは約 20% 少なくて済みます。
+Gyro-S はいちばん小さく、品質は 2〜3 ビットの大きさより低く、decode は Q2_0 の方が速くなります。
+画像も使えます。モデルのライセンスは Qwen3.8-Flash-Next の Qwen Community License 1.0 です。
+
+```sh
+./setup.sh --setup --family gyro --model Gyro-M
+```
+
+### huihui-ai の abliterated 版
+
+**[huihui-ai の abliterated 版](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF)** は、モデルから拒否の方向を取り除いた（abliteration）版です。
+拒否はずっと少なくなり、安全のための抑えも弱まっているので、書いたものを確かめてください。
+
+- `--family huihui-swift`: Swift 1.5 の IQ2_XS と IQ3_XXS。ライセンスは Swift Open License 1.0 です。
+- `--family huihui-unsloth`: Unsloth の UD-IQ4_XS、UD-Q4_K_XL、Q8_0。ライセンスは Qwen Community License 1.0 です。
+
+ファイルの名前・シャード・大きさは元の版と同じで、重みが違います。画像の読み手は元の版のものです。
+実験的な速度向上用の射影は使えません。
+
+```sh
+./setup.sh --setup --family huihui-swift --model IQ2_XS
+```
+
 ### Qwen3.8-Flash-Next 以外のモデル（Ornith-1.5、llm-jp-4.1、Qwen3.6-35B-A3B、GLM-5.3-Flash）
 
 setup の最初の質問では、Qwen3.8-Flash-Next とは作りの違う 4 つの MoE モデルも選べます。
@@ -256,24 +302,26 @@ setup の最初の質問では、Qwen3.8-Flash-Next とは作りの違う 4 つ�
 - **[GLM-5.3-Flash](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF)**（Z.ai、MIT）: 320B、1 トークンで使うのは 18B の思考する MoE です。setup で選べる文脈は 256K まで。
   注意は KDA（線形の注意）と DSA（選んだトークンだけを見る注意）で、4 本の流れ（mHC）を持ちます。GGUF は Unsloth の UD-IQ1_S・UD-IQ3_XXS・UD-IQ4_XS です。
 
-| モデル | 大きさ | ダウンロード |
-| --- | --- | ---: |
-| Ornith-1.5 | **Q4_K_M** | 21.7 GB |
-| | Q5_K_M | 25.3 GB |
-| | **Q6_K** | 29.2 GB |
-| | Q8_0 | 37.8 GB |
-| | **BF16** | 71.1 GB |
-| | **GSQ-RCO-3BIT** | 13.0 GB |
-| | GSQ-RCO-3.5BIT | 15.2 GB |
-| llm-jp-4.1 | **Q4_K_M** | 21.5 GB |
-| | BF16 | 64.3 GB |
-| Qwen3.6-35B-A3B | **UD-Q4_K_XL** | 22.9 GB |
-| | **UD-Q6_K_XL** | 32.6 GB |
-| | Q8_0 | 37.8 GB |
-| GLM-5.3-Flash | **UD-IQ1_S** | 93.1 GB |
-| | **UD-IQ3_XXS** | 120.4 GB |
-| | UD-IQ4_XS | 156.8 GB |
+| モデル | 大きさ | ダウンロード | RAM の目安 | VRAM |
+| --- | --- | ---: | ---: | ---: |
+| Ornith-1.5 | **Q4_K_M** | 21.7 GB | 30 GB | 4 GB から |
+| | Q5_K_M | 25.3 GB | 34 GB | 6 GB から |
+| | **Q6_K** | 29.2 GB | 38 GB | 6 GB から |
+| | Q8_0 | 37.8 GB | 46 GB | 6 GB から |
+| | **BF16** | 71.1 GB | 80 GB | 8 GB から |
+| | **GSQ-RCO-3BIT** | 13.0 GB | 21 GB | 4 GB から |
+| | GSQ-RCO-3.5BIT | 15.2 GB | 24 GB | 6 GB から |
+| llm-jp-4.1 | **Q4_K_M** | 21.5 GB | 30 GB | 4 GB から |
+| | BF16 | 64.3 GB | 73 GB | 8 GB から |
+| Qwen3.6-35B-A3B | **UD-Q4_K_XL** | 22.9 GB | 31 GB | 4 GB から |
+| | **UD-Q6_K_XL** | 32.6 GB | 41 GB | 6 GB から |
+| | Q8_0 | 37.8 GB | 46 GB | 6 GB から |
+| GLM-5.3-Flash | **UD-IQ1_S** | 93.1 GB | 101 GB | 12 GB から |
+| | **UD-IQ3_XXS** | 120.4 GB | 128 GB | 12 GB から |
+| | UD-IQ4_XS | 156.8 GB | 165 GB | 12 GB から |
 
+RAM の目安は、ダウンロードの大きさに約 8 GB を足したものです（GLM-5.3-Flash は RAM と VRAM の合計）。
+それより少ないと、RAM と VRAM に入らないエキスパートをモデルのファイルから読むので、遅くなります。
 太字は、このリリースで llama.cpp と答えを比べた版です。
 ほかの版も同じ型のテンソルでできていて、その型は太字の版とカーネルの試験で確かめています（setup は「untested」と表示します）。
 
@@ -313,7 +361,7 @@ RAM がエキスパートの全体に足りないとき、エンジンは VRAM �
 
 ### RAM がモデルより少ないとき（省 RAM モード）
 
-Unsloth の 2 つ以外のモデルは、すべてのエキスパートを RAM に置き、GPU はよく使うもののコピーを持ちます。
+Unsloth の大きさ（huihui-ai の版を含む）以外のモデルは、すべてのエキスパートを RAM に置き、GPU はよく使うもののコピーを持ちます。
 エキスパートが RAM に入らない（ほかのために約 10 GB を残す）ときは、setup は省 RAM モードを選びます（`--low-ram auto`、既定）。
 GPU が持つエキスパートが少ないほど、ファイルから読む分が増えて遅くなります。
 このときエンジンは、エキスパートを RAM にすべてコピーせずに、モデルのファイルから読みます。
@@ -1304,6 +1352,8 @@ XeStrata はそれを、プロンプトの `<|image_pad|>` のトークンの位
 
 ## 画像の生成（任意）
 
+使い方、オプション、API の項目の一覧は [IMAGE](IMAGE.ja.md) にあります。ここでは中のしくみも含めて説明します。
+
 `./setup.sh --images qwen-image-turbo` で、文章のモデルとは別に Qwen-Image-2.1-Turbo で画像を作れるようにします（upstream 0.1.44）。
 画像は XeStrata 自身の画像のエンジン `strata-image` が作ります。setup が文章のエンジンと一緒にビルドし、同じ SYCL のカーネルでどのメーカーの GPU でも動きます。
 画像の注意は、Intel の GPU では oneDNN、AMD の GPU では aotriton（どちらもパッケージに入ります）、NVIDIA の GPU では cuDNN が入っていれば cuDNN（contrib-llvm。`xestrata --setup` が入れ方を示します）で取り、ほかは XeStrata の核で取ります。画像のモデルの積は、GPU の計算ライブラリが int8 の積を持つとき（contrib-llvm の Intel・NVIDIA、AMD）は重みと活性を int8 にして掛けます。
@@ -1326,14 +1376,14 @@ API では `steps`（既定はそれぞれのステップ数）、CFG の強さ 
 編集（`POST /v1/images/edits`、Web のページの Images のタブ、会話の `edit_image`）は、エンジンが編集用の画像のモデルに差し替えて作ります。参照画像は 3 枚まで（編集のモデルの学習と同じ）、ステップ数の既定は Turbo が 4、ほかの 2 つは 30 です。使っていない方の画像のモデルは 8 ビットのまま RAM に残し（`--image-dit-keep off` なら残さず、差し替えのたびにファイルから読み直します）、差し替えは数秒です。
 Mage-Flow の重みは MIT ですが、Microsoft の README は研究のためのモデルで、製品やサービスに使うことは想定していないとしています。XeStrata は Mage-Flow の内容のフィルターも透かしも入れていません。
 
-サーバーは `POST /v1/images/generations`（OpenAI の images API の形。`seed` と、Qwen-Image-2.1 では `steps` も受けます）で画像を作り、Web のページには「Images」のタブが出ます。
-画像の API は vLLM-Omni 互換（OpenAI 互換）で、vLLM-Omni の拡張の項目も受けます。`num_inference_steps` は `steps` と同じです（Turbo は 8 ステップのままで、ステップ数の指定は無視します）。`true_cfg_scale` を 1 より大きくして `negative_prompt` を付けると、Qwen-Image-2.1 に CFG を掛けます（diffusers の Qwen-Image-2.1 と同じ式です。条件ありとネガティブの 2 つ分を計算するので、時間は 1024×1024 で約 2 倍、512×512 では約 1.5 倍です）。どちらかが欠けていればガイダンスなしで、`guidance_scale` は Qwen-Image-2.1 では使いません。
-`output_format` は `png`（既定）、`jpeg`、`webp` で、`output_compression`（0〜100、既定 100）が jpeg と webp の画質になります。`quality` は Qwen-Image-2.1 でステップ数を決めます（`low` 20、`medium` 30、`high` と `auto` は既定の 40。`steps` を付けたときはそちら）。Turbo では 8 ステップのままです。応答の `usage` は画像のエンジンのトークンで数えます（プロンプトのトークンと、参照画像と作った画像の 16×16 画素で 1 つのトークン）。
+サーバーは `POST /v1/images/generations`（OpenAI の images API の形。`seed` と `steps` も受けます）で画像を作り、Web のページには「Images」のタブが出ます。
+画像の API は vLLM-Omni 互換（OpenAI 互換）で、vLLM-Omni の拡張の項目も受けます。`num_inference_steps` は `steps` と同じです（Turbo は 8 ステップのままで、ステップ数の指定は無視します）。`true_cfg_scale` を 1 より大きくして `negative_prompt` を付けると、Qwen-Image-2.1 と Turbo に CFG を掛けます（diffusers の Qwen-Image-2.1 と同じ式です。条件ありとネガティブの 2 つ分を計算するので、時間は 1024×1024 で約 2 倍、512×512 では約 1.5 倍です）。どちらかが欠けていればガイダンスなしで、`guidance_scale` は Qwen-Image-2.1 と Turbo では使いません。
+`output_format` は `png`（既定）、`jpeg`、`webp` で、`output_compression`（0〜100、既定 100）が jpeg と webp の画質になります。`quality` は Qwen-Image-2.1 でステップ数を決めます（`low` 20、`medium` と `standard` 30、`high`・`hd`・`auto` は既定の 40。`steps` を付けたときはそちら）。Turbo では 8 ステップのままで、Mage-Flow では使いません。応答の `usage` は画像のエンジンのトークンで数えます（プロンプトのトークンと、参照画像と作った画像の 16×16 画素で 1 つのトークン）。
 `background` を `transparent` にすると、Qwen の推奨する形でプロンプトを包み、透明な背景の画像（アルファ付きの PNG か webp）を作ります（jpeg とは組み合わせられません）。`opaque` はアルファを白の上に重ねて消し、`auto`（既定）はモデルの作ったままにします。編集の参照画像のアルファも、そのまま画像のモデルに渡します。
-`POST /v1/images/edits`（OpenAI の形の multipart で `image` か `image[]`、または JSON の `images: [{"image_url": ...}]`）は、参照画像（10 枚まで、PNG・JPEG・GIF・BMP）を元に画像を作ります。`mask`（OpenAI と同じく、1 枚目の画像と同じ大きさのアルファ付き PNG）を付けると、その透明な部分だけを描き直し、残りは 1 枚目の画像の画素のまま残します（各ステップでマスクの外の潜在を元の画像のものに戻し、最後に元の画素と合成します）。参照画像は、出力の大きさにかかわらず 1 枚ずつ縦横比を保った約 1024×1024 画素で読みます（diffusers の Qwen-Image-2.1 と同じ）。参照画像が多いほど時間とメモリがかかります（B70 の 1024×1024 で 3 枚は約 46 秒、10 枚は約 4 分）。参照画像のトークンの K と V のキャッシュ（1024×1024 の 1 枚で約 2 GB）は、VRAM に入らない分をピン留めした RAM に置いて毎ステップ運びます。それでも VRAM か RAM が足りない画像は、作り始める前にエラー（400）で断ります。参照画像を書き換えたり、その中の人や物を主題にしたりできます。`size` を `auto` にすると、参照画像の縦横比で約 1024×1024 画素にします。Web のページでも、Images のタブで画像を添付すると編集になります。
+`POST /v1/images/edits`（OpenAI の形の multipart で `image` か `image[]`、または JSON の `images: [{"image_url": ...}]`）は、参照画像（10 枚まで。PNG・JPEG・GIF・BMP はそのまま、WebP などほかの形式は PNG に変えて読みます）を元に画像を作ります。`mask`（OpenAI と同じく、1 枚目の画像と同じ大きさのアルファ付き PNG）を付けると、その透明な部分だけを描き直し、残りは 1 枚目の画像の画素のまま残します（各ステップでマスクの外の潜在を元の画像のものに戻し、最後に元の画素と合成します）。参照画像は、出力の大きさにかかわらず 1 枚ずつ縦横比を保った約 1024×1024 画素で読みます（diffusers の Qwen-Image-2.1 と同じ。Mage-Flow では、画像の読み手が長い辺 384 ピクセル以下で、VAE が出力の大きさで読みます）。参照画像が多いほど時間とメモリがかかります（B70 の 1024×1024 で 3 枚は約 46 秒、10 枚は約 4 分）。参照画像のトークンの K と V のキャッシュ（1024×1024 の 1 枚で約 2 GB）は、VRAM に入らない分をピン留めした RAM に置いて毎ステップ運びます。それでも VRAM か RAM が足りない画像は、作り始める前にエラー（400）で断ります。参照画像を書き換えたり、その中の人や物を主題にしたりできます。`size` を `auto` にすると、参照画像の縦横比で約 1024×1024 画素にします。Web のページでも、Images のタブで画像を添付すると編集になります。
 会話からも画像を作れます。`/v1/chat/completions` に `"strata_images": true` を付けると（Web のページは付けます）、モデルに `generate_image` と `edit_image` の道具を渡し、モデルが呼ぶとサーバーが画像を作ってその場に出します。`edit_image` は、会話の最後の画像（添付したものか、会話で作ったもの）を直します。`/v1/responses` では OpenAI の組み込みの `image_generation` の道具を付けると同じことをし、作った画像を `image_generation_call` の項目（`result` に画像の base64、`size`・`quality`・`background`・`output_format`・`revised_prompt` も）で返します。道具の `size`・`quality`・`output_format`・`output_compression`・`background` は、その道具で作る画像に使います（`size` が `auto` ならモデルの指定した大きさ）。
 大きさは一辺 256〜2048 ピクセルです。辺が 16 の倍数でない大きさ（1920×1080 など）は、16 の倍数に切り上げた大きさ（1920×1088）で作って真ん中を切り出し、Web のページはそのことを知らせます。
-画像のエンジンは最初の画像で起動して、そのまま残ります。カーネルの準備は 1 度だけで、同じプロンプトの文の状態と VRAM に載せた層は次の画像まで残ります。
+画像のエンジンは最初の画像で起動して、そのまま残ります。エンジンはサーバーとは別のプロセスで、文章のモデルを替えても残り、どのサーバーもつながらなくなって 30 分（設定の `daemon_idle_s`）たつと終わります。カーネルの準備は 1 度だけで、同じプロンプトの文の状態と VRAM に載せた層は次の画像まで残ります。
 画像の仕事は GPU で 1 つずつ動きます。エンジンは仕事の前に、その画像に要る VRAM（最低限と、DiT を全部載せて VAE を 1 回で回せる量）を答え、文章のモデルの扱いは `--image-gpu-policy` で決めます: `keep`（そのまま）、`shrink`（`--vram-elastic` で VRAM を空ける）、`unload`（会話を保存して外し、次の起動で戻す）、`auto`（既定。全部が入れば `keep`、入らなければ空けられるときは `shrink`、最低限が入るなら層を流し込んで `keep`、それも入らなければ `unload`）。
 仕事のあと、`keep` で VRAM に余裕があるときだけ画像のエンジンは層を残し、それ以外は持っているものを手放します（待機中はプロセスだけの約 200 MiB）。
 `tools/image/install.py --config <設定>` で、入っているモデルにあとから足せます。
@@ -1461,7 +1511,7 @@ Strata の設計、測定、ボトルネックは、upstream の論文 **[docs/p
 
 XeStrata は全体が [LGPL-3.0-or-later](../COPYING.LESSER) です。
 Strata と ggml / llama.cpp（どちらも MIT）から来たコードも XeStrata の一部として LGPL で、著作権表示と許諾表示は [NOTICE](../NOTICE) にあります。
-例外は、元のライセンスのままの intel/llvm へのパッチと oneMath への変更、`ggml-common.h`、Outfit、`third_party/nonfree/` です（下）。
+例外は、元のライセンスのままの intel/llvm へのパッチと oneMath への変更、`third_party/main/` の写し（`ggml-common.h`、`ggml-common-tq.h`、`quantscope.py`、`stb_image.h`、Outfit）と AOTriton へのパッチ、`third_party/nonfree/` です（下と [third_party/main/README.md](../third_party/main/README.md)）。
 モデルのファイルは XeStrata に含まれず、それぞれのライセンスが適用されます（下）。
 
 - **元のソフトウェア**: Niko1221 と Strata の貢献者による [Strata](https://github.com/Niko1221/Strata)。
@@ -1470,7 +1520,11 @@ Strata と ggml / llama.cpp（どちらも MIT）から来たコードも XeStra
   Coder は [ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF)
   （カードによれば Apache-2.0）で、Strata での対応は @pjgmobile の PR #54 によるものです。
   Swift 1.5 は UkisAI の [ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF](https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF)。
-  UD-IQ4_XS と UD-Q4_K_XL は Unsloth の [unsloth/Qwen3.8-Flash-Next-GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF)。
+  UD-IQ4_XS、UD-Q4_K_XL、UD-Q5_K_XL、UD-Q6_K_XL、Q8_0 は Unsloth の [unsloth/Qwen3.8-Flash-Next-GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF)。
+  Gyro は agentionai の [agentionai/Qwen3.8-Flash-Next-Gyro-GGUF](https://huggingface.co/agentionai/Qwen3.8-Flash-Next-Gyro-GGUF)。
+  abliterated 版は huihui-ai の [huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF)。
+  ほかのモデルは、Ornith AI の [Ornith-1.5](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF)（GSQ-RCO は pfeifferj の[再現](https://huggingface.co/pfeifferj/Ornith-1.5-35B-A3B-GSQ-RCO-GGUF)）、LLM-jp の [llm-jp-4.1](https://huggingface.co/llm-jp/llm-jp-4.1-32b-a3b-thinking-gguf)、Qwen の [Qwen3.6-35B-A3B](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF) と Z.ai の [GLM-5.3-Flash](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF)（どちらも GGUF は Unsloth）。
+  画像のモデルは、Qwen の Qwen-Image-2.1 と Qwen-Image-2.1-Turbo（GGUF は Unsloth）、Microsoft の Mage-Flow（Comfy-Org の safetensors）、文の読み手の Qwen3-VL（Unsloth、AtomicChat、huihui-ai と noctrex の版）（[IMAGE](IMAGE.ja.md#ライセンス)）。
   重みにはそれぞれのライセンスが適用されます。
 - **[llama.cpp / ggml](https://github.com/ggml-org/llama.cpp)**（MIT）: i-quant の形式、`src/kernels/xe/` に書き写した GPU の内積と展開、
   i-quant のエキスパートのためにリンクする CPU のバックエンド、画像のエンコーダー（`tools/vision/`）の `mtmd` のライブラリと GPU のバックエンド（Vulkan、SYCL）、
@@ -1480,6 +1534,8 @@ Strata と ggml / llama.cpp（どちらも MIT）から来たコードも XeStra
 - **[intel/llvm](https://github.com/intel/llvm)** の DPC++（Apache-2.0 WITH LLVM-exception）: free と contrib-llvm のコンパイラと SYCL のランタイム。
   リポジトリには含めず、`tools/intel_llvm_build.py` がリリースを取ってきてビルドします。
   そのとき当てる XeStrata の修正は `third_party/main/intel-llvm/patches/` にあり、intel/llvm と同じライセンスです。`third_party/main/intel-llvm/LICENSE.TXT` を参照。
+- **画像のエンジンの部品**: 注意の計算に [oneDNN](https://github.com/uxlfoundation/oneDNN)（Apache-2.0、Intel の GPU）、[AOTriton](https://github.com/ROCm/aotriton)（MIT、AMD の GPU。中のカーネルは aiter（MIT）、FlyDSL（Apache-2.0）、Triton（MIT）の一部を含むことがあります）、[cuDNN Frontend](https://github.com/NVIDIA/cudnn-frontend)（Apache-2.0、一部 MIT、contrib-llvm の NVIDIA の GPU）、参照画像の読み込みに [stb_image](https://github.com/nothings/stb)（MIT か Unlicense）。Windows では AOTriton に [XZ Utils](https://tukaani.org/xz/) の liblzma（0BSD）をリンクします。
+- **[quantscope](https://github.com/1872183316/quantscope)**（MIT か Apache-2.0）: `setup.py --inspect` が GGUF の中身を確かめるのに使います。
 - **[ROCm のデバイスライブラリ](https://github.com/ROCm/llvm-project/tree/f30ae3e6b680ad23dcf522e668c6d4c5c90838d0/amd/device-libs)**（University of Illinois/NCSA、AMD）: ocml・ockl などの、AMD の GPU 向けのコードがリンクするライブラリ。
   リポジトリには含めず、`tools/intel_llvm_build.py` が ROCm の llvm-project のリリースから取ってきて、intel/llvm と一緒にビルドします。`third_party/main/rocm-device-libs/LICENSE.TXT` を参照。
   そのビルドに渡す機能の指定は、Debian の [rocm-llvm](https://salsa.debian.org/rocm-team/rocm-llvm) のパッケージ（Expat、著作者は NOTICE）の `debian/rules` から写しました。

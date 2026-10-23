@@ -253,6 +253,52 @@ every run from a cold OS cache:
 
 The answers were the same tokens in every run.
 
+### Or: Unsloth's UD-Q5_K_XL, UD-Q6_K_XL and Q8_0 (EXPERIMENTAL)
+
+Unsloth's 5-, 6- and 8-bit files can be chosen too (six shards each, upstream 0.1.44).
+Their experts' gate and up are Q5_K, Q6_K and Q8_0, their downs Q8_0, which the engine's expert kernels read as they are.
+XeStrata has not run these files, so setup marks them experimental.
+The RAM is handled as for UD-Q4_K_XL: with less RAM than below, a RAM budget of the experts is kept in RAM and the rest read from the SSD.
+
+| Size | Download | Experts | RAM, about |
+| --- | ---: | ---: | ---: |
+| UD-Q5_K_XL | 158 GB | 98 GB | 108 GB |
+| UD-Q6_K_XL | 169 GB | 109 GB | 118 GB |
+| Q8_0 | 188 GB | 128 GB | 136 GB |
+
+```sh
+./setup.sh --setup --family unsloth --model UD-Q5_K_XL
+```
+
+### Or: Gyro-S and Gyro-M
+
+**[Gyro](https://huggingface.co/agentionai/Qwen3.8-Flash-Next-Gyro-GGUF)** is agentionai's quantization of the original model (upstream ba64156fd).
+Its experts are rotated by Hadamard matrices and stored in trellis formats (TQ2_T, TQK6, TQK7).
+The memory it needs is VRAM and RAM together: 27.6 GB for Gyro-S, 35 GB for Gyro-M.
+The files hold the n-gram table too (read from the SSD), so the downloads are 58 GB and 92 GB.
+Gyro-M is about IQ3_XXS's quality with about 20% less GPU memory.
+Gyro-S is the smallest, of a lower quality than the 2- and 3-bit sizes, and Q2_0 decodes faster.
+Images work too. The model's license is Qwen3.8-Flash-Next's, the Qwen Community License 1.0.
+
+```sh
+./setup.sh --setup --family gyro --model Gyro-M
+```
+
+### Or: huihui-ai's abliterated versions
+
+**[huihui-ai's abliterated versions](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF)** have the refusal direction removed from the model (abliteration).
+They refuse far less, and their safety filtering is weaker, so check what they write.
+
+- `--family huihui-swift`: Swift 1.5's IQ2_XS and IQ3_XXS, under the Swift Open License 1.0.
+- `--family huihui-unsloth`: Unsloth's UD-IQ4_XS, UD-Q4_K_XL and Q8_0, under the Qwen Community License 1.0.
+
+The files' names, shards and sizes are the originals'; the weights differ. The picture readers are the originals'.
+The experimental speed projection does not work with them.
+
+```sh
+./setup.sh --setup --family huihui-swift --model IQ2_XS
+```
+
 ### Or: models other than Qwen3.8-Flash-Next (Ornith-1.5, llm-jp-4.1, Qwen3.6-35B-A3B, GLM-5.3-Flash)
 
 setup's first question also offers four MoE models built differently from Qwen3.8-Flash-Next.
@@ -272,24 +318,26 @@ GPU's VRAM and the rest in RAM (the ones VRAM does not hold are handled as for Q
   active per token; setup offers contexts up to 256K. Its attention is KDA (linear attention) and DSA (attention over
   the tokens it selects), with four residual streams (mHC). The GGUFs are Unsloth's UD-IQ1_S, UD-IQ3_XXS and UD-IQ4_XS.
 
-| Model | Size | Download |
-| --- | --- | ---: |
-| Ornith-1.5 | **Q4_K_M** | 21.7 GB |
-| | Q5_K_M | 25.3 GB |
-| | **Q6_K** | 29.2 GB |
-| | Q8_0 | 37.8 GB |
-| | **BF16** | 71.1 GB |
-| | **GSQ-RCO-3BIT** | 13.0 GB |
-| | GSQ-RCO-3.5BIT | 15.2 GB |
-| llm-jp-4.1 | **Q4_K_M** | 21.5 GB |
-| | BF16 | 64.3 GB |
-| Qwen3.6-35B-A3B | **UD-Q4_K_XL** | 22.9 GB |
-| | **UD-Q6_K_XL** | 32.6 GB |
-| | Q8_0 | 37.8 GB |
-| GLM-5.3-Flash | **UD-IQ1_S** | 93.1 GB |
-| | **UD-IQ3_XXS** | 120.4 GB |
-| | UD-IQ4_XS | 156.8 GB |
+| Model | Size | Download | RAM, about | VRAM |
+| --- | --- | ---: | ---: | ---: |
+| Ornith-1.5 | **Q4_K_M** | 21.7 GB | 30 GB | 4 GB and up |
+| | Q5_K_M | 25.3 GB | 34 GB | 6 GB and up |
+| | **Q6_K** | 29.2 GB | 38 GB | 6 GB and up |
+| | Q8_0 | 37.8 GB | 46 GB | 6 GB and up |
+| | **BF16** | 71.1 GB | 80 GB | 8 GB and up |
+| | **GSQ-RCO-3BIT** | 13.0 GB | 21 GB | 4 GB and up |
+| | GSQ-RCO-3.5BIT | 15.2 GB | 24 GB | 6 GB and up |
+| llm-jp-4.1 | **Q4_K_M** | 21.5 GB | 30 GB | 4 GB and up |
+| | BF16 | 64.3 GB | 73 GB | 8 GB and up |
+| Qwen3.6-35B-A3B | **UD-Q4_K_XL** | 22.9 GB | 31 GB | 4 GB and up |
+| | **UD-Q6_K_XL** | 32.6 GB | 41 GB | 6 GB and up |
+| | Q8_0 | 37.8 GB | 46 GB | 6 GB and up |
+| GLM-5.3-Flash | **UD-IQ1_S** | 93.1 GB | 101 GB | 12 GB and up |
+| | **UD-IQ3_XXS** | 120.4 GB | 128 GB | 12 GB and up |
+| | UD-IQ4_XS | 156.8 GB | 165 GB | 12 GB and up |
 
+The RAM is about the download's size plus 8 GB (for GLM-5.3-Flash, RAM and VRAM together).
+With less, the experts that RAM and VRAM do not hold are read from the model's files, which is slower.
 The sizes in bold are the files whose answers this release compared with llama.cpp's.
 The others are made of the same tensor types, checked on those files and in the kernels' tests (setup marks them
 "untested").
@@ -334,7 +382,7 @@ The engine's options (added to the settings' `args`):
 
 ### Less RAM than the model: the low-RAM mode
 
-Every model but Unsloth's two keeps all of its experts in RAM, and the GPU holds a copy of the most-used ones.
+Every model but Unsloth's sizes (huihui-ai's versions of them too) keeps all of its experts in RAM, and the GPU holds a copy of the most-used ones.
 When the experts do not fit the RAM (with about 10 GB left for the rest), setup chooses the low-RAM mode (`--low-ram auto`, the default).
 The fewer experts the GPU holds, the more are read from the files, and the slower it is.
 The engine then reads the experts from the model files instead of copying them all into RAM:
@@ -1335,6 +1383,8 @@ the model uses interleaved M-RoPE.
 
 ## Image generation (optional)
 
+How to use it, its options and the API's fields are listed in [IMAGE](IMAGE.md); this section also explains how it works inside.
+
 `./setup.sh --images qwen-image-turbo` sets up image generation with Qwen-Image-2.1-Turbo beside the text model (upstream 0.1.44).
 Images are made by XeStrata's own image engine, `strata-image`, which setup builds with the text engine: the same SYCL kernels, on every maker's GPU.
 The image attention runs through oneDNN on Intel GPUs and aotriton on AMD GPUs (both in the packages), through cuDNN on NVIDIA GPUs where it is installed (contrib-llvm; `xestrata --setup` says how), and through XeStrata's own kernel elsewhere. Where the GPU's math library has int8 products (Intel and NVIDIA in the contrib-llvm mode, AMD), the image models' products take int8 weights and activations.
@@ -1357,14 +1407,14 @@ The API takes `steps` (each model's count by default), the CFG scale as `true_cf
 Edits (`POST /v1/images/edits`, the Images tab of the web page, the chat's `edit_image`) are made with the edit image model, which the engine switches to. An edit takes up to 3 reference images (as the edit models were trained), in 4 steps by default with Turbo and 30 with the other two. The image model not in use stays in RAM in 8 bits (`--image-dit-keep off` lets it go and reads it from the file again at each switch); a switch takes a few seconds.
 Mage-Flow's weights are under MIT, but Microsoft's README says the models are for research and not meant for products or services. XeStrata adds no content filter and no watermark for Mage-Flow.
 
-The server makes images on `POST /v1/images/generations` (OpenAI's images API, plus `seed`, and `steps` with Qwen-Image-2.1), and the web page gets an Images tab.
-The image API is vLLM-Omni compatible (OpenAI compatible), vLLM-Omni's extra fields included: `num_inference_steps` is `steps` (Turbo keeps its 8 steps and ignores a number of steps asked for); `true_cfg_scale` above 1 with a `negative_prompt` puts classifier-free guidance on Qwen-Image-2.1 (diffusers' Qwen-Image-2.1 formula; with the prompt's and the negative prompt's both computed, it takes about twice as long at 1024x1024 and 1.5 times at 512x512). Without either, there is no guidance, and `guidance_scale` has no use with Qwen-Image-2.1.
-`output_format` is `png` (the default), `jpeg` or `webp`, with `output_compression` (0 to 100, default 100) the quality jpeg and webp are written at. `quality` sets Qwen-Image-2.1's steps (`low` 20, `medium` 30, `high` and `auto` the default 40; `steps`, when given, wins); Turbo keeps its 8. The answer's `usage` counts the image engine's tokens: the prompt's, and one for each 16x16 pixels of the reference images and of the images made.
+The server makes images on `POST /v1/images/generations` (OpenAI's images API, plus `seed` and `steps`), and the web page gets an Images tab.
+The image API is vLLM-Omni compatible (OpenAI compatible), vLLM-Omni's extra fields included: `num_inference_steps` is `steps` (Turbo keeps its 8 steps and ignores a number of steps asked for); `true_cfg_scale` above 1 with a `negative_prompt` puts classifier-free guidance on Qwen-Image-2.1 and Turbo (diffusers' Qwen-Image-2.1 formula; with the prompt's and the negative prompt's both computed, it takes about twice as long at 1024x1024 and 1.5 times at 512x512). Without either, there is no guidance, and `guidance_scale` has no use with Qwen-Image-2.1 and Turbo.
+`output_format` is `png` (the default), `jpeg` or `webp`, with `output_compression` (0 to 100, default 100) the quality jpeg and webp are written at. `quality` sets Qwen-Image-2.1's steps (`low` 20, `medium` and `standard` 30, `high`, `hd` and `auto` the default 40; `steps`, when given, wins); Turbo keeps its 8, and Mage-Flow does not use it. The answer's `usage` counts the image engine's tokens: the prompt's, and one for each 16x16 pixels of the reference images and of the images made.
 `background` `transparent` wraps the prompt in the form Qwen recommends for it and makes an image with a transparent background (a PNG or webp with alpha; not with jpeg); `opaque` flattens the alpha on white, and `auto` (the default) keeps what the model made. An edit's reference images reach the image model with their alpha.
-`POST /v1/images/edits` (OpenAI's multipart form with `image` or `image[]`, or JSON with `images: [{"image_url": ...}]`) makes an image from reference images (up to 10; PNG, JPEG, GIF, BMP); with a `mask` (as OpenAI's: a PNG with an alpha channel, the first image's size) only its transparent part is drawn again and the rest stays the first image's pixels (each step puts the latent outside the mask back to the image's, and the end blends in its pixels). Each reference image is read at about 1024x1024 pixels in its own shape, whatever the size made (as diffusers' Qwen-Image-2.1). More reference images take longer and more memory (on the B70 at 1024x1024, about 46 s with 3 and 4 minutes with 10): the K and V cache of their tokens (about 2 GB for one at 1024x1024) goes, as far as it does not fit in VRAM, to pinned RAM and is copied in at each step, and an image for which even that leaves the VRAM or the RAM short is refused (400) before it starts. An edit can change them, or take the people and things in them as its subject. `size` `auto` takes the first reference's shape at about 1024x1024 pixels. On the web page, an image attached in the Images tab makes an edit.
+`POST /v1/images/edits` (OpenAI's multipart form with `image` or `image[]`, or JSON with `images: [{"image_url": ...}]`) makes an image from reference images (up to 10; PNG, JPEG, GIF and BMP as they are, other formats such as WebP turned into PNG first); with a `mask` (as OpenAI's: a PNG with an alpha channel, the first image's size) only its transparent part is drawn again and the rest stays the first image's pixels (each step puts the latent outside the mask back to the image's, and the end blends in its pixels). Each reference image is read at about 1024x1024 pixels in its own shape, whatever the size made (as diffusers' Qwen-Image-2.1; Mage-Flow's picture reader reads them with the long side at 384 pixels or less, its VAE at the size made). More reference images take longer and more memory (on the B70 at 1024x1024, about 46 s with 3 and 4 minutes with 10): the K and V cache of their tokens (about 2 GB for one at 1024x1024) goes, as far as it does not fit in VRAM, to pinned RAM and is copied in at each step, and an image for which even that leaves the VRAM or the RAM short is refused (400) before it starts. An edit can change them, or take the people and things in them as its subject. `size` `auto` takes the first reference's shape at about 1024x1024 pixels. On the web page, an image attached in the Images tab makes an edit.
 A conversation can make images too: `/v1/chat/completions` with `"strata_images": true` (the web page sends it) gives the model the tools `generate_image` and `edit_image`, and when it calls one the server makes the image and shows it there; `edit_image` changes the conversation's last image (one attached or one made in it). On `/v1/responses`, OpenAI's hosted `image_generation` tool does the same, and the image comes back as an `image_generation_call` item (its `result` the image in base64, with its `size`, `quality`, `background`, `output_format` and `revised_prompt`). The tool's `size`, `quality`, `output_format`, `output_compression` and `background` are used for the images it makes (`size` `auto`: the size the model asks for).
 Each side is 256 to 2048 pixels. A size whose sides are not multiples of 16 (1920x1080) is made at the sides rounded up (1920x1088) and its middle cut out; the web page says so.
-The image engine starts with the first image and stays: its kernels are prepared once, and the same prompt's text states and the layers it holds in VRAM are kept for the next image.
+The image engine starts with the first image and stays; it is a process apart from the server, stays when the text model is changed, and ends 30 minutes (the config's `daemon_idle_s`) after the last server leaves: its kernels are prepared once, and the same prompt's text states and the layers it holds in VRAM are kept for the next image.
 Image jobs run one at a time on the GPU. Before a job the engine says what the image needs in VRAM (the least, and the DiT whole with the VAE in one piece), and what the text model does meanwhile is `--image-gpu-policy`: `keep` (stays as it is), `shrink` (gives VRAM back through `--vram-elastic`), `unload` (its conversation saved, unloaded, restored at the next start), or `auto` (the default: `keep` when everything fits, else `shrink` when the engine can, else `keep` with the layers streamed when the least fits, else `unload`).
 After a job the image engine keeps its layers only under `keep` with VRAM to spare; otherwise it lets go of what it holds (idle, the process alone, about 200 MiB).
 `tools/image/install.py --config <config>` adds it to an existing install.
@@ -1493,7 +1543,7 @@ Strata's design, measurements and bottlenecks are in upstream's paper, **[docs/p
 
 The whole of XeStrata is under the [LGPL-3.0-or-later](../COPYING.LESSER).
 The code from Strata and from ggml / llama.cpp (both MIT) is part of it under the LGPL too; their copyright and permission notices are in [NOTICE](../NOTICE).
-The exceptions stay under their own licenses: the patches to intel/llvm, the changes to oneMath, `ggml-common.h`, Outfit and `third_party/nonfree/` (below).
+The exceptions stay under their own licenses: the patches to intel/llvm, the changes to oneMath, the copies in `third_party/main/` (`ggml-common.h`, `ggml-common-tq.h`, `quantscope.py`, `stb_image.h`, Outfit) and the patch to AOTriton, and `third_party/nonfree/` (below and [third_party/main/README.md](../third_party/main/README.md)).
 The model files are not part of it; their licenses apply to them (below).
 
 - **The original software**: [Strata](https://github.com/Niko1221/Strata) by Niko1221 and the Strata contributors.
@@ -1502,7 +1552,11 @@ The model files are not part of it; their licenses apply to them (below).
   The Coder: [ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF)
   (Apache-2.0 per its card); its support in Strata came from @pjgmobile's PR #54.
   Swift 1.5: [ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF](https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF) by UkisAI.
-  UD-IQ4_XS and UD-Q4_K_XL: [unsloth/Qwen3.8-Flash-Next-GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) by Unsloth.
+  UD-IQ4_XS, UD-Q4_K_XL, UD-Q5_K_XL, UD-Q6_K_XL and Q8_0: [unsloth/Qwen3.8-Flash-Next-GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) by Unsloth.
+  Gyro: [agentionai/Qwen3.8-Flash-Next-Gyro-GGUF](https://huggingface.co/agentionai/Qwen3.8-Flash-Next-Gyro-GGUF) by agentionai.
+  The abliterated versions: [huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF) by huihui-ai.
+  The other models: [Ornith-1.5](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF) by Ornith AI (the GSQ-RCO ones pfeifferj's [reproduction](https://huggingface.co/pfeifferj/Ornith-1.5-35B-A3B-GSQ-RCO-GGUF)), [llm-jp-4.1](https://huggingface.co/llm-jp/llm-jp-4.1-32b-a3b-thinking-gguf) by LLM-jp, [Qwen3.6-35B-A3B](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF) by Qwen and [GLM-5.3-Flash](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF) by Z.ai (both GGUFs by Unsloth).
+  The image models: Qwen's Qwen-Image-2.1 and Qwen-Image-2.1-Turbo (GGUFs by Unsloth), Microsoft's Mage-Flow (Comfy-Org's safetensors), and the text encoders, Qwen3-VL (Unsloth's, AtomicChat's, and huihui-ai's by noctrex) ([IMAGE](IMAGE.md#licenses)).
   Their licenses apply to the weights.
 - **[llama.cpp / ggml](https://github.com/ggml-org/llama.cpp)** (MIT): the i-quant formats, the GPU dot products and dequantizers transcribed in `src/kernels/xe/`,
   the CPU backend linked for the i-quant experts, the `mtmd` library and the GPU backends (Vulkan, SYCL) behind the image encoder (`tools/vision/`),
@@ -1512,6 +1566,8 @@ The model files are not part of it; their licenses apply to them (below).
 - **[intel/llvm](https://github.com/intel/llvm)**'s DPC++ (Apache-2.0 WITH LLVM-exception): the free and contrib-llvm modes' compiler and SYCL runtime.
   It is not in the repository: `tools/intel_llvm_build.py` fetches the release and builds it,
   with XeStrata's fixes from `third_party/main/intel-llvm/patches/`, under intel/llvm's license. See `third_party/main/intel-llvm/LICENSE.TXT`.
+- **The image engine's parts**: for the attention, [oneDNN](https://github.com/uxlfoundation/oneDNN) (Apache-2.0, Intel GPUs), [AOTriton](https://github.com/ROCm/aotriton) (MIT, AMD GPUs; its kernels can carry parts of aiter (MIT), FlyDSL (Apache-2.0) and Triton (MIT)) and [cuDNN Frontend](https://github.com/NVIDIA/cudnn-frontend) (Apache-2.0, parts MIT, NVIDIA GPUs in the contrib-llvm mode); for reading reference images, [stb_image](https://github.com/nothings/stb) (MIT or the Unlicense). On Windows AOTriton links [XZ Utils](https://tukaani.org/xz/)' liblzma (0BSD).
+- **[quantscope](https://github.com/1872183316/quantscope)** (MIT or Apache-2.0): what `setup.py --inspect` reads a GGUF's contents with.
 - **[ROCm's device libraries](https://github.com/ROCm/llvm-project/tree/f30ae3e6b680ad23dcf522e668c6d4c5c90838d0/amd/device-libs)** (University of Illinois/NCSA, by AMD): ocml, ockl and the others, which the code for AMD GPUs links.
   They are not in the repository: `tools/intel_llvm_build.py` fetches them from a release of ROCm's llvm-project and builds them with intel/llvm. See `third_party/main/rocm-device-libs/LICENSE.TXT`.
   The target features their build is given are transcribed from the `debian/rules` of Debian's [rocm-llvm](https://salsa.debian.org/rocm-team/rocm-llvm) package (Expat; its authors in NOTICE).
