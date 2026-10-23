@@ -4028,10 +4028,12 @@ int main(int argc, char** argv) {
     // Layer split across GPUs (upstream e50f2663, 12c099b3, 13f70a34): every GPU holds only the dense weights of ITS
     // layers (the PLE tensors stay everywhere).  A full copy on each card (~1.5 GB for IQ2_XS) is VRAM the expert cache
     // wants: upstream's opt-in STRATA_STAGE_TRIM=1 is always on here (IQ2_XS, 8 GB cards: hits 22% -> 32%, 7% faster).
-    // (Upstream efec5694 keeps CUDA0's routers for RouterLookahead, which the Xe engine does not have.)
     const std::set<std::string> skip_base = skip;
     const bool stage_trim = multi_gpu && !split_auto && !split_at.empty();
-    auto add_foreign = [&](int64_t lb, int64_t le, std::set<std::string>& out) {
+    // keep_routers (upstream efec5694): CUDA0 with --mmap-experts keeps every layer's router (ffn_gate_inp, ~2.5 MiB a
+    // layer) - the file tier's routing-aware prefetch (RouterLookahead, below) copies all of them from CUDA0's arena,
+    // and would otherwise turn itself off
+    auto add_foreign = [&](int64_t lb, int64_t le, std::set<std::string>& out, bool keep_routers) {
         std::FILE* f = std::fopen((o.pack + "/index.txt").c_str(), "rb");
         if (!f) return;
         char line[1024], name[256];
@@ -4039,13 +4041,14 @@ int main(int argc, char** argv) {
             if (line[0] == '#' || std::sscanf(line, "%255s", name) != 1) continue;
             const std::string n = name;
             if (n.rfind("blk.", 0) != 0 || n.find("ple") != std::string::npos) continue;
+            if (keep_routers && n.ends_with(".ffn_gate_inp.weight")) continue;
             const int64_t l = std::strtoll(name + 4, nullptr, 10);
             if (l < lb || l >= le) out.insert(n);
         }
         std::fclose(f);
     };
     if (stage_trim) {
-        add_foreign(0, split_at[0], skip);
+        add_foreign(0, split_at[0], skip, o.mmap_experts);
         strata::core::NativeDense::set_layer_range(0, (int) split_at[0]);
         std::fprintf(stderr, "strata generate: layer split: CUDA0 loads the dense weights of layers 0-%lld only\n",
                      (long long) split_at[0] - 1);
@@ -4578,7 +4581,7 @@ int main(int argc, char** argv) {
         if (stage_trim) {
             const int64_t lb = split_at[i], le = i + 1 < split_at.size() ? split_at[i + 1] : g.n_layers;
             skip_s = skip_base;
-            add_foreign(lb, le, skip_s);
+            add_foreign(lb, le, skip_s, false);
             strata::core::NativeDense::set_layer_range((int) lb, (int) le);
             if (!strata::core::WeightTable::pool_bytes(o.pack, pool_s, err, &skip_s)) {
                 std::fprintf(stderr, "strata generate: %s\n", err.c_str());
