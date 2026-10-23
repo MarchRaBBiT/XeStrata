@@ -49,7 +49,7 @@ double DraftPolicy::cost_ms(int t) const {
     // scale from the nearest measured size below: a round's fixed part flattens the measured curve at its small end,
     // and scaled from there the wider sizes came out too dear to be tried (Gyro-M on the RX 9060 XT: 46 ms at one
     // token, 57 at four, the six guessed at 98 against its 74)
-    for (int u = t - 1; u >= 1; --u)
+    for (int u = t - 1; u >= 1 && !scale_all_; --u)
         if (cost_n_[u] > 0) return cost_[u] * kShape[t] / kShape[u];
     // none below: scale from the measured sizes, weighting each by how often it was seen
     double num = 0.0, den = 0.0;

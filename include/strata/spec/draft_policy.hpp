@@ -48,6 +48,13 @@ public:
     double chain_rate(int match) const;
     double lookup_rate(int match) const;   // current q for a match length
     double cost_ms(int t) const;           // measured or scaled round time of a window of t tokens
+    /// Under the min-p window rule (`true`): a size not measured is scaled from every measured size, as upstream does,
+    /// instead of from the nearest one below.  The rule sizes the MTP's window by the drafts' probabilities alone, so
+    /// the costs only weigh a lookup window against it, and in the low-RAM file tier, whose small windows' times swing
+    /// with the SSD, the scaling from below priced the short lookups cheap: on the RX 9060 XT in a 32 GiB cgroup
+    /// (IQ3_XXS, 32K, the text followed, 2026-10-24) it took five short lookup windows where upstream took two of six
+    /// tokens, and decoded 16.6-17.4 tok/s against 17.2-17.7 with the scaling from every size.
+    void set_scale_all(bool on) { scale_all_ = on; }
     /// The tokens a window of t committed before any is observed: a typical acceptance of a draft
     static double prior_tokens(int t) { return 1.0 + 0.7 * (t - 1); }
     /// The MTP's own window, from this round's drafts (the idea of DeepInfer's confidence-scheduled verification,
@@ -73,6 +80,7 @@ private:
 
     int max_t_;
     double margin_;
+    bool scale_all_ = false;
     std::array<double, kMaxT + 1> cost_{}, cost_n_{};      // round ms by window size
     std::array<double, kMaxT + 1> mtp_tok_{}, mtp_n_{};    // tokens committed by MTP windows of that size
     std::array<double, kBuckets> ok_{}, bad_{};            // lookup drafts accepted / windows cut short, decayed

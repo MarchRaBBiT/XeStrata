@@ -11692,6 +11692,7 @@ int main(int argc, char** argv) {
             const strata::core::MtpDrafter::More draft_more = [&](int n, const float* pr) {
                 return req_minp_rule ? pr[n - 1] >= (float) req_spec_min_p : policy.mtp_extend(pr, n, S_mtp);
             };
+            policy.set_scale_all(req_minp_rule);
             while (!pl_ran && !cancelled && produced_n < max_new) {
                 int T = use_mtp ? S_mtp : 1;   // no --mtp: one token a round unless a lookup draft fires
                 if (use_mtp && !req_minp_rule) T = policy.mtp_window(dprob.data(), S_mtp);
@@ -12840,6 +12841,7 @@ int main(int argc, char** argv) {
         strata::spec::DraftPolicy policy(o.spec);   // MTP or lookup window (see draft_policy.hpp)
         // the window rule, as the chain drafts: another draft after n when the rule would keep it (--spec-window)
         const bool minp_rule = o.spec_window == "min-p";
+        policy.set_scale_all(minp_rule);
         const strata::core::MtpDrafter::More draft_more = [&](int n, const float* pr) {
             return minp_rule ? pr[n - 1] >= (float) o.spec_min_p : policy.mtp_extend(pr, n, S_mtp);
         };
