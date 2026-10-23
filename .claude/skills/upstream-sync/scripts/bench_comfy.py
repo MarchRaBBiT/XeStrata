@@ -7,6 +7,7 @@ prompt (the models into memory, the GPU code compiled; a second one when it fail
 stops the server.
 
     COMFY=DIR VENV=.venv-cuda IMAGE_MODEL=qwen-image-turbo [WEIGHTS="int8 bf16"] [PORT=8191] [ROUNDS=2] \\
+      [COMFY_ARGS=...] \\
       python .claude/skills/upstream-sync/scripts/bench_comfy.py OUT GPU       # from the repository root
 
 COMFY: the ComfyUI checkout, its models in its models/ folder (diffusion_models, text_encoders, vae).  VENV: its venv
@@ -14,7 +15,8 @@ for this GPU (relative to COMFY).  ONEAPI_DEVICE_SELECTOR or CUDA_VISIBLE_DEVICE
 IMAGE_MODEL: setup's --images name, qwen-image-turbo (8 steps; ComfyUI has its DiT as int8_convrot alone) or
 mage-flow-turbo (4 steps; int8_convrot and bf16).  WEIGHTS: the DiT's weights to measure, an arm each ("comfy-int8",
 "comfy-bf16"; one the model lacks is left out).  The text encoders are ComfyUI's own files: qwen3vl_8b_int8_convrot
-(Qwen-Image), qwen3vl_4b_bf16 (Mage-Flow); PyTorch's attention (--use-pytorch-cross-attention).
+(Qwen-Image), qwen3vl_4b_bf16 (Mage-Flow); PyTorch's attention (--use-pytorch-cross-attention).  COMFY_ARGS: more of
+ComfyUI's own options (--reserve-vram 3, for one), recorded in the run's JSON.
 OUT/image-runs/GPU-ARM-ROUND.json gets each run's times as bench_image.py writes them (the seconds of the measured
 image from the request to its file; sampling from the KSampler's progress line; no VAE time, ComfyUI does not print
 it), .txt the server's log and .png the image; sync_collect.py OUT reads them with bench_image.py's.
@@ -41,6 +43,7 @@ model = os.environ.get("IMAGE_MODEL") or "qwen-image-turbo"
 port = int(os.environ.get("PORT", "8191"))
 rounds = int(os.environ.get("ROUNDS", str(B.ROUNDS)))
 WARM = "A lighthouse on a cliff at night, oil painting"     # IMAGE_RUNNER's warm-up prompt
+extra = (os.environ.get("COMFY_ARGS") or "").split()
 
 # the DiT files by weights, the steps, and the graph
 DITS = {"qwen-image-turbo": ({"int8": "qwen_image_2.1_turbo_int8_convrot.safetensors"}, 8),
@@ -90,10 +93,10 @@ def one(weights: str, rnd: int, stem: str) -> None:
     logf = runs / f"{stem}.txt"
     base = f"http://127.0.0.1:{port}"
     rec = {"gpu": gpu, "arm": f"comfy-{weights}", "round": rnd, "model": model, "steps": steps, "backend": "comfyui",
-           "quant": weights}
+           "quant": weights, "args": extra}
     with open(logf, "w") as log:
         srv = subprocess.Popen([str(comfy / venv / "bin" / "python"), "main.py", "--listen", "127.0.0.1", "--port",
-                                str(port), "--use-pytorch-cross-attention", "--preview-method", "none"] +
+                                str(port), "--use-pytorch-cross-attention", "--preview-method", "none"] + extra +
                                (["--oneapi-device-selector", os.environ["ONEAPI_DEVICE_SELECTOR"]]
                                 if "ONEAPI_DEVICE_SELECTOR" in os.environ else []),
                                cwd=comfy, stdout=log, stderr=subprocess.STDOUT)
