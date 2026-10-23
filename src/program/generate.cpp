@@ -471,6 +471,7 @@ struct Options {
     /// Plan v0.3 P6: every `adapt_every` rounds, swap up to `adapt_swaps` of the most-routed missing experts into
     /// the VRAM tier in place of the least-routed resident ones (decayed counts).  0 = static residency.
     int adapt_every = 4;
+    bool adapt_every_given = false;   ///< --adapt-every was given: its period stays, none is chosen (auto_adapt_period)
     float adapt_decay = 0.7f;   ///< the usage counts are multiplied by this after each adaptation (--adapt-decay)
     /// an expert is swapped into the VRAM tier only when its decayed routing count beats the one it replaces by more
     /// than this (--adapt-min-gain, upstream 495dc436; both tiers)
@@ -2133,6 +2134,29 @@ bool pcie_move_if_pays(strata::core::ExpertDispatch& d, bool overlap, const stra
     return true;
 }
 
+// The adaptive tier's period when --adapt-every is not given, chosen once, after kAdaptDecideAt tokens of output: a
+// round every 4 windows (16 tokens) while the CPU pool takes a small share of the verify windows, every window (4
+// tokens) once it takes kAdaptPoolShare or more.  A round more often moves the experts the text has turned to into
+// VRAM sooner, which pays where the CPU computes many missed experts; where it computes few the rounds cost more than
+// they save.  Measured 2026-10-23 on one 512-token text that every setting followed (decode, 3 runs each): the pool's
+// share and every window against every 4 - B70 0.10-0.13, IQ3_XXS 1K equal, Gyro-M 1K 6% slower; RX 9060 XT
+// 0.49-0.52, IQ3_XXS +1.7%, Gyro-M +8%; RTX 4070 0.61-0.64, IQ3_XXS +5.5%, Gyro-M +6%.  The share depends on the
+// card's VRAM against the model, the CPU and the link, not on a device's name.  Chosen once and at a position of the
+// text, so the swaps stay at fixed positions (window-invariant output, #152); the 4-token positions include the
+// 16-token ones before them.
+constexpr int64_t kAdaptDecideAt = 32;
+constexpr double kAdaptPoolShare = 0.3;
+
+int64_t auto_adapt_period(const strata::core::Verifier& v, int64_t period, const char* who) {
+    const double all = v.ms_wait + v.ms_pool + v.ms_host + v.ms_commit;
+    const double share = all > 0.0 ? v.ms_pool / all : 0.0;
+    const int64_t next = share >= kAdaptPoolShare ? std::min<int64_t>(period, 4) : period;
+    std::fprintf(stderr, "strata %s: adaptive tier every %lld tokens: the CPU pool took %.0f%% of the verify windows "
+                         "(a round every window from %.0f%%; --adapt-every sets it)\n",
+                 who, (long long) next, 100.0 * share, 100.0 * kAdaptPoolShare);
+    return next;
+}
+
 // After a prompt, the adaptive tier's counts start from the prompt's routing instead of from nothing (as PlainModel's
 // prompt path adds its routing to the counts).  A count is the rows routed to an expert, decayed by `decay` once a
 // period of `period` tokens, so an expert the prompt routed with probability p holds p * period / (1 - decay) rows at
@@ -2568,7 +2592,10 @@ int main(int argc, char** argv) {
         else if (a == "--mtp") o.mtp = next("--mtp");
         else if (a == "--mtp-window") o.mtp_window = std::strtoll(next("--mtp-window"), nullptr, 10);
         else if (a == "--pcie-frac") o.pcie_frac = std::strtod(next("--pcie-frac"), nullptr);
-        else if (a == "--adapt-every") o.adapt_every = (int) std::strtol(next("--adapt-every"), nullptr, 10);
+        else if (a == "--adapt-every") {
+            o.adapt_every = (int) std::strtol(next("--adapt-every"), nullptr, 10);
+            o.adapt_every_given = true;
+        }
         else if (a == "--adapt-decay") o.adapt_decay = std::strtof(next("--adapt-decay"), nullptr);
         else if (a == "--adapt-min-gain") o.adapt_min_gain = std::strtof(next("--adapt-min-gain"), nullptr);
         else if (a == "--adapt-async") o.adapt_async = std::strtol(next("--adapt-async"), nullptr, 10) != 0 ? 1 : 0;
@@ -8149,8 +8176,9 @@ int main(int argc, char** argv) {
         // the adaptive tier at fixed positions of the text, as the generate loop's (window-invariant output, #152):
         // the serial loop of one request; the batch slots, the pipelined windows and --adapt-async keep the per-window
         // rule (each window's rows counted, a round every --adapt-every windows)
-        const int64_t adapt_period =
+        int64_t adapt_period =
             !drive.d.usage.empty() && !ajob && o.batch <= 0 && o.pipeline_windows < 2 ? 4 * (int64_t) o.adapt_every : 0;
+        bool adapt_auto = adapt_period > 0 && !o.adapt_every_given;   // auto_adapt_period, once for the server
         drive.d.usage_by_window = adapt_period > 0;
         for (int st = 0; st < n_stages; ++st) stage_ver(st).set_route_record(adapt_period > 0);
         // the pipelined loop's side (see above): whether stage `st` has no window in flight; per home, the copies back
@@ -11739,6 +11767,10 @@ int main(int argc, char** argv) {
                 bool adapt_ok = true;
                 if (adapt_period > 0)
                     for (int st = 0; st < n_stages; ++st) stage_ver(st).add_routing(drive.d.usage.data(), g.n_expert, a + 1);
+                if (adapt_auto && produced_n >= kAdaptDecideAt) {
+                    adapt_auto = false;
+                    adapt_period = auto_adapt_period(ver, adapt_period, "serve");
+                }
                 if (!drive.d.usage.empty() && !ajob &&
                     (adapt_period > 0 ? (p + a + 1) / adapt_period > p / adapt_period : ((rounds + 1) % o.adapt_every) == 0))
                     adapt_thr = std::thread([&] {
@@ -12607,7 +12639,8 @@ int main(int argc, char** argv) {
         // greedy text with windows of 4 parted from the one with windows of 1 by the fifth token (2026-10-16, RTX 4070).
         // The cut windows cost decode 1.3% there (16 prompts on one text: 57.2 -> 56.5 tok/s); every 32 or 64 tokens
         // with the swaps and the decay scaled to the same rate was slower still (56.0, 55.7)
-        const int64_t adapt_period = drive.d.usage.empty() ? 0 : 4 * (int64_t) o.adapt_every;
+        int64_t adapt_period = drive.d.usage.empty() ? 0 : 4 * (int64_t) o.adapt_every;
+        bool adapt_auto = adapt_period > 0 && !o.adapt_every_given;   // auto_adapt_period, once
         drive.d.usage_by_window = adapt_period > 0;
         ver.set_route_record(adapt_period > 0);
         int64_t swaps_total = 0;
@@ -12914,6 +12947,10 @@ int main(int argc, char** argv) {
             std::thread adapt_thr;
             bool adapt_ok = true;
             if (adapt_period > 0) ver.add_routing(drive.d.usage.data(), g.n_expert, a + 1);
+            if (adapt_auto && (int64_t) produced.size() >= kAdaptDecideAt) {
+                adapt_auto = false;
+                adapt_period = auto_adapt_period(ver, adapt_period, "generate");
+            }
             if (adapt_period > 0 && (p + a + 1) / adapt_period > p / adapt_period)
                 adapt_thr = std::thread([&] {
                     strata::platform::name_this_thread("strata-adapt");
