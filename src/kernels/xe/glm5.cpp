@@ -7,6 +7,7 @@
 // gated_delta_net and swiglu_clamp); MIT License, Copyright (c) 2023-2026 The ggml authors, see
 // third_party/main/ggml/LICENSE.  The KDA step keeps the layout and the sub-group shape of native_gdn.cpp.
 #include "strata/kernels/glm5.hpp"
+#include "strata/kernels/warp32.hpp"
 #include "strata/kernels/f16_bits.hpp"
 #include "strata/kernels/qsa.hpp"
 #include "strata/core/runtime.hpp"
@@ -170,9 +171,9 @@ void glm5_router_sigmoid(const float* logits, const float* bias, int n_tokens, i
         throw core::DeviceError("glm5_router_sigmoid: " + std::to_string(k) + " of " + std::to_string(n_expert) +
                                 " experts (at most 32 picks)");
     const auto event = queue_for(stream).parallel_for(
-        sycl::nd_range<1>((size_t) n_tokens * WARP, WARP), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        sycl::nd_range<1>((size_t) n_tokens * WARP, WARP), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const sycl::sub_group sg = it.get_sub_group();
-            const int t = (int) it.get_group(0), lane = (int) sg.get_local_linear_id();
+            const int t = (int) it.get_group(0), lane = (int) warp32::lane(sg);
             const float* l = logits + (size_t) t * n_expert;
             // pass i: the best below pass i - 1's pick in the order (larger biased score, then lower index)
             float pv = INFINITY, mine = 0.0f;
@@ -198,7 +199,7 @@ void glm5_router_sigmoid(const float* logits, const float* bias, int n_tokens, i
             }
             float div = 1.0f;
             if (norm) {
-                const float sum = sycl::reduce_over_group(sg, lane < k ? mine : 0.0f, sycl::plus<float>());
+                const float sum = warp32::reduce(sg, lane < k ? mine : 0.0f, sycl::plus<float>());
                 div = sycl::fmax(sum, 6.103515625e-05f);   // 2**-14, as llama.cpp
             }
             if (lane < k) weights[(size_t) t * k + lane] = mine / div * scale;
@@ -284,11 +285,11 @@ void glm5_kda_step(float* state, const float* q, const float* k, const float* v,
     // one sub-group a (head, column): its four state rows a lane in registers, as native_gdn_step
     const auto event = queue_for(stream).parallel_for(
         sycl::nd_range<2>({(size_t) H, (size_t) S * WARP}, {1, (size_t) COLS * WARP}),
-        [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int head = (int) it.get_group(0);
-            const int lane = (int) sg.get_local_linear_id();
-            const int col = (int) it.get_group(1) * COLS + (int) sg.get_group_linear_id();
+            const int lane = (int) warp32::lane(sg);
+            const int col = (int) it.get_group(1) * COLS + (int) warp32::index(sg);
             float s[4], kr[4], qr[4], dr[4];
             float kv = 0.0f;
             for (int r = 0; r < 4; ++r) {
@@ -299,14 +300,14 @@ void glm5_kda_step(float* state, const float* q, const float* k, const float* v,
                 qr[r] = q[head * S + i];
                 kv += s[r] * kr[r];
             }
-            kv = sycl::reduce_over_group(sg, kv, sycl::plus<float>());
+            kv = warp32::reduce(sg, kv, sycl::plus<float>());
             const float delta = (v[head * S + col] - kv) * beta[head];
             float o = 0.0f;
             for (int r = 0; r < 4; ++r) {
                 s[r] += kr[r] * delta;
                 o += s[r] * qr[r];
             }
-            o = sycl::reduce_over_group(sg, o, sycl::plus<float>());
+            o = warp32::reduce(sg, o, sycl::plus<float>());
             if (lane == 0) out[head * S + col] = o * scale;
             for (int r = 0; r < 4; ++r) state[((size_t) (r * WARP + lane) * H + head) * S + col] = s[r];
         });
@@ -329,11 +330,11 @@ void glm5_kda_scan(float* state, const float* q, const float* k, const float* v,
     // one sub-group a (head, column): its four state rows a lane in registers, as native_gdn_step
     const auto event = queue_for(stream).parallel_for(
         sycl::nd_range<2>({(size_t) H, (size_t) S * WARP}, {1, (size_t) COLS * WARP}),
-        [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int head = (int) it.get_group(0);
-            const int lane = (int) sg.get_local_linear_id();
-            const int col = (int) it.get_group(1) * COLS + (int) sg.get_group_linear_id();
+            const int lane = (int) warp32::lane(sg);
+            const int col = (int) it.get_group(1) * COLS + (int) warp32::index(sg);
             float s[4];
             for (int r = 0; r < 4; ++r) s[r] = state[((size_t) (r * WARP + lane) * H + head) * S + col];
             const int64_t hs = (int64_t) head * S;
@@ -350,14 +351,14 @@ void glm5_kda_scan(float* state, const float* q, const float* k, const float* v,
                     qr[r] = qt[i];
                     kv += s[r] * kr[r];
                 }
-                kv = sycl::reduce_over_group(sg, kv, sycl::plus<float>());
+                kv = warp32::reduce(sg, kv, sycl::plus<float>());
                 const float delta = (v[t * TS + hs + col] - kv) * beta[t * H + head];
                 float o = 0.0f;
                 for (int r = 0; r < 4; ++r) {
                     s[r] += kr[r] * delta;
                     o += s[r] * qr[r];
                 }
-                o = sycl::reduce_over_group(sg, o, sycl::plus<float>());
+                o = warp32::reduce(sg, o, sycl::plus<float>());
                 if (lane == 0) out[t * TS + hs + col] = o * scale;
                 if (t < NS)   // the state after this row, to go back to (a speculative window's rows but its last)
                     for (int r = 0; r < 4; ++r) sn.p[t][((size_t) (r * WARP + lane) * H + head) * S + col] = s[r];
@@ -445,13 +446,13 @@ void glm5_idx_scores(const float* pooled, const float* q, const float* w, int n_
     const int H = n_heads;
     const auto event = queue_for(stream).parallel_for(
         sycl::nd_range<2>({(size_t) n_tokens, gx * SG * WARP}, {1, (size_t) SG * WARP}),
-        [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(WARP)]] {
+        [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int64_t t = (int64_t) it.get_group(0);
-            const int64_t b = (int64_t) it.get_group(1) * SG + (int64_t) sg.get_group_linear_id();
+            const int64_t b = (int64_t) it.get_group(1) * SG + (int64_t) warp32::index(sg);
             const int64_t n_bid = steps[t * kStepCount + kStepNBid];
             if (b > n_bid || b >= max_blocks) return;   // uniform over the sub-group
-            const int lane = (int) sg.get_local_linear_id();
+            const int lane = (int) warp32::lane(sg);
             float score = 0.0f;
             if (b < n_bid) {
                 float k[PER];
@@ -460,7 +461,7 @@ void glm5_idx_scores(const float* pooled, const float* q, const float* w, int n_
                     const float* qh = q + (t * H + h) * D + (int64_t) lane * PER;
                     float d = 0.0f;
                     for (int i = 0; i < PER; ++i) d += qh[i] * k[i];
-                    d = sycl::reduce_over_group(sg, d, sycl::plus<float>());
+                    d = warp32::reduce(sg, d, sycl::plus<float>());
                     score += (d > 0.0f ? d : 0.0f) * w[t * H + h];
                 }
             }
@@ -491,11 +492,11 @@ void glm5_mla_attn(const float* q, const uint16_t* latent, const int32_t* ids, i
     const auto event = queue_for(stream).submit([&](sycl::handler& hd) {
         sycl::local_accessor<float, 1> sc(sycl::range<1>((size_t) (cap + (KP > 0 ? KP - 1 : 0))), hd);
         hd.parallel_for(sycl::nd_range<1>((size_t) (n_tokens * H) * WG, WG),
-                        [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(WARP)]] {
+                        [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
             const int64_t th = (int64_t) it.get_group(0), t = th / H;
             const int lid = (int) it.get_local_id(0);
             const sycl::sub_group sg = it.get_sub_group();
-            const int warp = (int) sg.get_group_linear_id(), lane = (int) sg.get_local_linear_id();
+            const int warp = (int) warp32::index(sg), lane = (int) warp32::lane(sg);
             const int64_t chosen = sycl::min<int64_t>(steps[t * kStepCount + kStepWidth], cap);
             // the unfinished pool's cells up to the token, after the chosen ones: cell j - chosen + tail0
             const int32_t pos = steps[t * kStepCount + kStepPos];
@@ -515,7 +516,7 @@ void glm5_mla_attn(const float* q, const uint16_t* latent, const int32_t* ids, i
                 const uint16_t* row = latent + cell(j) * L + (int64_t) lane * PER;
                 float d = 0.0f;
                 for (int i = 0; i < PER; ++i) d += qr[i] * f32_from_f16(row[i]);
-                d = sycl::reduce_over_group(sg, d, sycl::plus<float>());
+                d = warp32::reduce(sg, d, sycl::plus<float>());
                 if (lane == 0) sc[j] = d * scale;
             }
             sycl::group_barrier(it.get_group());

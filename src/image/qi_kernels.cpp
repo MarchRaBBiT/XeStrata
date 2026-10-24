@@ -114,6 +114,7 @@ struct I8FromSwiglu {
 
 // qi_rows_i8 a work-group a row: a sub-group of 32 a group of 256 values (8 a lane, held in registers), up to MAXG
 // groups each; the rotation's butterflies of strides 1 to 4 within a lane, 8 to 128 across lanes
+// (a warp of 32 a group: on a wave64 GPU two warps a sub-group, strata/kernels/warp32.hpp)
 template<class Src> struct RowsI8 {
     static constexpr int SG = 32, V = kQiRotate / SG, MAXG = 4;
     Src src;
@@ -124,8 +125,8 @@ template<class Src> struct RowsI8 {
     void operator()(sycl::nd_item<1> it) const {
         const auto sg = it.get_sub_group();
         const auto r = static_cast<int64_t>(it.get_group_linear_id());
-        const auto si = static_cast<int64_t>(sg.get_group_linear_id());
-        const int lane = static_cast<int>(sg.get_local_linear_id());
+        const auto si = static_cast<int64_t>(kernels::warp32::index(sg));
+        const int lane = kernels::warp32::lane(sg);
         float v[MAXG][V];
         float amax = 0.f;
         for (int c = 0; c < MAXG; ++c) {
@@ -160,7 +161,9 @@ template<class Src> struct RowsI8 {
         }
         if (si == 0 && lane == 0) s[r] = rs != nullptr ? d * rs[r] : d;
     }
-    auto get(syclex::properties_tag) const { return syclex::properties{syclex::sub_group_size<SG>}; }
+    auto get(syclex::properties_tag) const {
+        return syclex::properties{syclex::sub_group_size<STRATA_HW_SUB_GROUP(SG)>};
+    }
 };
 
 template<class Src>
