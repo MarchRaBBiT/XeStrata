@@ -40,15 +40,12 @@ _KEY_HEAD = {
     r"GdnRecKh": "the key-head form keeps 3 x 32 state rows a work-item in registers (128 work-items), and the prompt "
                  "path times it against D-2 at its first call and takes the faster (src/prefill/kernels.cpp)",
 }
-_PA_WMMA = ("prompt_attn.cpp's WMMA attention: no work-group bound (its get() gives the sub-group size only), so "
-            "sized for 1,024 work-items; launched with W x 32; not looked at yet")
+_PA_WMMA = ("prompt_attn.cpp's WMMA attention: bounded at its launch's W x 32 work-items, and the tile still takes "
+            "more than 256 VGPRs; not looked at yet")
 _RDNA3 = {
     r"WmmaKernelILi256ELi8ELi8E": _PA_WMMA,
-    r"PromptAttnMmaILi0ELi0E": "qsa_prompt_attn.cpp's matrix attention: no work-group bound (its get() gives the "
-                               "sub-group size only), so sized for 1,024 work-items; launched with pm::WG; not looked "
-                               "at yet",
-    r"AttnKernelILi3E": "the image engine's RDNA attention: no work-group bound (its get() gives the sub-group size "
-                        "only), so sized for 1,024 work-items; launched with up to 8 sub-groups; not looked at yet",
+    r"AttnKernelILi3E": "the image engine's RDNA attention: bounded at its largest launch (8 sub-groups), and it still "
+                        "takes more than 256 VGPRs; not looked at yet",
     r"6KernelILi(12|20|23|42)ELi2ELi2ELb0E|6KernelILi6ELi2ELi1ELb0E":
         "iq_mmq.cpp's int8 WMMA tiles: bounded at their launch's work-group (256 or 128 work-items), and the tile "
         "still takes more than 256 VGPRs; not looked at yet",

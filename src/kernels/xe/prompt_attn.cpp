@@ -292,9 +292,12 @@ struct WmmaKernel {
         (void) it;
 #endif
     }
+    // its work-group's size (1 x W waves) as the bound the device compile sizes the registers by
+    // (strata/kernels/work_group.hpp): without it, sized for 1,024 work-items, it spilled on RDNA3 and RDNA4
     auto get(sycl::ext::oneapi::experimental::properties_tag) const {
         return sycl::ext::oneapi::experimental::properties{
-            sycl::ext::oneapi::experimental::sub_group_size<STRATA_SUB_GROUP(32)>};
+            sycl::ext::oneapi::experimental::sub_group_size<STRATA_SUB_GROUP(32)>,
+            sycl::ext::oneapi::experimental::max_work_group_size<1, W * 32>};
     }
 };
 

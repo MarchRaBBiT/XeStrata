@@ -712,7 +712,11 @@ struct PromptAttnMma {
         }
 #endif
     }
-    auto get(syclex::properties_tag) const { return syclex::properties{syclex::sub_group_size<STRATA_SUB_GROUP(pm::SG)>}; }
+    // its work-group's size (1 x pm::WG) as the bound the device compile sizes the registers by
+    // (strata/kernels/work_group.hpp): without it, sized for 1,024 work-items, it spilled on RDNA3
+    auto get(syclex::properties_tag) const {
+        return syclex::properties{syclex::sub_group_size<STRATA_SUB_GROUP(pm::SG)>, syclex::max_work_group_size<1, pm::WG>};
+    }
 };
 
 // the work-group's local memory, as launch_mma allocates it (the most, Q4_0 V's)

@@ -127,6 +127,7 @@ struct AttnKernel {
     static_assert(SG % TM == 0 && CW % 8 == 0, "the softmax's rows split evenly over the lanes, 8 columns at a time");
     // local memory a sub-group takes: S (or the staged output), P, a row's m and l
     static constexpr size_t SG_BYTES = (size_t) SREG * 4 + (size_t) TM * PLD * 2 + (size_t) 2 * TM * 4;
+    static constexpr int NSG_MOST = 8;   // sub-groups a work-group at most (nsg_most)
 
     const uint16_t *q16, *k16, *v16;
     uint16_t* out16;
@@ -149,13 +150,17 @@ struct AttnKernel {
         if constexpr (P != 3) mx::joint_matrix_load(sg, c, at(st, off), D, mx::layout::row_major);
     }
 
-    // Xe2's instance takes the large register file: the output's 8 accumulator tiles and Q's 8 operand tiles
+    // Xe2's instance takes the large register file: the output's 8 accumulator tiles and Q's 8 operand tiles.  The
+    // largest work-group it is launched with (1 x NSG_MOST sub-groups) is the bound the device compile sizes the
+    // registers by (strata/kernels/work_group.hpp): without it, sized for 1,024 work-items, it spilled on RDNA3
     auto get(syclex::properties_tag) const {
         if constexpr (P == 0)
             return syclex::properties{sycl::ext::intel::experimental::grf_size<256>,
-                                      syclex::sub_group_size<STRATA_SUB_GROUP(SG)>};
+                                      syclex::sub_group_size<STRATA_SUB_GROUP(SG)>,
+                                      syclex::max_work_group_size<1, NSG_MOST * SG>};
         else
-            return syclex::properties{syclex::sub_group_size<STRATA_SUB_GROUP(SG)>};
+            return syclex::properties{syclex::sub_group_size<STRATA_SUB_GROUP(SG)>,
+                                      syclex::max_work_group_size<1, NSG_MOST * SG>};
     }
 
     void operator()(sycl::nd_item<2> it) const {
@@ -312,13 +317,13 @@ int pick(const sycl::device& d) {
     return -1;
 }
 
-// The most sub-groups a work-group the device's local memory and work-group size take, up to 8.
+// The most sub-groups a work-group the device's local memory and work-group size take, up to AttnKernel::NSG_MOST.
 template<int P>
 int nsg_most(const sycl::device& d) {
     using K = AttnKernel<P>;
     const size_t local = d.get_info<sycl::info::device::local_mem_size>();
     const size_t wg = d.get_info<sycl::info::device::max_work_group_size>();
-    int nsg = 8;
+    int nsg = K::NSG_MOST;
     while (nsg > 1 && ((size_t) nsg * K::SG_BYTES > local || (size_t) nsg * K::SG > wg)) nsg /= 2;
     return nsg;
 }
