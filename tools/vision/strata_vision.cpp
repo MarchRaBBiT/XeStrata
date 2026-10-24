@@ -21,13 +21,16 @@
 // row i at grid position (x = i % nx, y = i / nx).  The text model is opened vocab-only (no weights).
 #include "ggml-cpu.h"
 #include "gguf.h"
+#include "gguf_meta.h"
 #include "llama.h"
 #include "mtmd.h"
 #include "mtmd-helper.h"
 
 #include <algorithm>
+#if !defined(_WIN32)
 #include <fcntl.h>
 #include <unistd.h>
+#endif
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -96,6 +99,7 @@ int main(int argc, char** argv) {
     llama_backend_init();
 
     const auto load_t0 = std::chrono::steady_clock::now();
+#if !defined(_WIN32)   // posix_fadvise; on Windows the loader's reads go as they are (#24)
     // ask the OS for the projector file up front (128 KiB steps) so the loader's sequential reads find it cached;
     // STRATA_READ_AHEAD=0 turns it off, as in the engine
     if (const char* ra = std::getenv("STRATA_READ_AHEAD"); ra == nullptr || std::strtol(ra, nullptr, 10) != 0) {
@@ -107,10 +111,16 @@ int main(int argc, char** argv) {
             close(fd);
         }
     }
-    llama_model_params mp = llama_model_default_params();
-    mp.vocab_only = true;
-    llama_model* text = llama_model_load_from_file(model.c_str(), mp);
-    if (!text) { std::printf("ERR cannot open the text model %s\n", model.c_str()); std::fflush(stdout); return 1; }
+#endif
+    // the vocabulary and header only: the weights (and their tensor types, which can be ones llama.cpp does not know,
+    // such as Gyro's TQK6 / TQK7) are never touched - see gguf_meta.h (upstream 3fe84ec28)
+    std::string how;
+    llama_model* text = strata_open_text_model(model, &how);
+    if (!text) {
+        std::printf("ERR cannot open the text model %s (%s)\n", model.c_str(), how.c_str());
+        std::fflush(stdout);
+        return 1;
+    }
 
     mtmd_context_params cp = mtmd_context_params_default();
     cp.use_gpu = gpu;

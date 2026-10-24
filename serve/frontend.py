@@ -66,6 +66,9 @@ class ChatTemplate:
         # the tools as OpenAI sends them ({"type": "function", "function": {...}}) where the template unwraps them
         # itself; otherwise their inner objects, as Qwen's templates read them
         self.wrapped_tools = re.search(r"tool\.function\b|tool\[['\"]function['\"]\]", self.source) is not None
+        # GLM's templates (GLM-5.3-Flash): a call is `<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value>...
+        # </tool_call>`, read through GlmCallRewriter; the thinking always opened, its effort low, high or max
+        self.call_form = "glm" if "<arg_key>" in self.source else "qwen"
         self.caps = self._detect_caps()
 
     def render(self, messages: list[dict], tools: list[dict] | None = None, add_generation_prompt: bool = True,
@@ -90,8 +93,15 @@ class ChatTemplate:
             messages = adjusted
         if tools and self.wrapped_tools:   # the template reads OpenAI's form, `tool.function` (llm-jp-4.1's)
             tools = [t if "function" in t else {"type": "function", "function": t} for t in tools]
-        return self.template.render(messages=messages, tools=tools, add_generation_prompt=add_generation_prompt,
+        if self.call_form == "glm":        # its efforts: low, high and max (the default)
+            effort = kwargs.get("reasoning_effort")
+            kwargs = {**kwargs, "reasoning_effort": {"low": "low", "medium": "high"}.get(str(effort))}
+        text = self.template.render(messages=messages, tools=tools, add_generation_prompt=add_generation_prompt,
                                     **kwargs)
+        if (self.call_form == "glm" and add_generation_prompt and kwargs.get("enable_thinking", True) is False
+                and text.endswith("<think>")):   # GLM's template always opens the thinking: closed at once
+            text += THINK_END
+        return text
 
     def _detect_caps(self) -> dict[str, bool]:
         """llama.cpp's capability names, checked at load time against this template and Strata's tool-call format.
@@ -121,8 +131,12 @@ class ChatTemplate:
             prompt = render(messages, tools)
             # Instructions include example XML and literal tag names, which are not model output. Parse only
             # complete calls to our probe functions, using the same body parser as OutputParser.
-            bodies = re.findall(r"<tool_call>\s*(<function=strata_caps_call_\d+>.*?</function>)\s*</tool_call>",
-                                prompt, re.S)
+            if self.call_form == "glm":
+                found = re.findall(r"<tool_call>(strata_caps_call_\d+.*?)</tool_call>", prompt, re.S)
+                bodies = [glm_call_body(b) for b in found]
+            else:
+                bodies = re.findall(r"<tool_call>\s*(<function=strata_caps_call_\d+>.*?</function>)\s*</tool_call>",
+                                    prompt, re.S)
             try:
                 parsed = [parse_tool_call(body) for body in bodies]
             except ValueError:
@@ -132,8 +146,9 @@ class ChatTemplate:
 
         history = [user, {"role": "assistant", "content": "strata_caps_answer",
                           "reasoning_content": "strata_caps_reasoning"}, user]
+        form_tag = "<arg_key>" if self.call_form == "glm" else "<function="
         return {"supports_tools": all(s in tool_prompt for s in
-                                      ("strata_caps_call_0", "strata_caps_description", "<tool_call>", "<function=")),
+                                      ("strata_caps_call_0", "strata_caps_description", "<tool_call>", form_tag)),
                 "supports_tool_calls": calls_supported(1),
                 "supports_system_role": "strata_caps_system" in render(
                     [{"role": "system", "content": "strata_caps_system"}, user]),
@@ -713,6 +728,10 @@ CALL_END = "</tool_call>"
 PARAM_END = "</parameter>"
 FUNC_START = "<function="
 FUNC_END = "</function>"
+# #3441: the opener a model writes when it drifts by a token inside the envelope the template documents:
+# `<=NAME>` (the word `function` dropped), `<function:NAME>`, `<function =NAME>`, or the bare `<NAME>`
+_LOOSE_OPEN = re.compile(r"<\s*(?:function\s*[=:]\s*|=\s*)?([A-Za-z0-9_.\-]+)\s*>")
+_LOOSE_PART = re.compile(r"<\s*(?:function[ \t]*[=:]?\s*|=\s*)?[A-Za-z0-9_.\-]*\s*$")
 
 
 def param_end(text: str, final: bool = False) -> int:
@@ -766,6 +785,61 @@ def call_end(text: str) -> int:
             return text.find(CALL_END, pos)
 
 
+GLM_KEY, GLM_KEY_END, GLM_VALUE, GLM_VALUE_END = "<arg_key>", "</arg_key>", "<arg_value>", "</arg_value>"
+
+
+def glm_call_body(body: str) -> str:
+    """A GLM call's body (`NAME<arg_key>K</arg_key><arg_value>V</arg_value>...`, between <tool_call> and
+    </tool_call>) in the XML form parse_tool_call reads (`<function=NAME>` with `<parameter=K>` values).  The values
+    stay as written: a string as it is, other types as JSON, which parse_tool_call decodes by the tool's schema."""
+    k = body.find(GLM_KEY)
+    out = [f"<function={(body if k < 0 else body[:k]).strip()}>\n"]
+    for key, value in re.findall(re.escape(GLM_KEY) + r"(.*?)" + re.escape(GLM_KEY_END) + r"\s*" + re.escape(GLM_VALUE)
+                                 + r"(.*?)" + re.escape(GLM_VALUE_END), body, re.S):
+        out.append(f"<parameter={key.strip()}>\n{value}\n{PARAM_END}\n")
+    return "".join(out) + FUNC_END
+
+
+class GlmCallRewriter:
+    """GLM's calls, as they stream, in the XML form OutputParser reads: the text outside `<tool_call>...</tool_call>`
+    passes as it comes (a partial `<tool_call>` held back), a call is held until its `</tool_call>` and then written
+    out rewritten (glm_call_body).  A `<tool_call>` that a `</think>` follows before its end, or that runs past
+    RCALL_MAX, was not a call: it goes on as it was written."""
+
+    def __init__(self):
+        self.buf, self.inside = "", False
+
+    def feed(self, delta: str) -> str:
+        self.buf += delta
+        out = []
+        while True:
+            if not self.inside:
+                i = self.buf.find(CALL_START)
+                if i < 0:
+                    keep = next((n for n in range(min(len(CALL_START) - 1, len(self.buf)), 0, -1)
+                                 if CALL_START.startswith(self.buf[-n:])), 0)
+                    out.append(self.buf[:len(self.buf) - keep])
+                    self.buf = self.buf[len(self.buf) - keep:]
+                    return "".join(out)
+                out.append(self.buf[:i])
+                self.buf, self.inside = self.buf[i + len(CALL_START):], True
+            end, think = self.buf.find(CALL_END), self.buf.find(THINK_END)
+            if end >= 0 and (think < 0 or think > end):
+                out.append(CALL_START + "\n" + glm_call_body(self.buf[:end]) + "\n" + CALL_END)
+                self.buf, self.inside = self.buf[end + len(CALL_END):], False
+            elif think >= 0 or len(self.buf) > RCALL_MAX:
+                out.append(CALL_START)
+                self.inside = False
+            else:
+                return "".join(out)
+
+    def flush(self) -> str:
+        """The end of the output: what is held, as it was written."""
+        text = (CALL_START if self.inside else "") + self.buf
+        self.buf, self.inside = "", False
+        return text
+
+
 def tool_choice_of(tool_choice) -> tuple[str, str | None]:
     """A client's `tool_choice` in either API's shape -> ("auto" | "none" | "required" | "named", name).  OpenAI:
     "auto" / "none" / "required", {"type": "function", "function": {"name": N}} or the flat {"type": "function",
@@ -789,7 +863,7 @@ def tool_choice_of(tool_choice) -> tuple[str, str | None]:
     return "unknown", None
 
 
-def forced_call(tool_choice, tools: list[dict] | None) -> str | None:
+def forced_call(tool_choice, tools: list[dict] | None, form: str = "qwen") -> str | None:
     """`tool_choice` -> the text that opens the call the reply must make, or None (the model decides).
     There is no grammar here: the server writes this opening itself, so the model can only go on with a call.
     "required" / Anthropic "any": any of the tools; a named function: that one.  A value it cannot honour (an
@@ -802,9 +876,9 @@ def forced_call(tool_choice, tools: list[dict] | None) -> str | None:
     if kind == "required" and len(names) == 1:     # one tool to call: name it, the model cannot invent another
         kind, name = "named", next(iter(names))
     if kind == "required" and names:
-        return CALL_START + "\n<function="
+        return CALL_START if form == "glm" else CALL_START + "\n<function="
     if kind == "named" and name in names:
-        return CALL_START + f"\n<function={name}>\n"
+        return CALL_START + str(name) if form == "glm" else CALL_START + f"\n<function={name}>\n"
     print(f"[strata] tool_choice {json.dumps(tool_choice)[:200]} is not supported here (or names no tool of the "
           "request): the model decides, as with \"auto\"", flush=True)
     return None
@@ -1026,11 +1100,19 @@ class OutputParser:
     _line_blocks: list[str] | None
 
     def __init__(self, thinking: bool = True, tools: list[dict] | None = None, stream_tools: bool = False,
-                 recover: bool = False):
+                 recover: bool = False, declared_only: bool = False):
         self.state = "reasoning" if thinking else "content"
         self.buf = ""
         self.lead = False
         self.schemas = {t.get("name"): t for t in tools or []}
+        # #804/#3075: in the answer too, a call counts only for a tool the request declared.  With tools declared a
+        # call for another name stays text (the Responses spelling `namespace__tool` of a `namespace.tool` counts as
+        # that tool); `declared_only` extends the rule to a request that declared none (Chat Completions, Anthropic:
+        # the client has no tool to run).  The Responses route leaves it off: a Codex compaction request keeps its
+        # conversation's tools in the prompt only, and its calls come back as before.
+        self.declared_only = declared_only
+        self._alias = {k.replace(".", "__", 1) for k in self.schemas if isinstance(k, str) and "." in k}
+        self.unread = 0              # #3441: `<tool_call>` blocks that opened like a call and were returned as text
         # stream_tools: a tool call is also reported while it is being written - "tool_start" (its name and id) as
         # soon as the name is known, then "tool_args" pieces of its JSON arguments (string parameters character by
         # character; other types whole, once complete) - before the final "tool_call".  Without it, a client sees
@@ -1058,6 +1140,30 @@ class OutputParser:
         ok = self._opener_ok()
         self.fence, self.line, self.ticks = snap
         return ok
+
+    def _callable(self, name: str) -> bool:
+        """#3075: may a call for `name` be a call?  A tool the request declared (or its Responses spelling); with
+        none declared, only where `declared_only` is off."""
+        if not self.schemas:
+            return not self.declared_only
+        return name in self.schemas or name in self._alias
+
+    def _loose_open(self, after: str):
+        """#3441: `after` (text after a `<tool_call>`, whitespace dropped) opens a call in a drifted form that names a
+        declared tool -> (name, length of the opener); "wait" while it may still become one; None otherwise."""
+        m = _LOOSE_OPEN.match(after)
+        if m:
+            name = m.group(1)
+            return (name, m.end()) if self._callable(name) else None
+        if ">" in after or "\n" in after or not after.startswith("<"):
+            return None
+        if _LOOSE_PART.match(after):
+            bare = after[1:].strip().lstrip("=").strip()
+            if after[1:].lstrip().startswith(("=", "function")):
+                return "wait"
+            if any(k.startswith(bare) for k in list(self.schemas) + list(self._alias) if isinstance(k, str)):
+                return "wait"
+        return None
 
     def _follower(self, after: str) -> str:
         """recover: what a `<tool_call>` followed (after whitespace) by `after` opens: "call" (`<function=`), "param"
@@ -1473,7 +1579,24 @@ class OutputParser:
                 # it is prose that names the format ("I'll use a <tool_call> block") - content, not a malformed call
                 # that ends the request.  Until its follower has arrived it is held, like a partial tag.
                 after = self.buf[i + len(CALL_START):].lstrip()
+                if self.schemas and not after.startswith(FUNC_START):
+                    loose = self._loose_open(after)
+                    if loose == "wait":                  # may still become one: held like a partial tag
+                        j = i
+                        while j > 0 and self.buf[j - 1] == "\n":
+                            j -= 1
+                        if j > 0:
+                            out.append(Event("content", self._track(self.buf[:j])))
+                            self.buf = self.buf[j:]
+                        return out
+                    if loose:                            # #3441: `<=NAME>` etc. is `<function=NAME>`
+                        at = len(self.buf) - len(after)
+                        self.buf = self.buf[:at] + FUNC_START + loose[0] + ">" + after[loose[1]:]
+                        continue
                 kind = self._follower(after) if self.recover else None
+                if (after.startswith("<") and kind is None and not FUNC_START.startswith(after)
+                        and not after.startswith(FUNC_START)):
+                    self.unread += 1
                 if kind in ("param", "json"):
                     if i and self.buf[:i].strip():
                         out.append(Event("content", self._track(self.buf[:i].rstrip("\n"))))
@@ -1498,6 +1621,22 @@ class OutputParser:
                         out.append(Event("content", self._track(self.buf[:j])))
                         self.buf = self.buf[j:]
                     return out
+                if self.schemas or self.declared_only:
+                    # #3075: a call counts only for a declared tool; the name must be complete to tell
+                    gt = after.find(">")
+                    nl = after.find("\n")
+                    if gt < 0 and nl < 0:
+                        j = i
+                        while j > 0 and self.buf[j - 1] == "\n":
+                            j -= 1
+                        if j > 0:
+                            out.append(Event("content", self._track(self.buf[:j])))
+                            self.buf = self.buf[j:]
+                        return out
+                    if gt >= 0 and (nl < 0 or gt < nl) and not self._callable(after[len(FUNC_START):gt].strip()):
+                        out.append(Event("content", self._track(self.buf[:i + len(CALL_START)])))
+                        self.buf = self.buf[i + len(CALL_START):]
+                        continue
                 if i and self.buf[:i].strip():
                     out.append(Event("content", self._track(self.buf[:i].rstrip("\n"))))
                 self.buf = self.buf[i + len(CALL_START):]
@@ -1606,3 +1745,17 @@ class OutputParser:
         self._reset_scan()
         self.state, self.lead = "content", True
         return [Event("tool_call", call=call)]
+
+
+class GlmOutputParser(OutputParser):
+    """OutputParser for GLM's call form: the output rewritten as it streams (GlmCallRewriter) before it is parsed."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.rewriter = GlmCallRewriter()
+
+    def feed(self, delta: str) -> list[Event]:
+        return super().feed(self.rewriter.feed(delta))
+
+    def finish(self, reason: str | None = None) -> list[Event]:
+        return super().feed(self.rewriter.flush()) + super().finish(reason)
