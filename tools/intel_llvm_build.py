@@ -324,9 +324,9 @@ def prepare_source(tag: str) -> None:
                               text=True).stdout.strip()
         if have != tag:
             run(["git", "-C", SRC, "fetch", "--depth", "1", "origin", "tag", tag])
-            # the patched files back to the release first
-            restore_release()
-            run(["git", "-C", SRC, "checkout", "--detach", tag])
+            # forced: the files the patches applied to the old release changed go back with it, whatever patch set
+            # changed them (a newer release's patches can name files the old release lacks, and leave out ones it had)
+            run(["git", "-C", SRC, "checkout", "--force", "--detach", tag])
     else:
         run(["git", "clone", "--depth", "1", "--branch", tag, REPO, SRC])
     fix_sources()
