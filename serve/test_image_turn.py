@@ -65,7 +65,14 @@ class Gen:
     def __init__(self, card, least, full):
         self.card, self.least, self.full = card, least, full
         self.said, self.fitted, self.rooms, self.released = [], [], 0, 0
+        self.ended = []
         self.engine = mock.Mock(alive=lambda: True)
+
+    def begin(self, job):
+        pass
+
+    def end(self, error, cancelled=False):
+        self.ended.append((error, cancelled))
 
     def need(self, job):
         return {"least_mib": self.least, "full_mib": self.full, "held_mib": 0, "free_mib": self.card.free_mib()}
@@ -136,6 +143,7 @@ class UnloadThenSize(unittest.TestCase):
         self.assertEqual(gen.fitted, [])
         self.assertEqual(gen.released, 1)                      # the turn still gives back what it took
         self.assertFalse(svc.status["busy"])
+        self.assertEqual([cancelled for _, cancelled in gen.ended], [True])   # the job's row: cancelled
 
 
 if __name__ == "__main__":
