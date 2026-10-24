@@ -96,7 +96,7 @@ void add_library_dirs() {
                 std::filesystem::path(exe).parent_path().parent_path().parent_path() / "python" / "Lib" / "site-packages";
             for (const char* sub : {"cublas", "cuda_runtime"}) dirs.push_back((site / "nvidia" / sub / "bin").string());
             // pip's oneMKL (onemkl-sycl-blas, mkl, tbb): their DLLs in the Python's Library\bin
-            first.insert(first.begin(), (site.parent.parent / "Library" / "bin").string());
+            first.insert(first.begin(), (site.parent_path().parent_path() / "Library" / "bin").string());
             // AMD's rocm-sdk-libraries-<family> (rocBLAS and hipBLASLt): one folder for the GPU family it was made for
             std::error_code ec;
             for (const auto& e : std::filesystem::directory_iterator(site, ec))
