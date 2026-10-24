@@ -650,6 +650,25 @@ if(STRATA_ENABLE_XE)
   target_link_libraries(strata-image PRIVATE strata_image)
 
   if(STRATA_BUILD_TESTS)
+    # No AMD kernel of the engine or the image engine spills its registers to scratch memory beyond the ones
+    # tools/check_amdgpu_spills.py allows, on each AMD target built: a kernel without its work-group bound has 64 VGPRs
+    # on gfx906 (include/strata/kernels/work_group.hpp).  It reads the device code with the SYCL compiler's
+    # clang-offload-extract (skipped without it).
+    if(_strata_hip_archs)
+      find_package(Python3 QUIET COMPONENTS Interpreter)
+      get_filename_component(_strata_cxx_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
+      find_program(STRATA_OFFLOAD_EXTRACT clang-offload-extract HINTS "${_strata_cxx_bin}")
+      if(Python3_Interpreter_FOUND)
+        set(_strata_extract_arg "")
+        if(STRATA_OFFLOAD_EXTRACT)
+          set(_strata_extract_arg --extract ${STRATA_OFFLOAD_EXTRACT})
+        endif()
+        add_test(NAME amdgpu_spill_check
+                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_amdgpu_spills.py
+                         ${_strata_extract_arg} $<TARGET_FILE:strata> $<TARGET_FILE:strata-image>)
+        set_tests_properties(amdgpu_spill_check PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+      endif()
+    endif()
     add_executable(elementwise_parity src/kernels/elementwise_parity.cpp)
     target_link_libraries(elementwise_parity PRIVATE strata_kernels)
     target_compile_options(elementwise_parity PRIVATE -fno-fast-math -ffp-contract=off)
