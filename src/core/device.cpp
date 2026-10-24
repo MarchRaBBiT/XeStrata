@@ -181,6 +181,21 @@ std::string g_workaround_version;   // set by engine_devices when the workaround
 #endif
 #endif
 
+#if defined(STRATA_XE_QUERY)
+// A GT's ip_ver_major.  The uapi headers before Linux 6.11 (Ubuntu 24.04's 6.8) have no such field: their reserved[0]
+// holds the same bytes (the struct's layout is the same), which an older kernel leaves zero, as a GPU without GMD_ID.
+template<class Gt>
+uint16_t gt_ip_ver_major(const Gt& gt) {
+    if constexpr (requires { gt.ip_ver_major; }) {
+        return gt.ip_ver_major;
+    } else {
+        uint16_t v;
+        std::memcpy(&v, &gt.reserved[0], sizeof v);
+        return v;
+    }
+}
+#endif
+
 // Whether a GPU of the xe kernel driver has a graphics IP of 20 or later (DRM_XE_DEVICE_QUERY_GT_LIST, the main GT's
 // ip_ver_major; 0 on a GPU without GMD_ID, Alchemist and older, which is not one).  False when no xe GPU can be opened.
 #if !defined(_WIN32)
@@ -204,7 +219,8 @@ bool xe_gpu_from_xe2() {
                 if (ioctl(fd, DRM_IOCTL_XE_DEVICE_QUERY, &q) == 0) {
                     const auto* list = reinterpret_cast<const drm_xe_query_gt_list*>(buf.data());
                     for (uint32_t i = 0; i < list->num_gt; ++i)
-                        if (list->gt_list[i].type == DRM_XE_QUERY_GT_TYPE_MAIN && list->gt_list[i].ip_ver_major >= 20)
+                        if (list->gt_list[i].type == DRM_XE_QUERY_GT_TYPE_MAIN &&
+                            gt_ip_ver_major(list->gt_list[i]) >= 20)
                             found = true;
                 }
             }
