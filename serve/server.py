@@ -3418,6 +3418,11 @@ class Service:
                           flush=True)
                 else:
                     print(f"[strata] the before_load command failed ({why}); checking the free VRAM", flush=True)
+        if self.images is not None:   # an image job while the model was out (keep) leaves the image engine's layers
+            try:                      # in VRAM: the check below, the vision encoder and the model size from it after
+                self.images.release(True)
+            except Exception as e:                       # noqa: BLE001 - the model loads all the same
+                print(f"[strata] the image engine did not let go of its VRAM ({e}); loading anyway", flush=True)
         if self.min_free_vram_mib and not (hook_failed and self.before_load_ignore_failure):
             free = self.free_vram_mib()
             deadline = time.time() + self.vram_free_wait_s   # memory another process just gave back can take a moment

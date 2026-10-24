@@ -48,6 +48,25 @@ class ResidentEngine(StrataEngine):
         yield from self.reply.generate(*args, **kwargs)
 
 
+class HeldImages:
+    """serve/images.py's ImageGen as the model's load sees it: the image engine told to let go of its VRAM."""
+    model = "image-model"
+
+    def __init__(self, order, fail=False):
+        self.order, self.fail = order, fail
+
+    def release(self, everything):
+        self.order.append(("release", everything))
+        if self.fail:
+            raise OSError("the image daemon's socket is gone")
+
+    def status(self):
+        return {"enabled": True}
+
+    def note(self):
+        return None
+
+
 class Lifecycle(unittest.TestCase):
     def test_close_cleans_up_after_a_broken_stdin_pipe(self):
         for running in (False, True):
@@ -204,6 +223,30 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(self.request("/v1/unload", {})[0], 409)
         self.assertEqual(self.engine.closes, 0)
         self.assertEqual(self.request("/v1/load", {}, {"Content-Type": "text/plain"})[0], 415)
+
+    def test_the_image_engine_gives_its_vram_back_before_the_model_loads(self):
+        # an image job while the model was out (keep) leaves the image engine's layers in VRAM: the model sized its
+        # expert cache from what was left (229 slots of 5376 on a 16 GB card)
+        order = []
+        self.svc.images = HeldImages(order)
+        self.svc.min_free_vram_mib = 1
+        self.svc.free_vram_mib = lambda: order.append("free") or 100000
+        restart = self.engine.restart
+        self.engine.restart = lambda: (order.append("restart"), restart())
+        self.assertEqual(self.request("/v1/load", {"model": self.svc.model})[0], 200)
+        self.assertEqual(order, [("release", True), "free", "restart"])
+        chat = {"messages": [{"role": "user", "content": "Hello"}], "max_tokens": 32, "reasoning_effort": "none"}
+        self.assertEqual(self.request("/v1/chat/completions", chat)[0], 200)
+        self.assertEqual(order.count(("release", True)), 1)     # a loaded model: no round trip to the image engine
+
+    def test_an_image_engine_that_cannot_let_go_does_not_stop_the_load(self):
+        order = []
+        self.svc.images = HeldImages(order, fail=True)
+        code, status = self.request("/v1/load", {"model": self.svc.model})
+        self.assertEqual(code, 200)
+        self.assertTrue(status["loaded"])
+        self.assertEqual(order, [("release", True)])
+        self.assertEqual(self.engine.starts, 1)
 
 
 if __name__ == "__main__":

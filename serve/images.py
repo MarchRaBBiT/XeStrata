@@ -26,8 +26,9 @@ and the config's "gpu_policy" says what happens to the text engine during the jo
   auto    - (default) keep when the image fits beside it at full speed, else shrink when the engine can, else keep
             when the image fits at all (its layers streamed), else unload
 After a job the image engine keeps what it holds (the next image starts warm) only under keep with VRAM to spare;
-otherwise it lets go of everything but its process (about 200 MiB).  The daemon ends after daemon_idle_s (default
-1800) without a server.
+otherwise it lets go of everything but its process (about 200 MiB).  What it kept it lets go of as well before the
+text engine loads again (Service.ensure_loaded: after an unload, the next chat request).  The daemon ends after
+daemon_idle_s (default 1800) without a server.
 
 The config's "images" section (written by setup --images, tools/image/qimage.py):
   {"exe": "engine/strata-image", "diffusion_model": "...Q8_0.gguf", "vae": "...",
