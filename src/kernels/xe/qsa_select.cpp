@@ -357,7 +357,7 @@ sycl::event block_scores_simt(sycl::queue& q, const float* pooled, const float* 
     return q.submit([&](sycl::handler& h) {
         sycl::local_accessor<float, 1> qs(sycl::range<1>((size_t) SM_KC * SM_QS), h);
         sycl::local_accessor<float, 1> ks(sycl::range<1>((size_t) SM_KC * SM_KS), h);
-        h.parallel_for(sycl::nd_range<2>({gq, gb * 256}, {1, 256}), [=](sycl::nd_item<2> it) [[STRATA_MAX_WG(1, 1, 256)]] {
+        h.parallel_for(sycl::nd_range<2>({gq, gb * 256}, {1, 256}), [=](sycl::nd_item<2> it) [[sycl::reqd_work_group_size(1, 256)]] {
             const int64_t q0 = (int64_t) it.get_group(0) * SM_QT, b0 = (int64_t) it.get_group(1) * SM_NB;
             const int64_t qlast = (q0 + SM_QT < nq ? q0 + SM_QT : nq) - 1;
             if (b0 >= steps[qlast * kStepCount + kStepNBid]) return;   // n_bid rises with the position: the whole group

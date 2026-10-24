@@ -63,7 +63,7 @@ CMake のオプション `STRATA_LICENSE` で選びます。
   gfx906（Radeon VII、Instinct MI50 / MI60）は 1 つのウェーブが 64 レーンの GPU で、32 レーンの warp で書いたカーネルを、64 レーンのサブグループの半分ずつに warp を 1 つ載せて動かします（`include/strata/kernels/warp32.hpp`）。
   その密な積は `STRATA_HIP_WAVE64_BLAS` で選びます。`auto`（既定）は入っている rocBLAS が gfx906 のコードを持てば rocBLAS、なければ XeStrata 自身のカーネルで、`rocblas` と `own` はそれぞれに決めます。
   ディストリビューションの rocBLAS は gfx906 のコードを持たないので、rocBLAS を使うには gfx906 のコードを持つ ROCm（コミュニティのビルドなど）の上でビルドします。
-  intel/llvm にはパッチ `hip-flat-work-group-size`（[DEVTOOLS.ja.md](DEVTOOLS.ja.md#intelllvm-をソースからビルドする)）が要ります。これがないと AMD のカーネルは 1024 work-item の work-group 用にコンパイルされ、gfx906 では VGPR が 64 個に限られて、残りがスクラッチメモリにあふれます。
+  intel/llvm にはパッチ `hip-flat-work-group-size`（[DEVTOOLS.ja.md](DEVTOOLS.ja.md#intelllvm-をソースからビルドする)）が要ります。intel/llvm は `reqd_work_group_size` の属性からは AMD のカーネルの work-group の上限を作りますが、`max_work_group_size` のプロパティからは作らないので、これがないとプロパティで上限を付けたカーネルは 1024 work-item の work-group 用にコンパイルされ、gfx906 では VGPR が 64 個に限られて、残りがスクラッチメモリにあふれます。
   Radeon VII（gfx906、ROCm 7.14 のコミュニティのビルドのコンテナ）で CTest が通ることを確かめています。Qwen3.6-35B-A3B UD-Q4_K_XL は 6.3K トークンの prefill が約 750 tok/s、decode が 58-97 tok/s、Qwen3.8-Flash-Next IQ2_XS は prefill が約 425 tok/s、decode が 28-45 tok/s でした。
 - **contrib-llvm**（既定、`-DSTRATA_LICENSE=contrib`）: intel/llvm を CUDA のターゲット付きでビルドしたもの（`tools/intel_llvm_build.py --contrib`）を使い、
   `STRATA_CUDA_ARCHS`（例 `sm_89`）で NVIDIA の GPU 向けのコードも作ります。

@@ -123,7 +123,7 @@ void fused_gdn_step_norm(float* state, const float* q, const float* k, const flo
         sycl::local_accessor<float, 1> wsum(sycl::range<1>(S * RG / WARP), hd);
         const bool silu = gdn_silu_gate();   // the closing norm's gate (gdn.hpp)
         // one work-group per head; work-item tid = rg * 128 + col, as CUDA's (col, rg) block linearises
-        hd.parallel_for(sycl::nd_range<1>((size_t) h_v * S * RG, S * RG), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, S * RG)]] {
+        hd.parallel_for(sycl::nd_range<1>((size_t) h_v * S * RG, S * RG), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), sycl::reqd_work_group_size(S * RG)]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int head = (int) it.get_group(0);
             const int tid = (int) it.get_local_id(0);

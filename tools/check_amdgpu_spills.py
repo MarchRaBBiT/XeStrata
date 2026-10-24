@@ -32,7 +32,8 @@ from pathlib import Path
 
 # Kernels that may spill, by AMD target (the "gfx..." name, without features such as ":xnack-") and a regular
 # expression searched in the kernel's mangled name, each with the reason.  A kernel that spills on a target and matches
-# none of its target's entries fails the check.  The RDNA targets are the packages' (measured with intel/llvm 7.1.1).
+# none of its target's entries fails the check.  The RDNA targets are the packages' (measured with intel/llvm 7.1.1),
+# gfx906's with v7.2.0.
 _XE2_ONLY = {
     r"GdnRecLane": "Xe2's: gdn_lane_ok takes it where the EU is 16 wide, so no AMD GPU runs it",
 }
@@ -58,12 +59,24 @@ _RDNA4 = {
 ALLOWED: dict[str, dict[str, str]] = {
     "gfx906": {
         **_XE2_ONLY,
-        r"rows_kernelILi16E": "a 16-wide sub-group's: gemm_rows takes rows_kernel<32> where the device lists no 16 "
-                              "(AMD)",
         r"GdnRecKh": _KEY_HEAD[r"GdnRecKh"] + "; on gfx906 it is the faster (7,443 tokens: 17.6 against 18.7 ms)",
-        r"gdn_step_plainILb1E": "512 work-items a work-group (S x RG) leave 128 VGPRs a work-item; not looked at yet",
-        r"launch_chunkILi256ELi12ELi0E": "sized for two work-groups a compute unit (STRATA_MAX_WG_OCC(THREADS, 2)): "
-                                         "one VGPR spills, and the prompt's attention took 2,654 -> 1,979 ms",
+        r"gdn_step_plainILb[01]E|gdn_step_prefetchILb[01]E":
+            "512 work-items a work-group (S x RG) leave 128 VGPRs a work-item: 30-52 spill with intel/llvm v7.2.0 "
+            "(v7.1.1: gdn_step_plain<true> alone), and Swift 1.5 IQ3_XXS decoded as fast (40.5 tok/s against 41.4 and "
+            "40.0, 2026-10-25); not looked at yet",
+        r"GdnILi16ELi(32|48)EE10recurrence": "the prompt's recurrence, 512 work-items (S x RG), 128 VGPRs: 24 spill with "
+                                             "intel/llvm v7.2.0, and Qwen3.6's 6.3K-token prefill was as fast (748-754 "
+                                             "tok/s against 746-749); not looked at yet",
+        r"launch_chunkILi256ELi12ELi[0-3]E": "sized for two work-groups a compute unit (occupancy_kernel<..., 2, ...>): "
+                                             "3-14 VGPRs spill with intel/llvm v7.2.0 (v7.1.1: one, the first KV form "
+                                             "alone), and the prompt's attention took 2,654 -> 1,979 ms",
+        r"dequant_kernelILi(14|1481834497)EfE": "Q6_K's dequantization to FP32, 32 values a work-item: a range kernel, "
+                                                "whose work-group the runtime chooses (no bound); 45-61 spill with "
+                                                "intel/llvm v7.2.0; not looked at yet",
+        r"mf_vae_detail9pixel_mlp": "Mage-Flow's VAE pixel MLP (upstream's): a range kernel, whose work-group the "
+                                    "runtime chooses (no bound); not looked at yet",
+        r"RowsI8": "the image engine's W8A8 rows (upstream's): a work-group a row, up to the device's largest (its "
+                   "groups of 256 values across it); 6 spill; not looked at yet",
     },
     "gfx1030": {**_XE2_ONLY, **_KEY_HEAD},
     "gfx1100": {**_XE2_ONLY, **_KEY_HEAD, **_RDNA3},
@@ -324,7 +337,7 @@ def main(argv: list[str]) -> int:
     for entry in stale:
         print(f"  note: no kernel spills that ALLOWED's {entry} names: remove the entry")
     if bad:
-        print("check_amdgpu_spills: bound the kernel's work-group (STRATA_MAX_WG, "
+        print("check_amdgpu_spills: bound the kernel's work-group (reqd_work_group_size or max_work_group_size, "
               "include/strata/kernels/work_group.hpp) or, if it must spill, add it to ALLOWED in "
               "tools/check_amdgpu_spills.py with the reason")
     return 1 if bad and not args.list else 0

@@ -78,7 +78,7 @@ void native_flash_attn_short_step(const float* q, const uint16_t* k, const uint1
         sycl::local_accessor<float, 1> tile(sycl::range<1>(4 * 4 * 256), h);
         sycl::local_accessor<float, 1> max_shared(sycl::range<1>(32), h);
         sycl::local_accessor<float, 1> sum_shared(sycl::range<1>(32), h);
-        h.parallel_for(sycl::nd_range<1>(24 * 128, 128), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, 128)]] {
+        h.parallel_for(sycl::nd_range<1>(24 * 128, 128), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), sycl::reqd_work_group_size(128)]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int tid = int(it.get_local_id(0)), lane = tid % 32, warp = tid / 32;
             const int head = int(it.get_group(0)), kv = head / 12;

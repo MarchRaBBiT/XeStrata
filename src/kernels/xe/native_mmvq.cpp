@@ -520,7 +520,7 @@ sycl::event launch_kernel(sycl::queue& q, const void* weights, const void* x_q8_
     return q.submit([&](sycl::handler& h) {
         sycl::local_accessor<float, 1> partial(sycl::range<1>(PW * NCOLS * ROWS * WARP), h);
         h.parallel_for(sycl::nd_range<1>(groups * NW * WARP, NW * WARP),
-                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, NW * WARP)]] {
+                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), sycl::reqd_work_group_size(NW * WARP)]] {
             constexpr int BPI = F::BPI * NW / WARPS;           // blocks per iteration scale with the warp count
             const sycl::sub_group sg = it.get_sub_group();
             const int ty = (int) warp32::index(sg), tx = (int) warp32::lane(sg);
@@ -587,7 +587,7 @@ sycl::event launch_row(sycl::queue& q, const void* weights, const void* x_q8_1, 
     const int rows_all = weights2 ? 2 * n_out : n_out;
     const std::size_t groups = (std::size_t(rows_all) + RPG - 1) / RPG;
     return q.parallel_for(sycl::nd_range<1>(groups * RPG * WARP, std::size_t(RPG) * WARP),
-                          [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, RPG * WARP)]] {
+                          [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), sycl::reqd_work_group_size(RPG * WARP)]] {
         const sycl::sub_group sg = it.get_sub_group();
         const int lane = (int) warp32::lane(sg);
         int row = (int) it.get_group(0) * RPG + (int) warp32::index(sg);

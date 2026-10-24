@@ -164,7 +164,7 @@ python3 tools/intel_llvm_build.py --contrib --keep-build
   shuffle を使う AMD 向けのプログラムはどれもリンクで止まっていました（「undefined symbol: __spirv_GroupNonUniformShuffleXor(int, float, unsigned int)」）。
   修正後は、AMD 向けの libspirv がスカラーの型について 4 つの GroupNonUniform の shuffle を SubgroupShuffle*INTEL で定義します（`hip-group-shuffle`）。
   18 番目: SYCL のカーネルの work-group の大きさは、NVIDIA のコードには NVVM の注釈として渡りますが（`SYCLCreateNVVMAnnotationsPass`）、AMD のコードには `reqd_work_group_size` の属性のものしか渡りません（clang の AMDGPU のコード生成。v7.1.1 はそれも渡しませんでした）。
-  `max_work_group_size` の属性やプロパティ、`max_linear_work_group_size` で大きさを付けた AMD のカーネルは 1024 work-item までの work-group 用にコンパイルされ、1 つのウェーブが 64 レーンの GPU（gfx906）では VGPR が 64 個に限られて、残りがスクラッチメモリにあふれていました（v7.1.1 で、エンジンの 4,007 のカーネルのうち 2,298）。
+  `max_work_group_size` や `max_linear_work_group_size` のプロパティで大きさを付けた AMD のカーネル（v7.2.0 は `intel::max_work_group_size` の属性をなくしました）は 1024 work-item までの work-group 用にコンパイルされ、1 つのウェーブが 64 レーンの GPU（gfx906）では VGPR が 64 個に限られて、残りがスクラッチメモリにあふれていました（v7.1.1 で、エンジンの 4,007 のカーネルのうち 2,298）。
   修正後は、同じパスが AMDGCN のカーネルにその範囲を `amdgpu-flat-work-group-size` として付けます（`reqd_work_group_size` は N,N、ほかは 1,N。N は次元の積で 1024 まで。カーネル自身の `amdgpu-flat-work-group-size` は、属性から付いたものもそのままです。`hip-flat-work-group-size`）。
   エンジンは起動する work-group の大きさをカーネルに付けます（`include/strata/kernels/work_group.hpp`）。
   CUDA の修正は contrib-llvm のツールチェーンにだけ、HIP の修正は HIP を持つ（または ROCm が入った今なら持つ）ツールチェーンにだけ、作り直しを求めます。

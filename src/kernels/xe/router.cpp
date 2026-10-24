@@ -282,7 +282,8 @@ void route_prior_top10(const float* logits, const int32_t* res_layer, float lamb
     if (n_tok <= 0) return;
     if (!stream || res_layer == nullptr) throw std::invalid_argument("route-prior requires a stream and the residency row");
     queue_for(stream, true).parallel_for(sycl::nd_range<1>((size_t) n_tok * WARP, WARP), [=](sycl::nd_item<1> it)
-                                         [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP))]] {
+                                         [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)),
+                                           sycl::reqd_work_group_size(WARP)]] {
         const sycl::sub_group sg = it.get_sub_group();
         const size_t tok = it.get_group(0);
         const float* lg = logits + tok * 512;

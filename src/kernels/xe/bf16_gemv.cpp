@@ -160,7 +160,7 @@ sycl::event launch_mmvf_rows(sycl::queue& q, const float* x, int64_t ldx, const 
     return q.submit([&](sycl::handler& h) {
         sycl::local_accessor<float, 1> partials(sycl::range<1>((size_t) RPB * NT * 32), h);
         h.parallel_for(sycl::nd_range<1>((size_t) ((n_out + RPB - 1) / RPB) * BLOCK_SIZE, BLOCK_SIZE),
-                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, BLOCK_SIZE)]] {
+                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), sycl::reqd_work_group_size(BLOCK_SIZE)]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int t = (int) it.get_local_id(0);
             const int64_t o0 = (int64_t) it.get_group(0) * RPB;

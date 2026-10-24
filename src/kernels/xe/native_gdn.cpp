@@ -124,7 +124,7 @@ void native_gdn_step_rows(float* state, const float* h, int64_t h_stride, const 
     queue.submit([&](sycl::handler& cgh) {
         sycl::local_accessor<float, 1> part(sycl::range<1>(size_t(RG) * WARP), cgh);
         cgh.parallel_for(sycl::nd_range<2>({size_t(h_v), size_t(S / WARP) * RG * WARP}, {1, size_t(RG) * WARP}),
-                         [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, RG * WARP)]] {
+                         [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), sycl::reqd_work_group_size(1, RG * WARP)]] {
             const int head = int(it.get_group(0));
             const int lane = int(it.get_local_id(1)) % WARP, rg = int(it.get_local_id(1)) / WARP;
             const int col = int(it.get_group(1)) * WARP + lane;

@@ -159,7 +159,7 @@ sycl::event launch_chunk(sycl::queue& queue, const float* q_all, const QsaAttnPo
         // 145 VGPRs on gfx906, one wave a SIMD; for two, 128 and twice the waves (Flash-Next's 6.3K-token prompt,
         // attention 2,654 -> 1,979 ms)
         hd.parallel_for(sycl::nd_range<3>({n_q, (size_t) n_kv_heads, (size_t) n_chunks * THREADS}, {1, 1, THREADS}),
-                        [=](sycl::nd_item<3> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG_OCC(THREADS, 2)]] {
+                        occupancy_kernel<3, THREADS, 2, WARP>([=](sycl::nd_item<3> it) {
             const auto grp = it.get_group();
             const sycl::sub_group sg = it.get_sub_group();
             const size_t z = it.get_group(0);
@@ -288,7 +288,7 @@ sycl::event launch_chunk(sycl::queue& queue, const float* q_all, const QsaAttnPo
                 fold(c, load_v1<HD, KV_MODE>(p, srow[c], t));
             }
             for (int h = 0; h < G; ++h) part_acc[((size_t) slot * G + h) * HD + t] = acc[h];
-        });
+        }));
     });
 }
 

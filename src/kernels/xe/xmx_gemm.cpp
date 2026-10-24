@@ -343,7 +343,7 @@ sycl::event rows_kernel(sycl::queue& q, bool half, const uint16_t* X, const uint
     // the rows in the last dimension: a CUDA grid's second dimension is capped at 65535 blocks, which the rows of a
     // large product (a VAE convolution's 262144 pixels) pass; the output blocks (N / 16) stay far below it
     return q.parallel_for(
-        sycl::nd_range<2>({(size_t) nb, (size_t) T * SG}, {1, SG}), [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_SUB_GROUP(SG))]] {
+        sycl::nd_range<2>({(size_t) nb, (size_t) T * SG}, {1, SG}), [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_SUB_GROUP(SG)), sycl::reqd_work_group_size(1, SG)]] {
             const auto sg = it.get_sub_group();
             const int64_t r = (int64_t) it.get_group(1), n0 = (int64_t) it.get_group(0) * NB;
             const int lane = (int) warp32::lane(sg);

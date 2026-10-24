@@ -1042,7 +1042,7 @@ sycl::event launch_mmvq_n(sycl::queue& q, const uint8_t* w, size_t row_bytes, co
                           int n_out) {
     const size_t groups = (size_t) ((n_out + 3) / 4);
     return q.parallel_for(sycl::nd_range<1>(groups * 4 * kWarp, 4 * kWarp),
-                          [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(kWarp)), STRATA_MAX_WG(1, 1, 4 * kWarp)]] {
+                          [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(kWarp)), sycl::reqd_work_group_size(4 * kWarp)]] {
         const sycl::sub_group sg = it.get_sub_group();
         const int row = (int) it.get_group(0) * 4 + (int) warp32::index(sg);
         if (row >= n_out) return;
@@ -1107,7 +1107,7 @@ sycl::event launch_native_gu(sycl::queue& q, size_t cap_groups, const unsigned l
     const int row_lo = part == 1 ? (int) L.n_ff : 0, row_hi = part == 0 ? (int) L.n_ff : (int) (2 * L.n_ff);
     const size_t xgroups = (size_t) ((row_hi - row_lo + (int64_t) GU_ROWS * RPW - 1) / ((int64_t) GU_ROWS * RPW));
     return q.parallel_for(sycl::nd_range<2>({cap_groups, xgroups * GU_ROWS * kWarp}, {1, GU_ROWS * kWarp}),
-                          [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(kWarp)), STRATA_MAX_WG(1, 1, GU_ROWS * kWarp)]] {
+                          [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(kWarp)), sycl::reqd_work_group_size(1, GU_ROWS * kWarp)]] {
         const sycl::sub_group sg = it.get_sub_group();
         const int warp = (int) warp32::index(sg), lane = (int) warp32::lane(sg);
         const int row0 = row_lo + ((int) it.get_group(1) * GU_ROWS + warp) * RPW;

@@ -217,7 +217,7 @@ sycl::event cpu_order_projection(sycl::queue& q, const uint8_t* blob_base, const
     const int rows = n_hits * rows_per_hit;
     const int rows_per_group = THREADS / 8;
     const size_t groups = (size_t) ((rows + rows_per_group - 1) / rows_per_group);
-    return q.parallel_for(sycl::nd_range<1>(groups * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, THREADS)]] {
+    return q.parallel_for(sycl::nd_range<1>(groups * THREADS, THREADS), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), sycl::reqd_work_group_size(THREADS)]] {
         const sycl::sub_group sg = it.get_sub_group();
         const int t = (int) it.get_local_id(0);
         const int row_any = (int) it.get_group(0) * rows_per_group + t / 8;

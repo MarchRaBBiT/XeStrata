@@ -187,7 +187,7 @@ sycl::event launch_q8_split(sycl::queue& q, const uint8_t* x, const uint8_t* cod
     return q.submit([&](sycl::handler& h) {
         sycl::local_accessor<signed char, 1> tbl(sycl::range<1>(16), h);
         h.parallel_for(sycl::nd_range<1>(groups * THREADS, THREADS),
-                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, THREADS)]] {
+                       [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), sycl::reqd_work_group_size(THREADS)]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int tid = (int) it.get_local_id(0);
             signed char* t = &tbl[0];

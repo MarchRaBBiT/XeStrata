@@ -837,7 +837,7 @@ struct Gdn {
             q.submit([&](sycl::handler& hd) {
                 sycl::local_accessor<float, 1> sk(sycl::range<1>(S), hd), sq(sycl::range<1>(S), hd),
                     red(sycl::range<1>((size_t) RG * S), hd), wsum(sycl::range<1>(16), hd);
-                hd.parallel_for(sycl::nd_range<1>((size_t) HV * S * RG, (size_t) S * RG), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, S * RG)]] {
+                hd.parallel_for(sycl::nd_range<1>((size_t) HV * S * RG, (size_t) S * RG), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), sycl::reqd_work_group_size(S * RG)]] {
                     const sycl::sub_group sg = it.get_sub_group();
                     const int head = (int) it.get_group(0), tid = (int) it.get_local_id(0), col = tid % S, rg = tid / S;
                     const int qh = head % HK;
@@ -897,7 +897,7 @@ struct Gdn {
             q.submit([&](sycl::handler& hd) {
             sycl::local_accessor<float, 1> sk(sycl::range<1>(S), hd), sq(sycl::range<1>(S), hd),
                 red(sycl::range<1>((size_t) RG * CB), hd);
-            hd.parallel_for(sycl::nd_range<1>((size_t) HV * NCB * CB * RG, (size_t) CB * RG), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, CB * RG)]] {
+            hd.parallel_for(sycl::nd_range<1>((size_t) HV * NCB * CB * RG, (size_t) CB * RG), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), sycl::reqd_work_group_size(CB * RG)]] {
                 const int head = (int) it.get_group(0) / NCB, cb = (int) it.get_group(0) % NCB;
                 const int tid = (int) it.get_local_id(0), c = tid % CB, rg = tid / CB, col = cb * CB + c;
                 const int qh = head % HK;
@@ -992,7 +992,7 @@ struct Gdn {
         }
         q.submit([&](sycl::handler& hd) {
             sycl::local_accessor<float, 1> wsum(sycl::range<1>(4), hd);
-            hd.parallel_for(sycl::nd_range<2>({(size_t) T, (size_t) HV * S}, {1, S}), [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, S)]] {
+            hd.parallel_for(sycl::nd_range<2>({(size_t) T, (size_t) HV * S}, {1, S}), [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), sycl::reqd_work_group_size(1, S)]] {
                 const sycl::sub_group sg = it.get_sub_group();
                 const int64_t t = (int64_t) it.get_group(0);
                 const int head = (int) it.get_group(1), col = (int) it.get_local_id(1);

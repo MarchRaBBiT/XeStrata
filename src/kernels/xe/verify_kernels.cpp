@@ -166,7 +166,7 @@ template <int MAX_T, bool EXACT>
 sycl::event gdn_ab_launch(sycl::queue& q, const float* x, const uint16_t* w_alpha, const uint16_t* w_beta,
                           const float* dt, const float* ssm_a, float* gate, float* beta, int n, int h_v, int T_arg) {
     const size_t groups = (size_t) ((2 * h_v + 7) / 8);
-    return q.parallel_for(sycl::nd_range<1>(groups * 256, 256), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, 256)]] {
+    return q.parallel_for(sycl::nd_range<1>(groups * 256, 256), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), sycl::reqd_work_group_size(256)]] {
         const int T = EXACT ? MAX_T : T_arg;
         const sycl::sub_group sg = it.get_sub_group();
         const int row = (int) it.get_group(0) * 8 + (int) warp32::index(sg);
@@ -246,7 +246,7 @@ sycl::event gdn_step_split(sycl::queue& q, float* state, const float* hbuf, int 
         sycl::local_accessor<float, 1> sk(sycl::range<1>(S), hd), sq(sycl::range<1>(S), hd),
             red(sycl::range<1>((size_t) RG * GS_COLS), hd);
         hd.parallel_for(sycl::nd_range<1>((size_t) h_v * (S / GS_COLS) * GS_COLS * RG, (size_t) GS_COLS * RG),
-                        [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, GS_COLS * RG)]] {
+                        [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), sycl::reqd_work_group_size(GS_COLS * RG)]] {
             const int grp = (int) it.get_group(0), head = grp / (S / GS_COLS), c0 = (grp % (S / GS_COLS)) * GS_COLS;
             const int tid = (int) it.get_local_id(0), lc = tid % GS_COLS, rg = tid / GS_COLS, col = c0 + lc;
             const int qh = head % h_k;
@@ -295,7 +295,7 @@ sycl::event gdn_step_split(sycl::queue& q, float* state, const float* hbuf, int 
     return q.submit([&](sycl::handler& hd) {
         const bool silu = gdn_silu_gate();   // the closing norm's gate (gdn.hpp)
         sycl::local_accessor<float, 1> wsum(sycl::range<1>(S / WARP), hd);
-        hd.parallel_for(sycl::nd_range<1>((size_t) h_v * rows * S, S), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, S)]] {
+        hd.parallel_for(sycl::nd_range<1>((size_t) h_v * rows * S, S), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), sycl::reqd_work_group_size(S)]] {
             const sycl::sub_group sg = it.get_sub_group();
             const int grp = (int) it.get_group(0), head = grp % h_v, t = grp / h_v + t_out_begin;
             const int col = (int) it.get_local_id(0);
@@ -334,7 +334,7 @@ sycl::event gdn_state_commit(sycl::queue& q, float* state0, const float* hbuf0, 
         sycl::local_accessor<float, 1> sk(sycl::range<1>(S), hd), red(sycl::range<1>((size_t) RG * GS_COLS), hd);
         const int per_layer = h_v * (S / GS_COLS);
         hd.parallel_for(sycl::nd_range<1>((size_t) n_layers * per_layer * GS_COLS * RG, (size_t) GS_COLS * RG),
-                        [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, GS_COLS * RG)]] {
+                        [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), sycl::reqd_work_group_size(GS_COLS * RG)]] {
             const int n = *n_keep;
             if (n <= 0) return;   // the whole launch
             const int z = (int) it.get_group(0) / per_layer;
@@ -448,7 +448,7 @@ sycl::event gdn_step_plain(sycl::queue& q, float* state, const float* hbuf, int 
         if constexpr (Q8)
             hd.parallel_for(sycl::nd_range<1>((size_t) h_v * S * RG, (size_t) S * RG), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), sycl::reqd_work_group_size(S * RG)]] { body(it); });
         else
-            hd.parallel_for(sycl::nd_range<1>((size_t) h_v * S * RG, (size_t) S * RG), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, S * RG)]] { body(it); });
+            hd.parallel_for(sycl::nd_range<1>((size_t) h_v * S * RG, (size_t) S * RG), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), sycl::reqd_work_group_size(S * RG)]] { body(it); });
     });
 }
 
@@ -534,7 +534,7 @@ sycl::event gdn_step_prefetch(sycl::queue& q, float* state, const float* hbuf, i
         if constexpr (Q8)
             hd.parallel_for(sycl::nd_range<1>((size_t) h_v * rg_s, rg_s), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), sycl::reqd_work_group_size(S * RG)]] { body(it); });
         else
-            hd.parallel_for(sycl::nd_range<1>((size_t) h_v * rg_s, rg_s), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), STRATA_MAX_WG(1, 1, S * RG)]] { body(it); });
+            hd.parallel_for(sycl::nd_range<1>((size_t) h_v * rg_s, rg_s), [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(STRATA_HW_SUB_GROUP(WARP)), sycl::reqd_work_group_size(S * RG)]] { body(it); });
     });
 }
 
