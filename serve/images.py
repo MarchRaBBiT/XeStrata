@@ -22,8 +22,9 @@ and the config's "gpu_policy" says what happens to the text engine during the jo
   keep    - it stays loaded and idle (an APU's shared memory, a card with room for both)
   shrink  - an engine started with --vram-elastic gives the image job VRAM from its expert cache and takes it back
             afterwards (POST /v1/vram's mechanism; the conversation stays in the engine)
-  unload  - its conversation is saved to a session file, the engine is stopped, and the next start restores it
-  auto    - (default) keep when the image fits beside it at full speed, else shrink when the engine can, else keep
+  unload  - its conversation is saved to a session file, the engine is stopped, and the next start restores it;
+            the job waits for the engine's VRAM to come back (UNLOAD_ROOM_WAIT_S at most) before it sizes its budget
+  auto   - (default) keep when the image fits beside it at full speed, else shrink when the engine can, else keep
             when the image fits at all (its layers streamed), else unload
 After a job the image engine keeps what it holds (the next image starts warm) only under keep with VRAM to spare;
 otherwise it lets go of everything but its process (about 200 MiB).  What it kept it lets go of as well before the
@@ -76,6 +77,11 @@ DROP = 14
 REF_PROMPT = "{sep}<image{i}><|vision_start|><|image_pad|><|vision_end|>"
 REF_MAX_BYTES = 32 << 20
 START_TIMEOUT_S = 600              # the engine's start: the parts opened and a small image made (kernels built)
+# after an unload, the text engine's VRAM comes back when the driver has let go of its process, which can be after
+# the process ended (an engine in a container on the Radeon VII: the budget sized at once was 1136 MiB of 16 GB)
+UNLOAD_ROOM_WAIT_S = 60.0          # how long an image job waits for it at most
+ROOM_SETTLE_S = 2.0                # the free VRAM not rising for this long, with the least in it: all that comes back
+ROOM_POLL_S = 0.25
 
 
 class ImageRequestError(ValueError):
@@ -558,6 +564,14 @@ class ImageGen:
             self._ready()
             return int(self.engine.ask("FREE", "FREE", 60)["free_mib"])
 
+    def room(self) -> int:
+        """What the budget would be now (FIT's, left as it is): what the engine holds and the free VRAM, less the
+        reserve (MiB)."""
+        with self.lock:
+            self._ready()
+            r = self.engine.ask("FREE", "FREE", 60)
+            return int(r["free_mib"]) + int(r.get("held_mib", 0)) - self.reserve
+
     def fit(self) -> int:
         """The engine's budget set to what it holds and what is free now, less the reserve -> the budget (MiB)."""
         with self.lock:
@@ -834,6 +848,8 @@ def gpu_turn(svc, gen: ImageGen, job: dict, cancel: threading.Event | None = Non
                                       first_token=None, prompt_tokens=None, generated=None, max_tokens=None)
                 restore = _make_room(svc, gen, policy, need)
                 try:
+                    if policy == "unload":           # its VRAM comes back after its process has ended
+                        _await_room(svc, gen, need, cancel)
                     budget = gen.fit()
                     gen._say(f"image job: {policy}, the image engine's budget {budget} MiB (the DiT resident from "
                              f"{need['full_mib']} MiB, at least {need['least_mib']} MiB)")
@@ -850,6 +866,27 @@ def gpu_turn(svc, gen: ImageGen, job: dict, cancel: threading.Event | None = Non
         if queued:
             with svc.status_lock:
                 svc.status["queued"] -= 1
+
+
+def _await_room(svc, gen: ImageGen, need: dict, cancel: threading.Event | None) -> None:
+    """After an unload: waits, UNLOAD_ROOM_WAIT_S at most, until the DiT fits resident, or the least fits and the free
+    VRAM has not risen for ROOM_SETTLE_S, so that the budget is sized from what the text engine gave back."""
+    t0 = time.monotonic()
+    best, since = gen.room(), t0
+    while best < need["full_mib"]:
+        now = time.monotonic()
+        if (best >= need["least_mib"] and now - since >= ROOM_SETTLE_S) or now - t0 >= UNLOAD_ROOM_WAIT_S:
+            break
+        if cancel is not None and cancel.is_set():
+            raise _client_gone(svc)
+        time.sleep(ROOM_POLL_S)
+        room = gen.room()
+        if room > best:
+            best, since = room, time.monotonic()
+    waited = time.monotonic() - t0
+    if waited >= 1:
+        gen._say(f"image job: {waited:.1f} s for the VRAM the model gave back ({best} MiB; the DiT resident from "
+                 f"{need['full_mib']} MiB)")
 
 
 def _make_room(svc, gen: ImageGen, policy: str, need: dict):

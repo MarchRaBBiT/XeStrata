@@ -1344,6 +1344,7 @@ The image engine starts with the first image and stays: its kernels are prepared
 Image jobs run one at a time on the GPU. Before a job the engine says what the image needs in VRAM (the least, and the DiT whole with the VAE in one piece), and what the text model does meanwhile is `--image-gpu-policy`: `keep` (stays as it is), `shrink` (gives VRAM back through `--vram-elastic`), `unload` (its conversation saved, unloaded, restored at the next start), or `auto` (the default: `keep` when everything fits, else `shrink` when the engine can, else `keep` with the layers streamed when the least fits, else `unload`).
 After a job the image engine keeps its layers only under `keep` with VRAM to spare; otherwise it lets go of what it holds (idle, the process alone, about 200 MiB).
 It lets go of the layers it kept as well before the text model loads again (the next chat after an `unload`, for example).
+Under `unload` the job waits for the VRAM of the model it unloaded to come back (60 s at most) before it sizes the image's budget.
 `tools/image/install.py --config <config>` adds it to an existing install.
 
 ---
