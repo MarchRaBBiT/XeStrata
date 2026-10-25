@@ -32,8 +32,8 @@ from pathlib import Path
 
 # Kernels that may spill, by AMD target (the "gfx..." name, without features such as ":xnack-") and a regular
 # expression searched in the kernel's mangled name, each with the reason.  A kernel that spills on a target and matches
-# none of its target's entries fails the check.  The RDNA targets are the packages' (measured with intel/llvm 7.1.1),
-# gfx906's with v7.2.0.
+# none of its target's entries fails the check.  The RDNA targets are the packages'; all measured with intel/llvm
+# v7.2.0.
 _XE2_ONLY = {
     r"GdnRecLane": "Xe2's: gdn_lane_ok takes it where the EU is 16 wide, so no AMD GPU runs it",
 }
@@ -41,20 +41,28 @@ _KEY_HEAD = {
     r"GdnRecKh": "the key-head form keeps 3 x 32 state rows a work-item in registers (128 work-items), and the prompt "
                  "path times it against D-2 at its first call and takes the faster (src/prefill/kernels.cpp)",
 }
+_MF_VAE = {
+    r"mf_vae_detail9pixel_mlp": "Mage-Flow's VAE pixel MLP (upstream's): a range kernel, whose work-group the "
+                                "runtime chooses (no bound); not looked at yet",
+}
 _PA_WMMA = ("prompt_attn.cpp's WMMA attention: bounded at its launch's W x 32 work-items, and the tile still takes "
-            "more than 256 VGPRs; not looked at yet")
+            "more than 256 VGPRs: 8-81 spill on RDNA3 and 187-214 on RDNA4 with intel/llvm v7.2.0 (v7.1.1: 10 on "
+            "RDNA3, 100 on RDNA4, one shape each); not looked at yet")
+_MMQ = ("iq_mmq.cpp's int8 WMMA tiles of the K-quants (Q4_K, Q5_K) and of Q8_0 split by row: bounded at their launch's "
+        "work-group (128 or 256 work-items), and the tile still takes more than 256 VGPRs with intel/llvm v7.2.0 "
+        "(63-120 spill, the split Q8_0's 1; upstream's own count on gfx1200 is the same 63-66, which it looks at "
+        "apart); not looked at yet")
 _RDNA3 = {
-    r"WmmaKernelILi256ELi8ELi8E": _PA_WMMA,
+    r"WmmaKernelILi(256ELi8ELi8|256ELi12ELi4|128ELi10ELi8)E": _PA_WMMA,
     r"AttnKernelILi3E": "the image engine's RDNA attention: bounded at its largest launch (8 sub-groups), and it still "
-                        "takes more than 256 VGPRs; not looked at yet",
-    r"6KernelILi(12|20|23|42)ELi2ELi2ELb0E|6KernelILi6ELi2ELi1ELb0E":
-        "iq_mmq.cpp's int8 WMMA tiles: bounded at their launch's work-group (256 or 128 work-items), and the tile "
-        "still takes more than 256 VGPRs; not looked at yet",
+                        "takes more than 256 VGPRs (24 spill with intel/llvm v7.2.0, v7.1.1 18); not looked at yet",
+    r"6KernelILi(12|13|1481834498)ELi2ELi[12]ELb0E": _MMQ,
 }
 _RDNA4 = {
-    r"WmmaKernelILi256ELi12ELi4E": _PA_WMMA,
-    r"6KernelILi12ELi2ELi2ELb0E": "iq_mmq.cpp's int8 WMMA tile of Q4_K: bounded at its launch's 256 work-items, and "
-                                  "the tile still takes more than 256 VGPRs; not looked at yet",
+    r"WmmaKernelILi256ELi(8ELi8|12ELi4)E": _PA_WMMA,
+    r"6KernelILi(12|13)ELi2ELi[12]ELb0E": _MMQ,
+    r"launch_chunkILi256ELi12ELi0E": "sized for two work-groups a compute unit (occupancy_kernel<..., 2, ...>): one "
+                                     "VGPR spills with intel/llvm v7.2.0; not looked at yet",
 }
 ALLOWED: dict[str, dict[str, str]] = {
     "gfx906": {
@@ -64,26 +72,30 @@ ALLOWED: dict[str, dict[str, str]] = {
             "512 work-items a work-group (S x RG) leave 128 VGPRs a work-item: 30-52 spill with intel/llvm v7.2.0 "
             "(v7.1.1: gdn_step_plain<true> alone), and Swift 1.5 IQ3_XXS decoded as fast (40.5 tok/s against 41.4 and "
             "40.0, 2026-10-25); not looked at yet",
-        r"GdnILi16ELi(32|48)EE10recurrence": "the prompt's recurrence, 512 work-items (S x RG), 128 VGPRs: 24 spill with "
-                                             "intel/llvm v7.2.0, and Qwen3.6's 6.3K-token prefill was as fast (748-754 "
-                                             "tok/s against 746-749); not looked at yet",
-        r"launch_chunkILi256ELi12ELi[0-3]E": "sized for two work-groups a compute unit (occupancy_kernel<..., 2, ...>): "
-                                             "3-14 VGPRs spill with intel/llvm v7.2.0 (v7.1.1: one, the first KV form "
-                                             "alone), and the prompt's attention took 2,654 -> 1,979 ms",
+        r"GdnILi16ELi(32|48)EE10recurrence":
+            "the prompt's recurrence, 512 work-items (S x RG), 128 VGPRs: 24 spill with intel/llvm v7.2.0, and "
+            "Qwen3.6's 6.3K-token prefill was as fast (748-754 tok/s against 746-749); not looked at yet",
+        r"launch_chunkILi256ELi12ELi[0-3]E":
+            "sized for two work-groups a compute unit (occupancy_kernel<..., 2, ...>): 3-14 VGPRs spill with "
+            "intel/llvm v7.2.0 (v7.1.1: one, the first KV form alone), and the prompt's attention took 2,654 -> "
+            "1,979 ms",
         r"dequant_kernelILi(14|1481834497)EfE": "Q6_K's dequantization to FP32, 32 values a work-item: a range kernel, "
                                                 "whose work-group the runtime chooses (no bound); 45-61 spill with "
                                                 "intel/llvm v7.2.0; not looked at yet",
-        r"mf_vae_detail9pixel_mlp": "Mage-Flow's VAE pixel MLP (upstream's): a range kernel, whose work-group the "
-                                    "runtime chooses (no bound); not looked at yet",
+        **_MF_VAE,
         r"RowsI8": "the image engine's W8A8 rows (upstream's): a work-group a row, up to the device's largest (its "
                    "groups of 256 values across it); 6 spill; not looked at yet",
     },
-    "gfx1030": {**_XE2_ONLY, **_KEY_HEAD},
-    "gfx1100": {**_XE2_ONLY, **_KEY_HEAD, **_RDNA3},
-    "gfx1101": {**_XE2_ONLY, **_KEY_HEAD, **_RDNA3},
-    "gfx1151": {**_XE2_ONLY, **_KEY_HEAD, **_RDNA3},
-    "gfx1200": {**_XE2_ONLY, **_RDNA4},
-    "gfx1201": {**_XE2_ONLY, **_RDNA4},
+    "gfx1030": {
+        **_XE2_ONLY, **_KEY_HEAD, **_MF_VAE,
+        r"quantize_q8_KEPKfPhlPvE": "a range kernel, whose work-group the runtime chooses (no bound): 7 spill on "
+                                    "gfx1030 (128 VGPRs at 1,024 work-items) with intel/llvm v7.2.0; not looked at yet",
+    },
+    "gfx1100": {**_XE2_ONLY, **_KEY_HEAD, **_MF_VAE, **_RDNA3},
+    "gfx1101": {**_XE2_ONLY, **_KEY_HEAD, **_MF_VAE, **_RDNA3},
+    "gfx1151": {**_XE2_ONLY, **_KEY_HEAD, **_MF_VAE, **_RDNA3},
+    "gfx1200": {**_XE2_ONLY, **_MF_VAE, **_RDNA4},
+    "gfx1201": {**_XE2_ONLY, **_MF_VAE, **_RDNA4},
 }
 
 # intel/llvm builds each range kernel twice, the second for a launch with an offset (SYCL 1.2.1's, deprecated), which

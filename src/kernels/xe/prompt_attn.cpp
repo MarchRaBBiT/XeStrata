@@ -178,6 +178,11 @@ struct WmmaKernel {
     float scale;
     sycl::local_accessor<uint16_t, 1> ks, vs, ps;
 
+    // its work-group (1 x W waves, launch_wmma's) as the bound the device compile sizes the registers by
+    // (strata/kernels/work_group.hpp): without it, sized for 1,024 work-items, it spilled on RDNA3 and RDNA4.  The
+    // attribute, not a max_work_group_size property: with intel/llvm v7.2.0, 8-81 VGPRs spill on RDNA3 against the
+    // property's 31-92 (the same 187-214 on RDNA4)
+    [[sycl::reqd_work_group_size(1, W * 32), sycl::reqd_sub_group_size(STRATA_SUB_GROUP(32))]]
     void operator()(sycl::nd_item<2> it) const {
 #if STRATA_PA_WMMA
         using fv8 = float __attribute__((ext_vector_type(8)));
@@ -291,13 +296,6 @@ struct WmmaKernel {
 #else
         (void) it;
 #endif
-    }
-    // its work-group's size (1 x W waves) as the bound the device compile sizes the registers by
-    // (strata/kernels/work_group.hpp): without it, sized for 1,024 work-items, it spilled on RDNA3 and RDNA4
-    auto get(sycl::ext::oneapi::experimental::properties_tag) const {
-        return sycl::ext::oneapi::experimental::properties{
-            sycl::ext::oneapi::experimental::sub_group_size<STRATA_SUB_GROUP(32)>,
-            sycl::ext::oneapi::experimental::max_work_group_size<1, W * 32>};
     }
 };
 
