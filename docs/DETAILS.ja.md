@@ -588,6 +588,7 @@ XeStrata は、GPU の空いている VRAM をエキスパートで埋め（エ�
 目標に届かなくても（キャッシュが最小の大きさに達したとき、ドライバーが次のかたまりの VRAM を出さないとき）答えは `200` なので、答えの `vram_free_mib` を `reserve_mib` と比べます（upstream #1034）。
 要求が動いているか待っているときは、300 秒まで待ってから `409` を返します。
 GPU の実行時ライブラリーが仮想メモリーを持たないときは使えず、起動時のまま動きます（Intel の Level Zero と NVIDIA の CUDA は持ち、intel/llvm 7.2.0 の AMD の HIP は持ちません）。
+HIP と resident モードへ対応を広げる実装手順と合格条件は、[vram_elastic 対応計画](VRAM_ELASTIC_PLAN.ja.md)にあります。
 
 ### 手で取ってきたモデルのファイル、ミラーからのダウンロード
 
