@@ -6,9 +6,14 @@ SPDX-License-Identifier: LGPL-3.0-or-later
 
 English | [日本語](VRAM_ELASTIC_PLAN.ja.md)
 
-Status: a plan before implementation. The steps and tests below are implementation work and acceptance criteria.
-Enable the existing `vram_elastic` on the SYCL HIP path and in resident mode, so the expert cache can give VRAM
-back for images and take it again without restarting the text engine.
+Status: stopped at step 1 (2026-10-26).
+On AMD GPUs (ROCm), virtual memory mapped again with other physical memory at an address that was unmapped can send the
+data written there to other memory, so `vram_elastic` on HIP does not go ahead.
+What was checked is in [Step 1 results](#step-1-results), and what it takes to start again in
+[Conditions for resuming](#conditions-for-resuming). Steps 2 to 6 were not carried out.
+
+The plan was to enable the existing `vram_elastic` on the SYCL HIP path and in resident mode, so the expert cache
+could give VRAM back for images and take it again without restarting the text engine.
 Current usage is in [DETAILS](DETAILS.md#leaving-vram-for-other-programs).
 
 The machines, GPUs, toolchains, containers, settings, service operations and capability query results are in
@@ -27,21 +32,83 @@ and keep them under `<data>/records/` (`<data>`: `LOCAL.md`).
 New APIs or configuration keys, multiple GPUs and remote caches, continuous VRAM monitoring that shrinks the cache
 on its own, and forcing a copy of every expert into RAM are outside this change.
 
+## Step 1 results
+
+On a Radeon VII (gfx906), a probe called HIP's `hipMem*` and, below it, ROCr's `hsa_amd_vmem_*` directly, and did the
+cache's operations through a SYCL queue.
+ROCm was 7.14 (a build that includes gfx906), the kernel Linux 7.0, and the SYCL side intel/llvm v7.2.0.
+v7.2.0's UR has no HIP VMM, so XeStrata's path (`sycl_ext_oneapi_virtual_mem`) was not exercised.
+
+What worked:
+
+- The capability query reports support; the granularity is 4 KiB minimum and 2 MiB recommended. A map at a nonzero
+  offset fails with `hipErrorInvalidValue` (XeStrata maps at offset 0).
+- At addresses never mapped before, copies to and from pinned and pageable host memory, copies to and from device
+  memory, memset, fill, kernel reads and writes and graph replay all matched.
+  Copies, memsets and kernels across two physical allocations matched too.
+- `sycl::get_pointer_type` returns device for a mapped address and unknown for one that is only reserved (UR's assert
+  is not hit).
+- After `hipMemRelease` on mapped memory, the memory stays usable until the unmap and is released there.
+- After 20 shrink and restore cycles on four 512 MiB segments, neither HIP nor the kernel showed a leak (with 100 ms
+  between the shrink and the restore).
+- The speed was that of ordinary device memory (host copies 7.1 GB/s, a kernel read of 2 GiB 871 GB/s).
+  Creating, mapping and setting access for a 512 MiB segment took 0.1 ms, unmapping and releasing it 0.2 ms.
+- With the VRAM used up, `hipMemCreate` returns `hipErrorOutOfMemory` and the earlier allocations keep their contents.
+
+Why it stopped:
+
+- Other physical memory mapped at an unmapped address and written at once: the writes go to the physical memory mapped
+  there before (6 to 10 of 10 tries at 2 MiB).
+  With 1 ms or more between the unmap and the map, it did not happen.
+- After that address is written, other physical memory mapped at the next address can leave the first address pointing
+  at the new memory: what was written at the first address is lost, and it reads and writes the same memory as its
+  neighbour (0 to 4 of 10 tries at 2 MiB; at 512 MiB, 1 of 5 even with 100 ms between the unmap and the map).
+- Calling ROCr's `hsa_amd_vmem_*` directly gives the same, so the fault is below the HIP runtime (ROCr's virtual memory
+  or the kernel driver).
+  Neither a UR patch nor XeStrata can fix it.
+- `vram_elastic`'s restore maps new physical memory at the addresses the shrink unmapped, and the following segments
+  next to them.
+  `--kv-grow` maps the physical memory it takes from the cache at the K/V's addresses at once, and when it gives it back
+  maps other physical memory at the cache's addresses again.
+  Both are this sequence: the experts or the K/V would be corrupted without an error.
+
+What was learned about free memory (step 4's premises):
+
+- Released VRAM shows in HIP's free figure at once and in the kernel's count 40 ms later (`hipMemRelease` and
+  `hipFree` alike).
+- A Vulkan encoder using about 1 GiB of the same GPU does not lower HIP's free figure.
+  Allocating up to HIP's figure pushed about 870 MiB of the encoder's into GTT, and one encode went from 1.37 s to 5.5 s.
+  Freeing the VRAM did not bring the speed back until the encoder restarted.
+
+## Conditions for resuming
+
+- When a ROCm (ROCr and the kernel driver) handles other physical memory mapped again, and a map next to it, right
+  both straight after the unmap and with time between, run step 1 again; if it passes, start at step 2.
+- intel/llvm's sycl branch now implements HIP VMM (c13ad6c7, #22671).
+  With an intel/llvm that includes it, HIP devices report virtual memory, and with a 2 MiB granularity `--kv-grow` turns
+  on in launches that do not ask for it ([DETAILS](DETAILS.md#where-the-kv-cache-lives-and-its-precision)).
+  Before moving to such a version, add a check that keeps virtual memory unused with a runtime that has this fault.
+- The parts that do not depend on HIP (`vram_elastic` in resident mode, capacity decisions from the kernel's free
+  figure) would serve other GPUs too, but have not been started.
+
 ## Implementation evidence
 
 | Location | Current constraint and response |
 | --- | --- |
-| intel/llvm v7.2.0's UR HIP adapter | The VMM capability query in `device.cpp` always returns false; `virtual_mem.cpp` and `physical_mem.cpp` are not implemented. Add them through the existing numbered patches. |
+| intel/llvm v7.2.0's UR HIP adapter | The VMM capability query in `device.cpp` always returns false; `virtual_mem.cpp` and `physical_mem.cpp` are not implemented. intel/llvm's sycl branch implements them (c13ad6c7, #22671), and the change applies to the v7.2.0 tree as it is. To add them, port it through the existing numbered patches. |
 | The `vram_elastic` check in [generate.cpp](../src/program/generate.cpp) | Resident mode (`resident_cpu_experts` or `resident_gib`) is refused. Relax this after testing file reads and safe restoration. |
 | The `--kv-grow` check in `generate.cpp` | It looks at `resident_cpu_experts` only, and is decided before the automatic switch to resident mode when RAM is low. Once VMM works on HIP, `--kv-grow` can turn on in resident mode for a launch that did not ask for it. |
 | [ExpertCache](../include/strata/core/expert_cache.hpp) | Graphs, verify plans and prefill hold cache addresses. Keep the reserved virtual addresses and attach or detach only the physical memory. |
 | [FileExpertSource](../src/core/expert_source.cpp) | Existing file reads can supply experts absent from RAM. The RAM copy holds the experts the GPU does not and those of the prefill loan's slots, so when a shrink moves the loan to slots the copy does not hold, prefill reads them from the files on every chunk (upstream #669). Do not enlarge the RAM copy as the cache shrinks. |
 | The grow path in `generate.cpp`'s `vram_command` | `blob_to_copy`'s temporary buffer can be reused before a queued transfer finishes. Follow the existing prefill refill's lifetime handling. |
-| The capacity calculation in `generate.cpp`'s `vram_command` | The shrink and the answer's `vram_free_mib` come from `gpu::mem_info` (hipMemGetInfo on HIP). HIP's free memory may not subtract other programs' allocations on the same GPU. |
+| The capacity calculation in `generate.cpp`'s `vram_command` | The shrink and the answer's `vram_free_mib` come from `gpu::mem_info` (hipMemGetInfo on HIP). HIP's free memory does not subtract other programs' allocations on the same GPU (checked in step 1 for a Vulkan allocation). |
 | [gpu.cpp](../src/core/gpu.cpp) and [expert_cache.cpp](../src/core/expert_cache.cpp) | Shrink cannot receive a failure from `vmem_unmap`. Do not report a region as released after a failed release. |
 | [server.py](../serve/server.py)'s `_vision_up` and `vision_attempts` | An elastic encoder is not created at startup, so the configured fallback is tried at startup only. An encoder that fails to start in an image turn stays stopped until the server restarts. |
 
 ## Implementation steps
+
+Steps 2 onwards were not carried out, as step 1 did not pass. They stay as the steps for when the
+[conditions for resuming](#conditions-for-resuming) are met.
 
 ### 1. Check HIP VMM operations
 
@@ -59,14 +126,18 @@ Compare HIP's free VRAM with the kernel's report for the same GPU, including how
 releases, coexistence with an external Vulkan encoder, and eviction into GTT.
 Take the target PCI address and test environment from `LOCAL.md`.
 
+Check a new allocation at the same address both straight after the unmap and with time between, with the same and
+with other physical memory, and then the first address's contents after a map at the next address.
+The results of 2026-10-26 are in [Step 1 results](#step-1-results).
+
 ### 2. Implement VMM in the UR HIP adapter
 
-Before writing the patch, check whether intel/llvm's sycl branch already implements HIP VMM; if it does, port that.
+Port the HIP VMM implementation on intel/llvm's sycl branch (c13ad6c7, #22671).
 Add `NN-hip-virtual-memory.patch` under `third_party/main/intel-llvm/patches/`, covering UR's `device.cpp`,
 `physical_mem.hpp/.cpp` and `virtual_mem.cpp`.
 Start the patch, as the existing ones do, with its SPDX lines and a description of what it fixes.
-Use the CUDA adapter as a reference and implement HIP capability queries, granularity, device selection,
-access rights, handle reference counts, error conversion and cleanup after partial failure.
+Check that HIP capability queries, granularity, device selection, access rights, handle reference counts, error
+conversion and cleanup after partial failure are handled as in the CUDA adapter.
 Devices without support must report no support.
 
 XeStrata's core keeps using `sycl_ext_oneapi_virtual_mem`; HIP APIs stay in UR.

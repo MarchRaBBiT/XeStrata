@@ -607,7 +607,7 @@ The experts of the pieces given back are computed on the CPU: the same answers, 
 A reserve that cannot be met (the cache at its smallest size, or no VRAM from the driver for the next segment) still answers `200`: compare the answer's `vram_free_mib` with your `reserve_mib` (upstream #1034).
 While a request runs or waits, it waits up to 300 s, then answers `409`.
 Where the GPU's runtime has no virtual memory it is off and the cache stays as it started (Intel's Level Zero and NVIDIA's CUDA have it; AMD's HIP in intel/llvm 7.2.0 does not).
-The [vram_elastic plan](VRAM_ELASTIC_PLAN.md) describes the implementation steps and acceptance criteria for HIP and resident-mode support.
+The plan to extend it to HIP and resident mode stopped at its first check: virtual memory on AMD GPUs corrupts data when mapped again. The [vram_elastic plan](VRAM_ELASTIC_PLAN.md) has what was checked.
 
 ### Model files downloaded by hand, or from a mirror
 

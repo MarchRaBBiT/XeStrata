@@ -6,9 +6,12 @@ SPDX-License-Identifier: LGPL-3.0-or-later
 
 [English](VRAM_ELASTIC_PLAN.md) | 日本語
 
-状態: 実装前の計画。以下の手順と試験は、実装時の作業と合格条件です。
-既存の `vram_elastic` を SYCL の HIP 経路と resident モードで使えるようにし、
-文章のエンジンを再起動せず、画像に必要な間だけエキスパートのキャッシュから VRAM を返して取り戻します。
+状態: 手順 1 で止めました（2026-10-26）。
+AMD の GPU（ROCm）の仮想メモリーは、unmap したアドレスへ別の物理メモリーを map し直すと、書いたデータが別のメモリーへ行くことがあるので、HIP の `vram_elastic` は進めません。
+確かめた結果は[手順 1 の結果](#手順-1-の結果)に、もう一度始めるときの条件は[再開の条件](#再開の条件)にあります。手順 2〜6 は行っていません。
+
+この計画の目的は、既存の `vram_elastic` を SYCL の HIP 経路と resident モードで使えるようにし、
+文章のエンジンを再起動せず、画像に必要な間だけエキスパートのキャッシュから VRAM を返して取り戻すことでした。
 現在の使い方は [DETAILS](DETAILS.ja.md#ほかのプログラムのために-vram-を空ける) にあります。
 
 対象マシン、GPU、ツールチェーン、コンテナ、設定、サービスの操作方法、機能照会の結果は、
@@ -25,21 +28,69 @@ SPDX-License-Identifier: LGPL-3.0-or-later
 API や設定キーの追加、複数 GPU とリモートキャッシュへの対応、常時 VRAM を監視して勝手に縮小する仕組み、
 エキスパート全体の RAM への強制コピーは、この改修の範囲に含めません。
 
+## 手順 1 の結果
+
+Radeon VII（gfx906）で、HIP の `hipMem*` と、その下の ROCr の `hsa_amd_vmem_*` を直接呼ぶプローブを作り、
+キャッシュが行う操作を SYCL のキューから出して確かめました。
+ROCm は 7.14（gfx906 を含めてビルドしたもの）、カーネルは Linux 7.0、SYCL 側は intel/llvm v7.2.0 です。
+v7.2.0 の UR は HIP の VMM を持たないので、XeStrata の経路（`sycl_ext_oneapi_virtual_mem`）は通していません。
+
+正しく動いたもの:
+
+- 能力照会は対応と答え、粒度は最小 4 KiB、推奨 2 MiB です。0 以外の offset での map は `hipErrorInvalidValue` になります（XeStrata は offset 0 で map します）。
+- 一度も map していないアドレスでは、pinned と pageable の host との両方向のコピー、device メモリーとのコピー、memset、fill、カーネルの読み書き、graph の再生がすべて一致しました。
+  2 つの物理割当をまたぐコピー、memset、カーネルも一致しました。
+- map したアドレスに対する `sycl::get_pointer_type` は device を、予約しただけのアドレスは unknown を返します（UR の assert には当たりません）。
+- map したまま `hipMemRelease` すると、メモリーは unmap まで使え、unmap で解放されます。
+- 512 MiB のセグメント 4 つで縮小・復元を 20 回繰り返した後、HIP とカーネル側の両方でリークはありませんでした（縮小と復元の間を 100 ms 空けた場合）。
+- 速度は通常の device メモリーと同じでした（host とのコピー 7.1 GB/s、2 GiB のカーネル読み出し 871 GB/s）。
+  512 MiB のセグメントの割当・map・アクセス権の設定は 0.1 ms、unmap・解放は 0.2 ms です。
+- VRAM を使い切ると、`hipMemCreate` は `hipErrorOutOfMemory` を返し、それまでの割当の内容は保たれます。
+
+止めた理由:
+
+- unmap したアドレスへ別の物理メモリーを map してすぐ書くと、書き込みが前に map していた物理メモリーへ行きます（2 MiB で 10 回中 6〜10 回）。
+  unmap と map の間を 1 ms 以上空けると起きませんでした。
+- そのアドレスに書いた後、隣のアドレスへ別の物理メモリーを map すると、前のアドレスが隣の新しいメモリーを指すことがあります。
+  前のアドレスに書いた内容は失われ、隣と同じメモリーを読み書きします（2 MiB で 10 回中 0〜4 回、512 MiB では unmap と map の間を 100 ms 空けても 5 回中 1 回）。
+- ROCr の `hsa_amd_vmem_*` を直接呼んでも同じなので、HIP のランタイムより下（ROCr の仮想メモリーか、カーネルのドライバー）の問題です。
+  UR のパッチでも XeStrata の側でも直せません。
+- `vram_elastic` の復元は、縮小で unmap したアドレスへ新しい物理メモリーを map し、続くセグメントをその隣に map します。
+  `--kv-grow` は、キャッシュから外した物理メモリーをすぐ K/V のアドレスへ map し、返すときは別の物理メモリーをキャッシュのアドレスへ map し直します。
+  どちらもこの手順に当たり、エキスパートや K/V の中身がエラーを出さずに壊れます。
+
+空き容量について分かったこと（手順 4 の前提）:
+
+- 解放した VRAM は、HIP の空きにはすぐ戻り、カーネル側の数え方では 40 ms 後に戻ります（`hipMemRelease` と `hipFree` のどちらも）。
+- 同じ GPU で Vulkan のエンコーダーが約 1 GiB を使っていても、HIP の空きは減りません。
+  HIP の空きに合わせて割り当てると、エンコーダーの約 870 MiB が GTT へ追い出され、1 枚のエンコードは 1.37 秒から 5.5 秒になりました。
+  VRAM を空けても、エンコーダーを起動し直すまで速さは戻りません。
+
+## 再開の条件
+
+- 別の物理メモリーへの map し直しと、その隣への map を、unmap の直後と間を空けた場合の両方で正しく扱う ROCm（ROCr とカーネルのドライバー）が出たら、手順 1 をやり直し、通れば手順 2 から始めます。
+- intel/llvm の sycl ブランチには HIP の VMM の実装が入りました（c13ad6c7、#22671）。
+  これを含む intel/llvm に上げると、HIP のデバイスが仮想メモリーに対応すると答え、粒度が 2 MiB なので、指定しない起動でも `--kv-grow` が有効になります（[DETAILS](DETAILS.ja.md#kv-キャッシュの置き場所と精度)）。
+  上げる前に、この不具合のある実行時ライブラリーでは仮想メモリーを使わない判定を入れます。
+- HIP に依らない部分（resident モードでの `vram_elastic`、カーネル側の空きによる容量の判定）は、ほかの GPU でも意味がありますが、まだ始めていません。
+
 ## 実装上の根拠
 
 | 箇所 | 現在の制約と対応 |
 | --- | --- |
-| intel/llvm v7.2.0 の UR HIP アダプター | `device.cpp` の VMM 能力照会は false 固定で、`virtual_mem.cpp` と `physical_mem.cpp` は未実装です。既存の番号付きパッチ機構で補います。 |
+| intel/llvm v7.2.0 の UR HIP アダプター | `device.cpp` の VMM 能力照会は false 固定で、`virtual_mem.cpp` と `physical_mem.cpp` は未実装です。intel/llvm の sycl ブランチには実装があり（c13ad6c7、#22671）、v7.2.0 の木にそのまま当たります。補うときは、既存の番号付きパッチ機構でこれを移します。 |
 | [generate.cpp](../src/program/generate.cpp) の `vram_elastic` 判定 | resident モード（`resident_cpu_experts` か `resident_gib`）を禁止しています。ファイルへの読み出しと復元の安全性を試験してから制約を緩めます。 |
 | `generate.cpp` の `--kv-grow` 判定 | `resident_cpu_experts` だけを見ており、RAM が少ないときの resident への自動移行より前に決まります。HIP で VMM が使えるようになると、指定しない起動でも resident モードで `--kv-grow` が入り得ます。 |
 | [ExpertCache](../include/strata/core/expert_cache.hpp) | graph、verify plan、prefill がキャッシュのアドレスを保持します。予約した仮想アドレスを維持し、物理メモリーだけを付け外しします。 |
 | [FileExpertSource](../src/core/expert_source.cpp) | RAM にないエキスパートは既存のファイル読み出しで補えます。RAM の写しは GPU にないエキスパートと prefill の貸出枠のエキスパートを持つので、縮小で貸出枠が写しのない枠へ移ると、prefill がチャンクごとにファイルを読みます（upstream #669）。縮小に合わせて RAM の写しを増やす設計にはしません。 |
 | `generate.cpp` の `vram_command` にある grow | `blob_to_copy` の一時バッファーを queued 転送の完了前に再利用し得ます。既存 prefill の refill と同じ寿命管理にします。 |
-| `generate.cpp` の `vram_command` の容量計算 | 縮小量と答えの `vram_free_mib` を `gpu::mem_info`（HIP では hipMemGetInfo）から求めます。HIP の空きは、同じ GPU のほかのプログラムの割当を引かない場合があります。 |
+| `generate.cpp` の `vram_command` の容量計算 | 縮小量と答えの `vram_free_mib` を `gpu::mem_info`（HIP では hipMemGetInfo）から求めます。HIP の空きは、同じ GPU のほかのプログラムの割当を引きません（手順 1 で Vulkan の割当について確認）。 |
 | [gpu.cpp](../src/core/gpu.cpp) と [expert_cache.cpp](../src/core/expert_cache.cpp) | `vmem_unmap` の失敗を shrink が受け取れません。解放に失敗した領域を解放済みと報告しないようにします。 |
 | [server.py](../serve/server.py) の `_vision_up` と `vision_attempts` | elastic のエンコーダーは起動時に作らないので、設定の fallback は起動時にしか試されません。画像の番で起動に失敗したエンコーダーは、server を再起動するまで止まったままです。 |
 
 ## 実装手順
+
+手順 2 以降は、手順 1 が通らなかったので行っていません。[再開の条件](#再開の条件)を満たしたときの手順として残します。
 
 ### 1. HIP VMM の実動作を確かめる
 
@@ -56,14 +107,17 @@ HIP の空き VRAM と同じ GPU のカーネル側の表示も比較し、割�
 外部の Vulkan エンコーダーとの同居、GTT への退避を確認します。
 対象の PCI アドレスや試験環境は `LOCAL.md` から取ります。
 
+再割当は、unmap の直後と間を空けた場合の両方で、同じ物理メモリーと別の物理メモリーについて確かめ、その後に隣のアドレスへ map したときの前のアドレスの内容も確かめます。
+2026-10-26 の結果は[手順 1 の結果](#手順-1-の結果)にあります。
+
 ### 2. UR HIP アダプターに VMM を実装する
 
-パッチを書く前に、intel/llvm の sycl ブランチに HIP の VMM の実装が入っていないかを確かめ、入っていればそれを移します。
+intel/llvm の sycl ブランチにある HIP の VMM の実装（c13ad6c7、#22671）を移します。
 `third_party/main/intel-llvm/patches/` に `NN-hip-virtual-memory.patch` を追加し、
 UR の `device.cpp`、`physical_mem.hpp/.cpp`、`virtual_mem.cpp` を対象にします。
 パッチの先頭には、既存のパッチと同じく SPDX の行と、何を直すかの説明を書きます。
-CUDA アダプターを参照し、HIP の能力照会、粒度、デバイスの選択、アクセス権、ハンドルの参照数、
-エラー変換、途中失敗時の解放を実装します。非対応のデバイスは非対応と答えます。
+HIP の能力照会、粒度、デバイスの選択、アクセス権、ハンドルの参照数、エラー変換、途中失敗時の解放が、
+CUDA アダプターと同じ扱いになっていることを確かめます。非対応のデバイスは非対応と答えます。
 
 XeStrata の core は既存の `sycl_ext_oneapi_virtual_mem` を使い、HIP API は UR 内に置きます。
 セグメントの大きさはデバイスが報告する粒度と既存の設定から決め、GPU 名による分岐を加えません。
